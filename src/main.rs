@@ -60,7 +60,7 @@ fn main() {
         exit(0);
     } else {
         let home_dir = env::var("HOME").expect("Unable to get home directory");
-        let config_path = format!("{}/.config/cava-wallpaper/config.toml", home_dir);
+        let config_path = format!("{}/.config/wallpaper-cava/config.toml", home_dir);
         config_filename = if fs::metadata(&config_path).is_ok() {
             config_path
         } else {
