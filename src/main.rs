@@ -47,17 +47,25 @@ const VERTEX_SHADER_SRC: &str = include_str!("shaders/vertex_shader.glsl");
 const FRAGMENT_SHADER_SRC: &str = include_str!("shaders/fragment_shader.glsl");
 
 fn main() {
-    let mut config_filename = "config.toml";
+    let config_filename: String;
     let args: Vec<String> = env::args().collect();
     if args.len() == 3 {
         if args[1] != "--config" {
             print_help();
             exit(0);
         }
-        config_filename = &args[2];
+        config_filename = args[2].clone();
     } else if args.len() != 1 {
         print_help();
         exit(0);
+    } else {
+        let home_dir = env::var("HOME").expect("Unable to get home directory");
+        let config_path = format!("{}/.config/wallpaper-cava/config.toml", home_dir);
+        config_filename = if fs::metadata(&config_path).is_ok() {
+            config_path
+        } else {
+            "config.toml".to_string()
+        }
     }
     let cava_output_config: HashMap<String, String> = HashMap::from([
         ("method".into(), "raw".into()),
