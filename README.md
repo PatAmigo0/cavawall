@@ -6,7 +6,7 @@ Built using [wayland-rs](https://github.com/Smithay/wayland-rs), [smithay-client
 
 ### Building
 
-1. Clone this repo: `git clone --recursive git@github.com:rs-pro0/wallpaper-cava`
+1. Clone this repo: `git clone --recursive https://github.com/rs-pro0/wallpaper-cava.git`
 2. Build using Cargo: `cargo build --release`.
 3. Ensure you have [cava](https://github.com/karlstav/cava) installed.
 4. You can run `target/release/wallpaper-cava`.
