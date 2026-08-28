@@ -7,8 +7,9 @@ use smithay_client_toolkit::registry::ProvidesRegistryState;
 use smithay_client_toolkit::shell::wlr_layer::{
     Anchor, Layer, LayerShell, LayerShellHandler, LayerSurface, LayerSurfaceConfigure,
 };
+use smithay_client_toolkit::shell::WaylandSurface;
 use smithay_client_toolkit::{
-    compositor::{CompositorHandler, CompositorState},
+    compositor::{CompositorHandler, CompositorState, Region},
     output::{OutputHandler, OutputState},
     registry::RegistryState,
 };
@@ -143,9 +144,28 @@ fn main() {
         Some("wallpaper-cava"),
         None,
     );
+    // Empty input region: a wallpaper must never accept pointer input.
+    //
+    // Without this the surface keeps the default input region (its whole area),
+    // so it silently takes pointer focus over the entire screen. It never calls
+    // set_cursor, and in Wayland the cursor shape is whatever the focused
+    // surface last asked for -- so the shape from the previous window (e.g. the
+    // I-beam from a terminal) stays until some other client sets one. Moving
+    // onto an "empty" workspace leaves a stale cursor.
+    //
+    // Being invisible does not help: the silence-skip patch stops it DRAWING,
+    // but the surface stays mapped and keeps its input region.
+    //
+    // set_input_region has copy semantics and the wl_region may be destroyed
+    // immediately, so letting it drop after the commit is fine.
+    let input_region = Region::new(&compositor).ok();
+    if let Some(r) = &input_region {
+        layer_surface.set_input_region(Some(r.wl_region()));
+    }
     layer_surface.set_size(256, 256);
     layer_surface.set_anchor(Anchor::TOP);
     surface.commit();
+    drop(input_region);
     egl.bind_api(egl::OPENGL_API).unwrap();
     let egl_display = unsafe {
         egl.get_display(conn.display().id().as_ptr() as *mut std::ffi::c_void)
@@ -503,9 +523,16 @@ impl OutputHandler for AppState {
             let logical_size = info.logical_size.unwrap();
             self.width = logical_size.0 as u32;
             self.height = logical_size.1 as u32;
+            // same empty input region as at startup -- the surface is
+            // recreated here, so it would otherwise regain the default one
+            let input_region = Region::new(&self.compositor).ok();
+            if let Some(r) = &input_region {
+                self.layer_surface.set_input_region(Some(r.wl_region()));
+            }
             self.layer_surface.set_size(self.width, self.height);
             self.layer_surface.set_anchor(Anchor::TOP);
             self.surface.commit();
+            drop(input_region);
             old_surface.destroy();
         }
     }
