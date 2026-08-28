@@ -188,6 +188,13 @@ fn main() {
     if let Some(r) = &input_region {
         layer_surface.set_input_region(Some(r.wl_region()));
     }
+    // -1, not the default 0. Zero means "reserve nothing, but stay inside the
+    // area other layers have reserved", so any bar with an exclusive zone
+    // shifts and shrinks the wallpaper: on a 1920-wide output with a bar, this
+    // surface was placed at x=25 and ran 25px off the right edge. -1 means
+    // "ignore exclusive zones", which is what a wallpaper wants -- it belongs
+    // to the output, not to whatever is left over.
+    layer_surface.set_exclusive_zone(-1);
     layer_surface.set_size(256, 256);
     layer_surface.set_anchor(Anchor::TOP);
     surface.commit();
@@ -685,6 +692,7 @@ impl OutputHandler for AppState {
             // height rather than max_height of it.
             let band = ((self.height as f32 * self.max_height).ceil() as u32)
                 .clamp(1, self.height);
+            self.layer_surface.set_exclusive_zone(-1); // see note at startup
             self.layer_surface.set_size(self.width, band);
             self.layer_surface.set_anchor(Anchor::BOTTOM);
             self.surface.commit();
