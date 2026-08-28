@@ -113,16 +113,24 @@ fn main() {
         libc::signal(libc::SIGINT, on_terminate as *const () as libc::sighandler_t);
     }
 
-    let cava_output_config: HashMap<String, String> = HashMap::from([
-        ("method".into(), "raw".into()),
-        ("raw_target".into(), "/dev/stdout".into()),
-        ("bit_format".into(), "16bit".into()),
-    ]);
     let config_str = fs::read_to_string(config_filename).expect("Unable to read config file");
     let config: Config = match toml::from_str(&config_str) {
         Ok(config) => config,
         Err(error) => panic!("Error parsing config: {}", error.message()),
     };
+    let mut cava_output_config: HashMap<String, String> = HashMap::from([
+        ("method".into(), "raw".into()),
+        ("raw_target".into(), "/dev/stdout".into()),
+        ("bit_format".into(), "16bit".into()),
+    ]);
+    // Only forwarded when set, so leaving it out keeps cava's own default
+    // rather than this program quietly picking one.
+    if let Some(ch) = &config.general.channels {
+        cava_output_config.insert("channels".into(), ch.clone());
+    }
+    if let Some(mo) = &config.general.mono_option {
+        cava_output_config.insert("mono_option".into(), mo.clone());
+    }
     let cava_config = CavaConfig {
         general: CavaGeneralConfig {
             framerate: config.general.framerate,
@@ -138,6 +146,12 @@ fn main() {
         output: cava_output_config,
     };
     let string_cava_config: String = toml::to_string(&cava_config).unwrap();
+    // CAVAWALL_DEBUG=1 shows exactly what cava is being told. cava is spawned
+    // with its config on stdin, so there is no file to inspect afterwards and
+    // no other way to check a setting actually got through.
+    if std::env::var("CAVAWALL_DEBUG").is_ok_and(|v| v != "0") {
+        eprintln!("cavawall: cava config >>>\n{string_cava_config}<<<");
+    }
     let mut cmd = Command::new("cava");
     cmd.arg("-p").arg("/dev/stdin");
     let cava_process = cmd
