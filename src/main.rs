@@ -443,9 +443,12 @@ impl AppState {
         let fwidth: f32 = self.width as f32;
         let fheight: f32 = self.height as f32;
         for i in 0..self.bar_count as usize {
-            // NDC space: -1.0 = bottom, +1.0 = top. max_height caps how far up
-            // the full-volume bar can reach, as a fraction of total screen height.
-            let bar_height: f32 = self.max_height * 2.0 * unpacked_data[i] - 1.0;
+            // NDC space: -1.0 = bottom, +1.0 = top. max_height is NOT applied
+            // here any more: the surface has already been sized to that fraction
+            // of the screen, so a full-volume bar fills it exactly. Applying it
+            // twice would make the bars max_height^2 of the screen -- which is
+            // what the first attempt at this looked like, visibly short.
+            let bar_height: f32 = 2.0 * unpacked_data[i] - 1.0;
             vertices[i * 8] = bar_gap_width * i as f32 + bar_width * i as f32 - 1.0;
             vertices[i * 8 + 1] = bar_height;
             vertices[i * 8 + 2] = bar_gap_width * i as f32 + bar_width * (i + 1) as f32 - 1.0;
@@ -533,8 +536,28 @@ impl OutputHandler for AppState {
             if let Some(r) = &input_region {
                 self.layer_surface.set_input_region(Some(r.wl_region()));
             }
-            self.layer_surface.set_size(self.width, self.height);
-            self.layer_surface.set_anchor(Anchor::TOP);
+            // Only ask for the band the bars can actually reach, anchored to the
+            // bottom they grow from.
+            //
+            // Hyprland damages a layer by its GEOMETRY, not by the buffer damage
+            // a client declares -- verified by trying the latter first:
+            // eglSwapBuffersWithDamageKHR sent .damage_buffer(0, 377, 1920, 703)
+            // 331 times and the damage overlay still showed the whole output.
+            // Shrinking the surface moved it immediately. So surface size is the
+            // only lever a client has here.
+            //
+            // max_height caps how far up a full-volume bar goes, as a fraction of
+            // the screen, so anything above it is cleared-transparent every frame
+            // and recomposited for nothing. With the default 0.65 that is the top
+            // 35% of the output.
+            //
+            // The bar NDC is rescaled to match (see draw) so the bars look
+            // identical -- inside a surface that IS the band, they use its full
+            // height rather than max_height of it.
+            let band = ((self.height as f32 * self.max_height).ceil() as u32)
+                .clamp(1, self.height);
+            self.layer_surface.set_size(self.width, band);
+            self.layer_surface.set_anchor(Anchor::BOTTOM);
             self.surface.commit();
             drop(input_region);
             old_surface.destroy();
