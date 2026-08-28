@@ -6,6 +6,17 @@ framerate = 60
 background_color = { hex = "#000000", alpha = 0.0 }
 # autosens = true
 # sensitivity = 100
+# Mirroring. cava defaults to channels = "stereo", and stereo does NOT give
+# each bar its own frequency band: it splits the bars in half, drawing the left
+# channel REVERSED across the left half and the right channel across the right
+# half. Most music has near-identical channels, so the two halves come out as
+# mirror images with the bass meeting in the middle.
+#
+# Set "mono" for a single left-to-right spectrum across every bar. Left unset,
+# cava's own default applies.
+# channels = "mono"
+# With mono: "average" (cava's default), "left" or "right".
+# mono_option = "average"
 # Optionally you can set your monitor name, if your are on hyprland you can get it using `hyprctl monitors all`
 # preferred_output = ""
 
