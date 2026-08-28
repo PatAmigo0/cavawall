@@ -1,10 +1,10 @@
 [package]
-name = "wallpaper-cava"
+name = "cavalier"
 version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "wallpaper-cava"
+name = "cavalier"
 path = "src/main.rs"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -22,7 +22,12 @@ khronos-egl = { version = "6.0.0", features = [
     "1_5",
 ] }
 serde = { version = "1.0.203", features = ["derive"] }
-smithay-client-toolkit = { git = "https://github.com/Smithay/client-toolkit.git" }
+# Pinned to an explicit revision. Upstream tracked this git dependency without
+# one, so cargo re-resolved it to whatever HEAD happened to be -- and HEAD has
+# since moved the delegate macros, which breaks the build outright. That is why
+# upstream's README insists on `cargo install --locked`; with a rev here, an
+# ordinary `cargo build` is reproducible and --locked is no longer load-bearing.
+smithay-client-toolkit = { git = "https://github.com/Smithay/client-toolkit.git", rev = "9aeccd9047ec631eafcd4dd63f9420b7fc3cc8d7" }
 toml = "0.8.14"
 wayland-client = "0.31.2"
 wayland-egl = "0.32.0"

@@ -33,6 +33,20 @@ use std::sync::atomic::{AtomicBool, Ordering};
 // cleanly instead of being killed mid-frame.
 static EXITING: AtomicBool = AtomicBool::new(false);
 
+/// Below this, a bar counts as silence. Shared by draw() and poll_resume():
+/// they are the two halves of one decision (park / unpark) and drifting apart
+/// would mean parking at one threshold and waking at another.
+const SILENCE_THRESHOLD: f32 = 0.005;
+/// The same threshold in cava's raw 16-bit units, for comparing without
+/// unpacking to f32 first.
+const SILENCE_RAW: u16 = (SILENCE_THRESHOLD * 65530.0) as u16;
+/// Frames of continuous silence before parking. Measured, not guessed: with
+/// monstercat=1.5 and noise_reduction=60 a tone cut from full volume decays
+/// below the threshold in 8 frames (0.18s). 23 frames is 0.51s -- roughly 3x
+/// the real decay, the remainder being hysteresis so that a gap between tracks
+/// does not park and unpark repeatedly.
+const SILENT_GRACE_FRAMES: u32 = 23;
+
 extern "C" fn on_terminate(_sig: libc::c_int) {
     // Only async-signal-safe work here: flip a flag, nothing else.
     EXITING.store(true, Ordering::SeqCst);
@@ -72,20 +86,31 @@ fn main() {
         exit(0);
     } else {
         let home_dir = env::var("HOME").expect("Unable to get home directory");
-        let config_path = format!("{}/.config/wallpaper-cava/config.toml", home_dir);
-        config_filename = if fs::metadata(&config_path).is_ok() {
-            config_path
+        let own = format!("{}/.config/cavalier/config.toml", home_dir);
+        // Upstream's path is still honoured so that anyone switching over from
+        // wallpaper-cava keeps a working visualiser before they move anything.
+        let inherited = format!("{}/.config/wallpaper-cava/config.toml", home_dir);
+        config_filename = if fs::metadata(&own).is_ok() {
+            own
+        } else if fs::metadata(&inherited).is_ok() {
+            eprintln!(
+                "cavalier: using {inherited}\n\
+                 cavalier: move it to ~/.config/cavalier/config.toml when convenient"
+            );
+            inherited
         } else {
             "config.toml".to_string()
         }
     }
-    // Shut down cleanly on SIGTERM so the surface can be cleared first --
-    // wallpaper-cava-launch and fullscreen-watch both stop us this way, and a
-    // hard kill leaves our last frame burnt into the background (the layer
-    // surface goes away, but Hyprland does not reliably repaint underneath it).
+    // Shut down cleanly on SIGTERM so the surface can be cleared first. A hard
+    // kill leaves the last frame burnt into the background: the layer surface
+    // goes away, but Hyprland does not reliably repaint underneath it, so a
+    // frozen strip of bars stays on the wallpaper until something else forces a
+    // redraw. Anything that stops this process (a session manager, a
+    // fullscreen watcher) should therefore use SIGTERM, not SIGKILL.
     unsafe {
-        libc::signal(libc::SIGTERM, on_terminate as libc::sighandler_t);
-        libc::signal(libc::SIGINT, on_terminate as libc::sighandler_t);
+        libc::signal(libc::SIGTERM, on_terminate as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGINT, on_terminate as *const () as libc::sighandler_t);
     }
 
     let cava_output_config: HashMap<String, String> = HashMap::from([
@@ -142,7 +167,7 @@ fn main() {
         &qh,
         surface.clone(),
         Layer::Bottom,
-        Some("wallpaper-cava"),
+        Some("cavalier"),
         None,
     );
     // Empty input region: a wallpaper must never accept pointer input.
@@ -460,7 +485,6 @@ impl AppState {
             if self.cava_reader.read_exact(&mut buf).is_err() {
                 return;
             }
-            const SILENCE_RAW: u16 = (0.005 * 65530.0) as u16;
             if buf
                 .chunks_exact(2)
                 .any(|c| u16::from_le_bytes([c[0], c[1]]) > SILENCE_RAW)
@@ -517,9 +541,6 @@ impl AppState {
         // costs almost nothing -- parking sets a flag, unparking is one commit
         // -- and is invisible, since the bars are already at zero whenever it
         // happens.
-        const SILENCE_THRESHOLD: f32 = 0.005;
-        const SILENCE_RAW: u16 = (SILENCE_THRESHOLD * 65530.0) as u16;
-        const SILENT_GRACE_FRAMES: u32 = 23;
         if unpacked_data.iter().all(|&v| v < SILENCE_THRESHOLD) {
             self.silent_frames = self.silent_frames.saturating_add(1);
         } else {
@@ -632,7 +653,7 @@ impl OutputHandler for AppState {
                 qh,
                 self.surface.clone(),
                 Layer::Bottom,
-                Some("wallpaper-cava"),
+                Some("cavalier"),
                 Some(&output),
             );
             let logical_size = info.logical_size.unwrap();
