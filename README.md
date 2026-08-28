@@ -1,4 +1,4 @@
-# cavalier
+# cavawall
 
 A Wayland audio visualiser that draws [cava](https://github.com/karlstav/cava)
 over your wallpaper.
@@ -65,17 +65,17 @@ supposed to apply. They live in the history here instead, one commit each.
 Needs [cava](https://github.com/karlstav/cava) at runtime.
 
 ```bash
-git clone https://github.com/<you>/cavalier
-cd cavalier
+git clone https://github.com/<you>/cavawall
+cd cavawall
 cargo build --release
-./target/release/cavalier
+./target/release/cavawall
 ```
 
 No `--recursive`, no `--locked`, no submodules.
 
 ## Configuration
 
-`~/.config/cavalier/config.toml`, or `--config <path>`. If that file is absent
+`~/.config/cavawall/config.toml`, or `--config <path>`. If that file is absent
 but `~/.config/wallpaper-cava/config.toml` exists it is read instead, with a
 notice, so switching over from upstream needs no immediate action.
 
@@ -92,14 +92,14 @@ See [`config.toml`](config.toml) for the annotated defaults.
 | `colors.*` | gradient stops, bottom to top; names are ignored |
 | `smoothing.*` | passed straight through to cava |
 
-`CAVALIER_DEBUG=1` reports per-frame draw activity on stderr.
+`CAVAWALL_DEBUG=1` reports per-frame draw activity on stderr.
 
 ### Compositor notes
 
-The layer-shell namespace is `cavalier`. On Hyprland, skip the map animation:
+The layer-shell namespace is `cavawall`. On Hyprland, skip the map animation:
 
 ```
-layerrule = noanim, cavalier
+layerrule = noanim, cavawall
 ```
 
 Without it the surface can strand mid-fade at alpha 0 if the shell is recreated
