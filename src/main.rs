@@ -86,7 +86,7 @@ fn main() {
         exit(0);
     } else {
         let home_dir = env::var("HOME").expect("Unable to get home directory");
-        let own = format!("{}/.config/cavalier/config.toml", home_dir);
+        let own = format!("{}/.config/cavawall/config.toml", home_dir);
         // Upstream's path is still honoured so that anyone switching over from
         // wallpaper-cava keeps a working visualiser before they move anything.
         let inherited = format!("{}/.config/wallpaper-cava/config.toml", home_dir);
@@ -94,8 +94,8 @@ fn main() {
             own
         } else if fs::metadata(&inherited).is_ok() {
             eprintln!(
-                "cavalier: using {inherited}\n\
-                 cavalier: move it to ~/.config/cavalier/config.toml when convenient"
+                "cavawall: using {inherited}\n\
+                 cavawall: move it to ~/.config/cavawall/config.toml when convenient"
             );
             inherited
         } else {
@@ -167,7 +167,7 @@ fn main() {
         &qh,
         surface.clone(),
         Layer::Bottom,
-        Some("cavalier"),
+        Some("cavawall"),
         None,
     );
     // Empty input region: a wallpaper must never accept pointer input.
@@ -660,7 +660,7 @@ impl OutputHandler for AppState {
                 qh,
                 self.surface.clone(),
                 Layer::Bottom,
-                Some("cavalier"),
+                Some("cavawall"),
                 Some(&output),
             );
             let logical_size = info.logical_size.unwrap();
