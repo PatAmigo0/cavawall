@@ -47,6 +47,164 @@ const SILENCE_RAW: u16 = (SILENCE_THRESHOLD * 65530.0) as u16;
 /// does not park and unpark repeatedly.
 const SILENT_GRACE_FRAMES: u32 = 23;
 
+/// CAVALIER_DEBUG=1 reports what the draw loop actually did each frame.
+///
+/// Worth keeping: the entire point of this fork is *not* drawing things, and a
+/// column that is silently skipped looks exactly like a column that is broken.
+/// Without a way to see the commit count, the only instrument left is the
+/// compositor's damage log.
+/// Minimum movement, in pixels, before a column is redrawn.
+///
+/// 1 means "redraw whenever the top edge moves at all", which sounds right and
+/// is nearly useless: a 702px band moves a whole pixel for a 0.14% change in
+/// cava's value, and cava's smoothed output jitters more than that on every
+/// band while music plays -- measured at 10.97 of 12 columns redrawing per
+/// frame, i.e. almost no saving at all.
+fn threshold_px() -> i32 {
+    static T: std::sync::OnceLock<i32> = std::sync::OnceLock::new();
+    *T.get_or_init(|| {
+        std::env::var("CAVALIER_THRESHOLD_PX")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1)
+            .max(1)
+    })
+}
+
+fn debug_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("CAVALIER_DEBUG").is_ok_and(|v| v != "0"))
+}
+
+/// One bar, one layer surface.
+///
+/// This is the whole reason the fork exists. Measured against Hyprland 0.56.2:
+///
+///   * a layer surface is damaged by its own GEOMETRY -- the `damage_buffer`
+///     rectangles a client declares are ignored outright;
+///   * a subsurface's damage is rolled up into its parent's full geometry, so
+///     splitting the band into subsurfaces buys exactly nothing;
+///   * two separate layer surfaces damage independently, each by its own size.
+///
+/// So the only lever a Wayland client actually has is how many surfaces it is
+/// and how big they are. One surface per bar means a bar that did not change
+/// height is simply never committed, and the compositor never repaints it.
+struct Column {
+    surface: WlSurface,
+    layer_surface: LayerSurface,
+    wl_egl_surface: WlEglSurface,
+    egl_surface: egl::Surface,
+    /// Current size, as the compositor confirmed it in `configure`.
+    w: u32,
+    h: u32,
+    /// Height in whole pixels of the last frame actually committed, or -1 if
+    /// nothing has been drawn yet.
+    ///
+    /// The comparison happens in PIXELS, not in cava's floats. cava quantises
+    /// to 1/65530, so consecutive frames almost always differ by *something*;
+    /// a difference too small to move the top edge by a whole pixel cannot be
+    /// seen, and committing it would damage the column for nothing.
+    last_px: i32,
+    /// Until the compositor has sent a configure, this column has no valid size
+    /// and must not be drawn into.
+    configured: bool,
+}
+
+/// Pixel geometry (left edge, width) of every bar for a given output width.
+///
+/// `gap` is a fraction OF THE BAR WIDTH (upstream's convention), so n bars and
+/// n-1 gaps span `n + (n-1)*gap` bar-widths. Each edge is rounded independently
+/// and the width derived from the two rounded edges, so the columns tile the row
+/// exactly instead of accumulating a fractional drift across the screen.
+///
+/// The gaps are not surfaces at all. Under the old single-surface layout they
+/// were transparent pixels that still got composited; here they are simply
+/// absent, so nothing is drawn or damaged between bars.
+fn column_layout(total_width: u32, bar_count: u32, gap: f32) -> Vec<(i32, u32)> {
+    let n = bar_count.max(1) as f32;
+    let bar_w = total_width as f32 / (n + (n - 1.0) * gap);
+    let stride = bar_w * (1.0 + gap);
+    (0..bar_count)
+        .map(|i| {
+            let left = (i as f32 * stride).round() as i32;
+            let right = (i as f32 * stride + bar_w).round() as i32;
+            (left, (right - left).max(1) as u32)
+        })
+        .collect()
+}
+
+/// Create one column's surface, layer surface and EGL window surface.
+fn make_column(
+    compositor: &CompositorState,
+    layer_shell: &LayerShell,
+    qh: &QueueHandle<AppState>,
+    output: Option<&wl_output::WlOutput>,
+    x: i32,
+    w: u32,
+    h: u32,
+    egl_display: egl::Display,
+    egl_config: egl::Config,
+) -> Column {
+    let surface = compositor.create_surface(qh);
+    let layer_surface =
+        layer_shell.create_layer_surface(qh, surface.clone(), Layer::Bottom, Some("cavalier"), output);
+
+    // Empty input region: a wallpaper must never accept pointer input.
+    //
+    // Without this the surface keeps the default input region (its whole area),
+    // so it silently takes pointer focus. It never calls set_cursor, and in
+    // Wayland the cursor shape is whatever the focused surface last asked for --
+    // so the shape from the previous window (e.g. a terminal's I-beam) stays
+    // until some other client sets one. Moving onto an "empty" workspace leaves
+    // a stale cursor.
+    //
+    // Being invisible does not help: parking stops the DRAWING, but the surface
+    // stays mapped and keeps its input region.
+    //
+    // set_input_region has copy semantics, so the wl_region may be destroyed
+    // immediately after the commit.
+    let input_region = Region::new(compositor).ok();
+    if let Some(r) = &input_region {
+        layer_surface.set_input_region(Some(r.wl_region()));
+    }
+    layer_surface.set_size(w, h);
+    // Bars grow from the bottom, and each column is placed by its left margin.
+    layer_surface.set_anchor(Anchor::BOTTOM | Anchor::LEFT);
+    layer_surface.set_margin(0, 0, 0, x);
+    // -1, not 0. Zero means "reserve nothing, but stay inside the area other
+    // layers have reserved", so a bar with an exclusive zone pushes the whole
+    // row sideways -- measured at +60px, which shifted the last column 60px off
+    // the right edge of the screen. -1 means "ignore exclusive zones entirely",
+    // which is what a wallpaper wants: it belongs to the output, not to the
+    // leftovers. (Upstream had the same bug in a subtler form: its single
+    // full-width surface was centred in the usable area and so sat 25px off.)
+    layer_surface.set_exclusive_zone(-1);
+    surface.commit();
+    drop(input_region);
+
+    let wl_egl_surface = WlEglSurface::new(surface.id(), w as i32, h as i32).unwrap();
+    let egl_surface = unsafe {
+        egl.create_window_surface(
+            egl_display,
+            egl_config,
+            wl_egl_surface.ptr() as egl::NativeWindowType,
+            None,
+        )
+        .unwrap()
+    };
+
+    Column {
+        surface,
+        layer_surface,
+        wl_egl_surface,
+        egl_surface,
+        w,
+        h,
+        last_px: -1,
+        configured: false,
+    }
+}
+
 extern "C" fn on_terminate(_sig: libc::c_int) {
     // Only async-signal-safe work here: flip a flag, nothing else.
     EXITING.store(true, Ordering::SeqCst);
@@ -161,37 +319,10 @@ fn main() {
         .unwrap();
     let frame_duration = Duration::from_secs(1) / config.general.framerate;
     let compositor = CompositorState::bind(&globals, &qh).expect("wl_compositor not available");
-    let surface = compositor.create_surface(&qh);
     let layer_shell = LayerShell::bind(&globals, &qh).expect("layer shell not available");
-    let layer_surface = layer_shell.create_layer_surface(
-        &qh,
-        surface.clone(),
-        Layer::Bottom,
-        Some("cavalier"),
-        None,
-    );
-    // Empty input region: a wallpaper must never accept pointer input.
-    //
-    // Without this the surface keeps the default input region (its whole area),
-    // so it silently takes pointer focus over the entire screen. It never calls
-    // set_cursor, and in Wayland the cursor shape is whatever the focused
-    // surface last asked for -- so the shape from the previous window (e.g. the
-    // I-beam from a terminal) stays until some other client sets one. Moving
-    // onto an "empty" workspace leaves a stale cursor.
-    //
-    // Being invisible does not help: the silence-skip patch stops it DRAWING,
-    // but the surface stays mapped and keeps its input region.
-    //
-    // set_input_region has copy semantics and the wl_region may be destroyed
-    // immediately, so letting it drop after the commit is fine.
-    let input_region = Region::new(&compositor).ok();
-    if let Some(r) = &input_region {
-        layer_surface.set_input_region(Some(r.wl_region()));
-    }
-    layer_surface.set_size(256, 256);
-    layer_surface.set_anchor(Anchor::TOP);
-    surface.commit();
-    drop(input_region);
+
+    // EGL is initialised BEFORE any surface exists, because every column needs
+    // the display and config to build its own window surface.
     egl.bind_api(egl::OPENGL_API).unwrap();
     let egl_display = unsafe {
         egl.get_display(conn.display().id().as_ptr() as *mut std::ffi::c_void)
@@ -228,23 +359,44 @@ fn main() {
         .create_context(egl_display, egl_config, None, &CONTEXT_ATTRIBUTES)
         .unwrap();
 
-    let wl_egl_surface = WlEglSurface::new(surface.id(), 256, 256).unwrap();
-    let egl_surface = unsafe {
-        egl.create_window_surface(
-            egl_display,
-            egl_config,
-            wl_egl_surface.ptr() as egl::NativeWindowType,
-            None,
-        )
-        .unwrap()
-    };
+    // Placeholder geometry. The output size is not known until the compositor
+    // reports it, so the columns are laid out again in new_output(); they are
+    // invisible until then because a surface with no buffer attached shows
+    // nothing, and draw() skips any column that has not been configured.
+    let columns: Vec<Column> = (0..config.bars.amount)
+        .map(|i| {
+            make_column(
+                &compositor,
+                &layer_shell,
+                &qh,
+                None,
+                i as i32 * 16,
+                16,
+                16,
+                egl_display,
+                egl_config,
+            )
+        })
+        .collect();
+
+    // GL setup needs *some* current surface; the first column serves.
     egl.make_current(
         egl_display,
-        Some(egl_surface),
-        Some(egl_surface),
+        Some(columns[0].egl_surface),
+        Some(columns[0].egl_surface),
         Some(egl_context),
     )
     .unwrap();
+
+    // Never block in eglSwapBuffers.
+    //
+    // With one surface, waiting for a frame callback was harmless throttling.
+    // With one surface per bar it is a deadlock risk: a column the compositor
+    // considers hidden may never send a frame callback, and a blocking swap on
+    // it would stall the single thread that drives every other column. Pacing
+    // comes from cava instead -- draw() blocks on its pipe, which emits at
+    // exactly the configured framerate.
+    egl.swap_interval(egl_display, 0).ok();
     gl::load_with(|name| egl.get_proc_address(name).unwrap() as *const std::ffi::c_void);
     let version = unsafe {
         let data = gl::GetString(gl::VERSION) as *const i8;
@@ -318,15 +470,15 @@ fn main() {
         }
     }
 
-    let mut indices: Vec<u16> = vec![0; config.bars.amount as usize * 6];
-    for i in 0..config.bars.amount as usize {
-        indices[i * 6] = i as u16 * 4;
-        indices[i * 6 + 1] = i as u16 * 4 + 1;
-        indices[i * 6 + 2] = i as u16 * 4 + 2;
-        indices[i * 6 + 3] = i as u16 * 4 + 1;
-        indices[i * 6 + 4] = i as u16 * 4 + 2;
-        indices[i * 6 + 5] = i as u16 * 4 + 3;
-    }
+    // A single quad: two triangles over four corners. Upstream needed
+    // bar_count quads because every bar lived in one surface; here each column
+    // is drawn into its own surface and is exactly one quad.
+    //
+    // (Upstream's draw call passed `bar_count * 3 * size_of::<u16>()` as the
+    // index COUNT, with a comment wondering why *3 worked when *6 looked right.
+    // It worked by accident: size_of::<u16>() is 2, so *3*2 == *6. The argument
+    // is a count of indices, not a byte length.)
+    let indices: Vec<u16> = vec![0, 1, 2, 1, 2, 3];
 
     let window_size_string = CString::new("WindowSize").unwrap();
     unsafe {
@@ -373,11 +525,9 @@ fn main() {
         width: 256,
         height: 256,
         layer_shell,
-        layer_surface,
-        surface,
+        columns,
+        band: 16,
         cava_reader,
-        wl_egl_surface,
-        egl_surface,
         egl_config,
         egl_context,
         egl_display,
@@ -397,7 +547,7 @@ fn main() {
         conn: conn.clone(),
     };
     event_loop
-        .run(frame_duration, &mut simple_window, |state| state.poll_resume())
+        .run(frame_duration, &mut simple_window, |state| state.tick())
         .unwrap();
 }
 
@@ -407,11 +557,12 @@ struct AppState {
     width: u32,
     height: u32,
     layer_shell: LayerShell,
-    layer_surface: LayerSurface,
-    surface: WlSurface,
+    /// One per bar, left to right. Replaced wholesale when the output changes.
+    columns: Vec<Column>,
+    /// Height of the band the bars occupy, in output pixels: the surface height
+    /// of every column.
+    band: u32,
     cava_reader: BufReader<ChildStdout>,
-    wl_egl_surface: WlEglSurface,
-    egl_surface: egl::Surface,
     egl_config: egl::Config,
     egl_context: egl::Context,
     egl_display: egl::Display,
@@ -442,13 +593,25 @@ impl AppState {
     /// bars. Without this a hard kill leaves that frame visible on the
     /// background until something else forces a repaint.
     fn clear_and_exit(&mut self, conn: &Connection) -> ! {
-        unsafe {
-            gl::ClearColor(0.0, 0.0, 0.0, 0.0);
-            gl::Clear(gl::COLOR_BUFFER_BIT);
+        let (display, context) = (self.egl_display, self.egl_context);
+        for col in &self.columns {
+            if !col.configured {
+                continue;
+            }
+            let _ = egl.make_current(
+                display,
+                Some(col.egl_surface),
+                Some(col.egl_surface),
+                Some(context),
+            );
+            unsafe {
+                gl::ClearColor(0.0, 0.0, 0.0, 0.0);
+                gl::Clear(gl::COLOR_BUFFER_BIT);
+            }
+            // swap_buffers attaches and commits, so no explicit commit here.
+            let _ = egl.swap_buffers(display, col.egl_surface);
         }
-        let _ = egl.swap_buffers(self.egl_display, self.egl_surface);
-        self.surface.commit();
-        // Round-trip so the commit actually reaches the compositor before the
+        // Round-trip so the commits actually reach the compositor before the
         // process goes away and its objects are destroyed.
         let _ = conn.roundtrip();
         std::process::exit(0);
@@ -463,6 +626,26 @@ impl AppState {
     /// frame at a time at the configured framerate, so a readable fd means a
     /// frame is there; a partial read would complete within one frame period
     /// anyway.
+    /// Called on every event-loop iteration, at least once per frame period.
+    ///
+    /// This is the only thing that drives rendering. Frame callbacks cannot do
+    /// it any more: with one surface per bar, a frame in which no bar moved
+    /// commits nothing, so there would be no callback to drive the next frame
+    /// and the visualiser would stop. Pacing instead comes from cava -- draw()
+    /// blocks on its pipe, which produces exactly one frame per period.
+    pub fn tick(&mut self) {
+        if EXITING.load(Ordering::SeqCst) {
+            let conn = self.conn.clone();
+            self.clear_and_exit(&conn);
+        }
+        if self.idle {
+            self.poll_resume();
+            return;
+        }
+        let (conn, qh) = (self.conn.clone(), self.qh.clone());
+        self.draw(&conn, &qh);
+    }
+
     pub fn poll_resume(&mut self) {
         // SIGTERM is caught by a handler that only sets EXITING; the checks that
         // act on it live in draw(), which does not run while parked. Without
@@ -489,26 +672,26 @@ impl AppState {
                 .chunks_exact(2)
                 .any(|c| u16::from_le_bytes([c[0], c[1]]) > SILENCE_RAW)
             {
-                // Unpark: one commit restarts the frame-callback loop, and
-                // rendering is driven by the compositor again from here.
+                // Unpark. Nothing to commit: rendering is driven by the event
+                // loop's own timeout, not by frame callbacks, so clearing the
+                // flag is the entire operation. (It used to commit here purely
+                // to restart the frame-callback loop, which cost one full-band
+                // damage every time audio resumed.)
                 self.idle = false;
                 self.silent_frames = 0;
-                let qh = self.qh.clone();
-                self.surface.frame(&qh, self.surface.clone());
-                self.surface.commit();
                 return;
             }
         }
     }
 
-    pub fn draw(&mut self, _conn: &Connection, qh: &QueueHandle<Self>) {
+    pub fn draw(&mut self, conn: &Connection, _qh: &QueueHandle<Self>) {
         let mut cava_buffer: Vec<u8> = vec![0; self.bar_count as usize * 2];
         let mut unpacked_data: Vec<f32> = vec![0.0; self.bar_count as usize];
         if let Err(e) = self.cava_reader.read_exact(&mut cava_buffer) {
             // A signal interrupts the blocking read, which is exactly how we
             // find out it is time to go.
             if EXITING.load(Ordering::SeqCst) {
-                self.clear_and_exit(_conn);
+                self.clear_and_exit(conn);
             }
             if e.kind() == std::io::ErrorKind::Interrupted {
                 return;
@@ -516,7 +699,7 @@ impl AppState {
             panic!("cava read failed: {e}");
         }
         if EXITING.load(Ordering::SeqCst) {
-            self.clear_and_exit(_conn);
+            self.clear_and_exit(conn);
         }
         for (unpacked_data_index, i) in (0..cava_buffer.len()).step_by(2).enumerate() {
             let num = u16::from_le_bytes([cava_buffer[i], cava_buffer[i + 1]]);
@@ -565,61 +748,101 @@ impl AppState {
             return;
         }
 
-        let bar_width: f32 =
-            2.0 / (self.bar_count as f32 + (self.bar_count as f32 - 1.0) * self.bar_gap);
-        let bar_gap_width: f32 = bar_width * self.bar_gap;
-        let mut vertices: Vec<f32> = vec![0.0; self.bar_count as usize * 8];
-        let fwidth: f32 = self.width as f32;
-        let fheight: f32 = self.height as f32;
-        for i in 0..self.bar_count as usize {
-            // NDC space: -1.0 = bottom, +1.0 = top. max_height is NOT applied
-            // here any more: the surface has already been sized to that fraction
-            // of the screen, so a full-volume bar fills it exactly. Applying it
-            // twice would make the bars max_height^2 of the screen -- which is
-            // what the first attempt at this looked like, visibly short.
-            let bar_height: f32 = 2.0 * unpacked_data[i] - 1.0;
-            vertices[i * 8] = bar_gap_width * i as f32 + bar_width * i as f32 - 1.0;
-            vertices[i * 8 + 1] = bar_height;
-            vertices[i * 8 + 2] = bar_gap_width * i as f32 + bar_width * (i + 1) as f32 - 1.0;
-            vertices[i * 8 + 3] = bar_height;
-            vertices[i * 8 + 4] = bar_gap_width * i as f32 + bar_width * i as f32 - 1.0;
-            vertices[i * 8 + 5] = -1.0;
-            vertices[i * 8 + 6] = bar_gap_width * i as f32 + bar_width * (i + 1) as f32 - 1.0;
-            vertices[i * 8 + 7] = -1.0;
-        }
-        unsafe {
-            gl::BindVertexArray(self.vao);
-            gl::BindBuffer(gl::ARRAY_BUFFER, self.vbo);
-            gl::BufferData(
-                gl::ARRAY_BUFFER,
-                (vertices.len() * std::mem::size_of::<f32>()) as gl::types::GLsizeiptr,
-                vertices.as_ptr() as *const _,
-                gl::DYNAMIC_DRAW,
-            );
-            gl::Enable(gl::BLEND);
-            gl::BlendFunc(gl::SRC_ALPHA, gl::ONE_MINUS_SRC_ALPHA);
-            gl::ClearColor(
-                self.background_color[0],
-                self.background_color[1],
-                self.background_color[2],
-                self.background_color[3],
-            );
-            gl::Clear(gl::COLOR_BUFFER_BIT);
-            gl::UseProgram(self.shader_program);
-            gl::Uniform2f(self.windows_size_location, fwidth, fheight);
-            gl::DrawElements(
-                gl::TRIANGLES,
-                (self.bar_count as usize * 3 * std::mem::size_of::<u16>()) as gl::types::GLsizei,
-                // I don't know why * 3 works here, I thought that it is supposed to be * 6, but it
-                // works, so I'll keep it like this for now.
-                gl::UNSIGNED_SHORT,
-                ptr::null(),
-            );
-            gl::BindVertexArray(0);
-        }
-        egl.swap_buffers(self.egl_display, self.egl_surface)
+        // Draw only the columns whose top edge actually moved.
+        //
+        // This is where the fork earns its keep. Each column is its own layer
+        // surface, so committing one damages only that column's geometry; a
+        // column that is skipped is not committed, and the compositor does not
+        // repaint it at all.
+        let (display, context) = (self.egl_display, self.egl_context);
+        let (program, vao, vbo, wsl) = (
+            self.shader_program,
+            self.vao,
+            self.vbo,
+            self.windows_size_location,
+        );
+        let bg = self.background_color;
+        let mut drawn = 0u32;
+        let mut unconfigured = 0u32;
+
+        for (i, col) in self.columns.iter_mut().enumerate() {
+            if !col.configured {
+                unconfigured += 1;
+                continue;
+            }
+            // Quantise to whole pixels BEFORE deciding whether to redraw, so
+            // the test asks the only question that matters: would this look
+            // any different?
+            let px = (unpacked_data[i] * col.h as f32).round().clamp(0.0, col.h as f32) as i32;
+            // Redraw only if the top edge moved far enough to be worth a
+            // commit. last_px < 0 means "never drawn", which always draws.
+            if col.last_px >= 0 && (px - col.last_px).abs() < threshold_px() {
+                continue;
+            }
+            col.last_px = px;
+            drawn += 1;
+
+            egl.make_current(
+                display,
+                Some(col.egl_surface),
+                Some(col.egl_surface),
+                Some(context),
+            )
             .unwrap();
-        self.surface.frame(qh, self.surface.clone());
+
+            // NDC: -1.0 is the bottom of the column, +1.0 the top. The bar
+            // spans the column's full width, because the gaps between bars are
+            // not part of any surface any more.
+            //
+            // max_height is NOT applied here: the surface has already been
+            // sized to that fraction of the screen, so a full-volume bar fills
+            // it exactly. Applying it twice makes bars reach max_height^2 of
+            // the screen -- visibly short, which is what the first attempt at
+            // this looked like.
+            let top = 2.0 * (px as f32 / col.h as f32) - 1.0;
+            let vertices: [f32; 8] = [-1.0, top, 1.0, top, -1.0, -1.0, 1.0, -1.0];
+
+            unsafe {
+                // Columns can differ by a pixel in width after rounding, and
+                // the viewport does not follow eglMakeCurrent, so it has to be
+                // set per column. The gradient reads gl_FragCoord.y against
+                // WindowSize.y, so getting this wrong would tilt the colours.
+                gl::Viewport(0, 0, col.w as GLsizei, col.h as GLsizei);
+                gl::BindVertexArray(vao);
+                gl::BindBuffer(gl::ARRAY_BUFFER, vbo);
+                gl::BufferData(
+                    gl::ARRAY_BUFFER,
+                    (vertices.len() * std::mem::size_of::<f32>()) as GLsizeiptr,
+                    vertices.as_ptr() as *const _,
+                    gl::DYNAMIC_DRAW,
+                );
+                gl::Enable(gl::BLEND);
+                gl::BlendFunc(gl::SRC_ALPHA, gl::ONE_MINUS_SRC_ALPHA);
+                gl::ClearColor(bg[0], bg[1], bg[2], bg[3]);
+                gl::Clear(gl::COLOR_BUFFER_BIT);
+                gl::UseProgram(program);
+                // Only .y is read by the fragment shader: the gradient runs
+                // vertically, which is exactly why splitting the band into
+                // vertical columns cannot produce a seam. Every column is the
+                // same height and so resolves the identical gradient.
+                gl::Uniform2f(wsl, col.w as f32, col.h as f32);
+                gl::DrawElements(gl::TRIANGLES, 6, gl::UNSIGNED_SHORT, ptr::null());
+                gl::BindVertexArray(0);
+            }
+            // swap_buffers attaches the new buffer and commits the surface.
+            egl.swap_buffers(display, col.egl_surface).unwrap();
+        }
+        if debug_enabled() {
+            eprintln!(
+                "cavalier: {}/{} columns committed ({} not yet configured)",
+                drawn,
+                self.columns.len(),
+                unconfigured
+            );
+        }
+        // Push the commits out now rather than waiting for the event loop to
+        // come back around.
+        let _ = conn.flush();
     }
 }
 
@@ -647,49 +870,60 @@ impl OutputHandler for AppState {
             need_configuration = true;
         }
         if need_configuration {
-            let old_surface = self.surface.clone();
-            self.surface = self.compositor.create_surface(qh);
-            self.layer_surface = self.layer_shell.create_layer_surface(
-                qh,
-                self.surface.clone(),
-                Layer::Bottom,
-                Some("cavalier"),
-                Some(&output),
-            );
             let logical_size = info.logical_size.unwrap();
             self.width = logical_size.0 as u32;
             self.height = logical_size.1 as u32;
-            // same empty input region as at startup -- the surface is
-            // recreated here, so it would otherwise regain the default one
-            let input_region = Region::new(&self.compositor).ok();
-            if let Some(r) = &input_region {
-                self.layer_surface.set_input_region(Some(r.wl_region()));
-            }
-            // Only ask for the band the bars can actually reach, anchored to the
-            // bottom they grow from.
+
+            // Only the band the bars can actually reach, anchored to the bottom
+            // they grow from.
             //
-            // Hyprland damages a layer by its GEOMETRY, not by the buffer damage
-            // a client declares -- verified by trying the latter first:
-            // eglSwapBuffersWithDamageKHR sent .damage_buffer(0, 377, 1920, 703)
-            // 331 times and the damage overlay still showed the whole output.
-            // Shrinking the surface moved it immediately. So surface size is the
-            // only lever a client has here.
-            //
-            // max_height caps how far up a full-volume bar goes, as a fraction of
-            // the screen, so anything above it is cleared-transparent every frame
-            // and recomposited for nothing. With the default 0.65 that is the top
-            // 35% of the output.
-            //
-            // The bar NDC is rescaled to match (see draw) so the bars look
-            // identical -- inside a surface that IS the band, they use its full
-            // height rather than max_height of it.
+            // max_height caps how far up a full-volume bar goes as a fraction of
+            // screen height, so everything above it used to be cleared to
+            // transparent every frame and recomposited for nothing -- with the
+            // default 0.65, the top 35% of the output.
             let band = ((self.height as f32 * self.max_height).ceil() as u32)
                 .clamp(1, self.height);
-            self.layer_surface.set_size(self.width, band);
-            self.layer_surface.set_anchor(Anchor::BOTTOM);
-            self.surface.commit();
-            drop(input_region);
-            old_surface.destroy();
+            self.band = band;
+
+            let layout = column_layout(self.width, self.bar_count, self.bar_gap);
+            let (display, config) = (self.egl_display, self.egl_config);
+
+            // Replace the columns wholesale. Unbind the context first: NVIDIA's
+            // EGL leaves a destroyed-while-current surface in a state that makes
+            // the replacement fail eglSwapBuffers with EGL_BAD_SURFACE on its
+            // very first draw. Mesa tolerates it, which is why this only ever
+            // reproduced on NVIDIA.
+            egl.make_current(display, None, None, None).ok();
+            for col in self.columns.drain(..) {
+                // Teardown order is load-bearing, innermost first. Destroying
+                // the wl_surface while its zwlr_layer_surface_v1 still refers
+                // to it is a protocol error ("invalid object"), which kills the
+                // connection and makes the very next eglCreateWindowSurface
+                // fail with BadAlloc.
+                egl.destroy_surface(display, col.egl_surface).ok();
+                let Column {
+                    surface,
+                    layer_surface,
+                    wl_egl_surface,
+                    ..
+                } = col;
+                drop(wl_egl_surface); // wl_egl_window
+                drop(layer_surface); // zwlr_layer_surface_v1
+                surface.destroy(); // wl_surface, last
+            }
+            for (x, w) in layout {
+                self.columns.push(make_column(
+                    &self.compositor,
+                    &self.layer_shell,
+                    qh,
+                    Some(&output),
+                    x,
+                    w,
+                    band,
+                    display,
+                    config,
+                ));
+            }
         }
     }
 
@@ -744,14 +978,20 @@ impl CompositorHandler for AppState {
     ) {
     }
 
+    /// Deliberately empty.
+    ///
+    /// Rendering used to be driven by frame callbacks on the one surface. With
+    /// a surface per bar that no longer works: the loop would only be driven by
+    /// whichever columns happened to commit, and a frame in which nothing
+    /// changed would commit nothing and stall it outright. The event loop's own
+    /// timeout drives drawing instead -- see tick().
     fn frame(
         &mut self,
-        conn: &Connection,
-        qh: &QueueHandle<Self>,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
         _surface: &wl_surface::WlSurface,
         _time: u32,
     ) {
-        self.draw(conn, qh);
     }
 
     fn surface_enter(
@@ -779,49 +1019,47 @@ impl LayerShellHandler for AppState {
     fn configure(
         &mut self,
         _conn: &Connection,
-        qh: &QueueHandle<Self>,
-        _layer: &LayerSurface,
+        _qh: &QueueHandle<Self>,
+        layer: &LayerSurface,
         configure: LayerSurfaceConfigure,
         _serial: u32,
     ) {
-        let width = configure.new_size.0;
-        let height = configure.new_size.1;
-        println!(
-            "LayerSurface configure event: width={}, height={}",
-            width, height
-        );
-        self.width = width;
-        self.height = height;
-        // Unbind the context before destroying the surface it is still current
-        // on. NVIDIA's EGL leaves a destroyed-while-current surface in a state
-        // that makes the freshly created replacement fail eglSwapBuffers with
-        // EGL_BAD_SURFACE on the very first draw; Mesa tolerates it, which is
-        // why this only reproduces on NVIDIA.
-        egl.make_current(self.egl_display, None, None, None).ok();
-        egl.destroy_surface(self.egl_display, self.egl_surface)
-            .unwrap();
-        self.wl_egl_surface =
-            WlEglSurface::new(self.surface.id(), self.width as i32, self.height as i32).unwrap();
-        self.egl_surface = unsafe {
+        let (w, h) = configure.new_size;
+        if w == 0 || h == 0 {
+            return;
+        }
+        let (display, config) = (self.egl_display, self.egl_config);
+        let Some(col) = self
+            .columns
+            .iter_mut()
+            .find(|c| c.layer_surface.wl_surface() == layer.wl_surface())
+        else {
+            return;
+        };
+        if col.configured && col.w == w && col.h == h {
+            return;
+        }
+
+        // Unbind before destroying the surface the context is current on -- see
+        // the note in new_output(); this is the NVIDIA EGL_BAD_SURFACE path.
+        egl.make_current(display, None, None, None).ok();
+        egl.destroy_surface(display, col.egl_surface).ok();
+
+        col.w = w;
+        col.h = h;
+        col.wl_egl_surface = WlEglSurface::new(col.surface.id(), w as i32, h as i32).unwrap();
+        col.egl_surface = unsafe {
             egl.create_window_surface(
-                self.egl_display,
-                self.egl_config,
-                self.wl_egl_surface.ptr() as egl::NativeWindowType,
+                display,
+                config,
+                col.wl_egl_surface.ptr() as egl::NativeWindowType,
                 None,
             )
             .unwrap()
         };
-        egl.make_current(
-            self.egl_display,
-            Some(self.egl_surface),
-            Some(self.egl_surface),
-            Some(self.egl_context),
-        )
-        .unwrap();
-        unsafe {
-            gl::Viewport(0, 0, self.width as GLsizei, self.height as GLsizei);
-        }
-        self.draw(_conn, qh);
-        println!("configure finished");
+        // Size changed, so whatever was on screen is gone: force a redraw
+        // rather than trusting the cached pixel height.
+        col.last_px = -1;
+        col.configured = true;
     }
 }
