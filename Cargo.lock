@@ -54,7 +54,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "cavalier"
+name = "cavawall"
 version = "0.1.0"
 dependencies = [
  "gl",
