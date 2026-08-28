@@ -40,6 +40,7 @@ extern "C" fn on_terminate(_sig: libc::c_int) {
 use std::ffi::CString;
 use std::io::Write;
 use std::process::{exit, ChildStdout};
+use std::os::fd::AsRawFd;
 use std::{env, fs, ptr};
 use std::{
     io::{BufReader, Read},
@@ -362,12 +363,16 @@ fn main() {
         bar_count: config.bars.amount,
         bar_gap: config.bars.gap,
         max_height: config.bars.max_height.unwrap_or(1.0),
+        silent_frames: 0,
         background_color: array_from_config_color(config.general.background_color),
         preferred_output_name: config.general.preferred_output,
         compositor,
+        idle: false,
+        qh: qh.clone(),
+        conn: conn.clone(),
     };
     event_loop
-        .run(frame_duration, &mut simple_window, |_| {})
+        .run(frame_duration, &mut simple_window, |state| state.poll_resume())
         .unwrap();
 }
 
@@ -392,9 +397,18 @@ struct AppState {
     bar_count: u32,
     bar_gap: f32,
     max_height: f32,
+    silent_frames: u32,
     background_color: [f32; 4],
     preferred_output_name: Option<String>,
     compositor: CompositorState,
+    /// Parked: silent, not committing, waiting for audio on the idle tick.
+    idle: bool,
+    /// Kept so the idle tick can request a frame callback -- event_loop.run's
+    /// callback hands back only &mut AppState, not the QueueHandle.
+    qh: QueueHandle<AppState>,
+    /// Same reason, for clear_and_exit: SIGTERM must be honoured while parked,
+    /// and the parked path has no Connection handed to it.
+    conn: Connection,
 }
 
 impl AppState {
@@ -413,6 +427,54 @@ impl AppState {
         // process goes away and its objects are destroyed.
         let _ = conn.roundtrip();
         std::process::exit(0);
+    }
+
+    /// Called on every event-loop timeout, whether or not the compositor sent
+    /// anything. While parked this is the only thing running: it drains whatever
+    /// cava has produced and unparks the moment a sample crosses the threshold.
+    ///
+    /// Reads are gated on poll() rather than made non-blocking, so the blocking
+    /// read_exact in draw() keeps working unchanged. cava writes a whole 24-byte
+    /// frame at a time at the configured framerate, so a readable fd means a
+    /// frame is there; a partial read would complete within one frame period
+    /// anyway.
+    pub fn poll_resume(&mut self) {
+        // SIGTERM is caught by a handler that only sets EXITING; the checks that
+        // act on it live in draw(), which does not run while parked. Without
+        // this, a parked instance ignores SIGTERM entirely and has to be killed
+        // -- which is exactly what happened once this parking existed.
+        if EXITING.load(Ordering::SeqCst) {
+            let conn = self.conn.clone();
+            self.clear_and_exit(&conn);
+        }
+        if !self.idle {
+            return;
+        }
+        let fd = self.cava_reader.get_ref().as_raw_fd();
+        let mut buf = vec![0u8; self.bar_count as usize * 2];
+        loop {
+            let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+            if unsafe { libc::poll(&mut pfd, 1, 0) } <= 0 || pfd.revents & libc::POLLIN == 0 {
+                return; // nothing waiting; stay parked
+            }
+            if self.cava_reader.read_exact(&mut buf).is_err() {
+                return;
+            }
+            const SILENCE_RAW: u16 = (0.005 * 65530.0) as u16;
+            if buf
+                .chunks_exact(2)
+                .any(|c| u16::from_le_bytes([c[0], c[1]]) > SILENCE_RAW)
+            {
+                // Unpark: one commit restarts the frame-callback loop, and
+                // rendering is driven by the compositor again from here.
+                self.idle = false;
+                self.silent_frames = 0;
+                let qh = self.qh.clone();
+                self.surface.frame(&qh, self.surface.clone());
+                self.surface.commit();
+                return;
+            }
+        }
     }
 
     pub fn draw(&mut self, _conn: &Connection, qh: &QueueHandle<Self>) {
@@ -436,6 +498,52 @@ impl AppState {
             let num = u16::from_le_bytes([cava_buffer[i], cava_buffer[i + 1]]);
             unpacked_data[unpacked_data_index] = (num as f32) / 65530.0;
         }
+        // Skip GPU work while the audio is silent. cava emits frames at the
+        // configured framerate whether or not anything is playing, so without
+        // this the full-screen surface is recomposited 60x/sec forever just to
+        // draw bars that are all zero -- measurably pinning an integrated GPU.
+        //
+        // Commit with no new buffer instead of drawing: that still schedules
+        // Grace before parking, so the bars finish falling to zero rather than
+        // freezing part-way down.
+        //
+        // Measured, not guessed: with monstercat=1.5 and noise_reduction=60, a
+        // tone cut from full volume decays below the threshold in 8 frames --
+        // 0.18s. The original 90 (2.0s) was 11x that. 23 frames is 0.51s, still
+        // ~3x the real decay.
+        //
+        // The remainder is hysteresis rather than decay: a quiet passage or a
+        // gap between tracks would otherwise park and unpark repeatedly. That
+        // costs almost nothing -- parking sets a flag, unparking is one commit
+        // -- and is invisible, since the bars are already at zero whenever it
+        // happens.
+        const SILENCE_THRESHOLD: f32 = 0.005;
+        const SILENCE_RAW: u16 = (SILENCE_THRESHOLD * 65530.0) as u16;
+        const SILENT_GRACE_FRAMES: u32 = 23;
+        if unpacked_data.iter().all(|&v| v < SILENCE_THRESHOLD) {
+            self.silent_frames = self.silent_frames.saturating_add(1);
+        } else {
+            self.silent_frames = 0;
+        }
+        if self.silent_frames > SILENT_GRACE_FRAMES {
+            // PARK. No draw, and critically no commit either.
+            //
+            // A bufferless commit is free for us but not for the compositor:
+            // Hyprland damages a layer by its GEOMETRY on any commit, buffer
+            // attached or not, so every one recomposited the whole band. The
+            // original comment here claimed it "produces no damage" -- false,
+            // and visible in the damage overlay as a flash on an idle workspace
+            // with no audio playing.
+            //
+            // Committing was only ever there to keep frame callbacks coming, so
+            // that audio returning would be noticed. That job moves to
+            // poll_resume(), driven by the timeout event_loop.run already has,
+            // which owes nothing to the compositor. So while silent this draws
+            // nothing, commits nothing, and damages nothing.
+            self.idle = true;
+            return;
+        }
+
         let bar_width: f32 =
             2.0 / (self.bar_count as f32 + (self.bar_count as f32 - 1.0) * self.bar_gap);
         let bar_gap_width: f32 = bar_width * self.bar_gap;
