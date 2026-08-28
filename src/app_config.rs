@@ -15,6 +15,21 @@ pub struct GeneralConfig {
     pub autosens: Option<bool>,
     pub sensitivity: Option<f32>,
     pub preferred_output: Option<String>,
+    /// "mono" or "stereo", passed through to cava's [output] section.
+    ///
+    /// cava defaults to stereo, and in stereo mode it does not give each bar a
+    /// distinct frequency band: it splits the bars in half, drawing the LEFT
+    /// channel reversed across the left half and the RIGHT channel across the
+    /// right half. With near-identical channels -- most music -- the two halves
+    /// come out as mirror images, bass meeting in the middle. That reads as a
+    /// symmetric visualiser, which is a look, but it is not what most people
+    /// expect from a full-width wallpaper spectrum.
+    ///
+    /// "mono" averages the channels and gives one left-to-right sweep across
+    /// every bar.
+    pub channels: Option<String>,
+    /// With channels = "mono": "average" (default), "left" or "right".
+    pub mono_option: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]

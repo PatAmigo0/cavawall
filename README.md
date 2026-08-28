@@ -89,10 +89,32 @@ See [`config.toml`](config.toml) for the annotated defaults.
 | `bars.amount` | number of bars |
 | `bars.gap` | gap width as a fraction of bar width |
 | `bars.max_height` | **fork addition**: bar height cap, fraction of screen |
+| `general.channels` | **fork addition**: `mono` or `stereo` (see below) |
+| `general.mono_option` | **fork addition**: `average`, `left` or `right` |
 | `colors.*` | gradient stops, bottom to top; names are ignored |
 | `smoothing.*` | passed straight through to cava |
 
 `CAVAWALL_DEBUG=1` reports per-frame draw activity on stderr.
+
+### Mirrored bars
+
+cava defaults to `channels = stereo`, and stereo does not give each bar its own
+frequency band. It splits the bars in half, drawing the **left channel reversed**
+across the left half and the right channel across the right half. Since most
+music has near-identical channels, the halves come out as mirror images with the
+bass meeting in the middle — a symmetric visualiser rather than a spectrum.
+
+Upstream never exposed this, so there was no way to change it. Set:
+
+```toml
+[general]
+channels = "mono"
+```
+
+for one left-to-right sweep across every bar. Unset, cava's default applies.
+
+`CAVAWALL_DEBUG=1` prints the exact config handed to cava, which is otherwise
+unobservable — it is written to cava's stdin, so there is no file to check.
 
 ### Compositor notes
 
