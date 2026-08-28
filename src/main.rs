@@ -539,6 +539,38 @@ impl AppState {
         if EXITING.load(Ordering::SeqCst) {
             self.clear_and_exit(_conn);
         }
+
+        // Drop stale frames and render the newest.
+        //
+        // cava writes at the configured framerate regardless of whether we are
+        // keeping up. Reading exactly one frame per draw means a stall leaves a
+        // backlog in the pipe, and on recovery every queued frame is rendered in
+        // turn -- the visualiser freezes, then fast-forwards through the audio
+        // it missed. Skipping to the newest frame keeps it in step with what is
+        // actually playing.
+        //
+        // The BufReader's own buffer has to be checked as well as the fd: bytes
+        // already pulled out of the pipe are invisible to poll(), so polling
+        // alone would report "nothing waiting" while a backlog sat in memory.
+        let frame_len = cava_buffer.len();
+        let fd = self.cava_reader.get_ref().as_raw_fd();
+        let mut skipped = 0u32;
+        while skipped < 512 {
+            let ready = if self.cava_reader.buffer().len() >= frame_len {
+                true
+            } else {
+                let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+                (unsafe { libc::poll(&mut pfd, 1, 0) }) > 0 && pfd.revents & libc::POLLIN != 0
+            };
+            if !ready {
+                break;
+            }
+            if self.cava_reader.read_exact(&mut cava_buffer).is_err() {
+                break;
+            }
+            skipped += 1;
+        }
+
         for (unpacked_data_index, i) in (0..cava_buffer.len()).step_by(2).enumerate() {
             let num = u16::from_le_bytes([cava_buffer[i], cava_buffer[i + 1]]);
             unpacked_data[unpacked_data_index] = (num as f32) / 65530.0;
