@@ -1,1 +1,0 @@
-/home/tohue/.local/src/cavalier/target/release/cavalier: /home/tohue/.local/src/cavalier/src/app_config.rs /home/tohue/.local/src/cavalier/src/cli_help.rs /home/tohue/.local/src/cavalier/src/main.rs /home/tohue/.local/src/cavalier/src/shaders/fragment_shader.glsl /home/tohue/.local/src/cavalier/src/shaders/vertex_shader.glsl

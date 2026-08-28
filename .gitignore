@@ -1,0 +1,4 @@
+# Upstream committed build output. It is ~500M of rebuildable artefacts, it
+# makes every `git status` unreadable, and it guarantees a conflict on any
+# branch that compiles.
+/target
