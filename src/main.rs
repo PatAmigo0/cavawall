@@ -47,7 +47,7 @@ const SILENCE_RAW: u16 = (SILENCE_THRESHOLD * 65530.0) as u16;
 /// does not park and unpark repeatedly.
 const SILENT_GRACE_FRAMES: u32 = 23;
 
-/// CAVALIER_DEBUG=1 reports what the draw loop actually did each frame.
+/// CAVAWALL_DEBUG=1 reports what the draw loop actually did each frame.
 ///
 /// Worth keeping: the entire point of this fork is *not* drawing things, and a
 /// column that is silently skipped looks exactly like a column that is broken.
@@ -63,7 +63,7 @@ const SILENT_GRACE_FRAMES: u32 = 23;
 fn threshold_px() -> i32 {
     static T: std::sync::OnceLock<i32> = std::sync::OnceLock::new();
     *T.get_or_init(|| {
-        std::env::var("CAVALIER_THRESHOLD_PX")
+        std::env::var("CAVAWALL_THRESHOLD_PX")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(1)
@@ -73,7 +73,7 @@ fn threshold_px() -> i32 {
 
 fn debug_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("CAVALIER_DEBUG").is_ok_and(|v| v != "0"))
+    *ON.get_or_init(|| std::env::var("CAVAWALL_DEBUG").is_ok_and(|v| v != "0"))
 }
 
 /// One bar, one layer surface.
@@ -147,7 +147,7 @@ fn make_column(
 ) -> Column {
     let surface = compositor.create_surface(qh);
     let layer_surface =
-        layer_shell.create_layer_surface(qh, surface.clone(), Layer::Bottom, Some("cavalier"), output);
+        layer_shell.create_layer_surface(qh, surface.clone(), Layer::Bottom, Some("cavawall"), output);
 
     // Empty input region: a wallpaper must never accept pointer input.
     //
@@ -244,7 +244,7 @@ fn main() {
         exit(0);
     } else {
         let home_dir = env::var("HOME").expect("Unable to get home directory");
-        let own = format!("{}/.config/cavalier/config.toml", home_dir);
+        let own = format!("{}/.config/cavawall/config.toml", home_dir);
         // Upstream's path is still honoured so that anyone switching over from
         // wallpaper-cava keeps a working visualiser before they move anything.
         let inherited = format!("{}/.config/wallpaper-cava/config.toml", home_dir);
@@ -252,8 +252,8 @@ fn main() {
             own
         } else if fs::metadata(&inherited).is_ok() {
             eprintln!(
-                "cavalier: using {inherited}\n\
-                 cavalier: move it to ~/.config/cavalier/config.toml when convenient"
+                "cavawall: using {inherited}\n\
+                 cavawall: move it to ~/.config/cavawall/config.toml when convenient"
             );
             inherited
         } else {
@@ -834,7 +834,7 @@ impl AppState {
         }
         if debug_enabled() {
             eprintln!(
-                "cavalier: {}/{} columns committed ({} not yet configured)",
+                "cavawall: {}/{} columns committed ({} not yet configured)",
                 drawn,
                 self.columns.len(),
                 unconfigured

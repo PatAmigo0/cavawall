@@ -2,7 +2,7 @@
 set -euo pipefail
 
 INSTALL_DIR="$HOME/.local"
-CONFIG_DIR="$HOME/.config/cavalier"
+CONFIG_DIR="$HOME/.config/cavawall"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # Build
@@ -25,4 +25,4 @@ if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
   echo -e "\nAdd to PATH:\n  echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.bashrc && source ~/.bashrc"
 fi
 
-echo -e "\nDone! Run with: cavalier"
+echo -e "\nDone! Run with: cavawall"
