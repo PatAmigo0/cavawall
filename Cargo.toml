@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 gl = "0.14.0"
+libc = "0.2"
 khronos-egl = { version = "6.0.0", features = [
     "static",
     "1_0",

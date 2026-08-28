@@ -26,6 +26,16 @@ use wayland_egl::WlEglSurface;
 
 use core::{ffi, panic};
 use egl::API as egl;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+// Set from the SIGTERM/SIGINT handler; the draw loop notices and shuts down
+// cleanly instead of being killed mid-frame.
+static EXITING: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn on_terminate(_sig: libc::c_int) {
+    // Only async-signal-safe work here: flip a flag, nothing else.
+    EXITING.store(true, Ordering::SeqCst);
+}
 use std::ffi::CString;
 use std::io::Write;
 use std::process::{exit, ChildStdout};
@@ -67,6 +77,15 @@ fn main() {
             "config.toml".to_string()
         }
     }
+    // Shut down cleanly on SIGTERM so the surface can be cleared first --
+    // wallpaper-cava-launch and fullscreen-watch both stop us this way, and a
+    // hard kill leaves our last frame burnt into the background (the layer
+    // surface goes away, but Hyprland does not reliably repaint underneath it).
+    unsafe {
+        libc::signal(libc::SIGTERM, on_terminate as libc::sighandler_t);
+        libc::signal(libc::SIGINT, on_terminate as libc::sighandler_t);
+    }
+
     let cava_output_config: HashMap<String, String> = HashMap::from([
         ("method".into(), "raw".into()),
         ("raw_target".into(), "/dev/stdout".into()),
@@ -357,10 +376,40 @@ struct AppState {
 }
 
 impl AppState {
+    /// Paint one fully transparent frame and commit it before exiting, so the
+    /// compositor is left with a clean surface rather than our last set of
+    /// bars. Without this a hard kill leaves that frame visible on the
+    /// background until something else forces a repaint.
+    fn clear_and_exit(&mut self, conn: &Connection) -> ! {
+        unsafe {
+            gl::ClearColor(0.0, 0.0, 0.0, 0.0);
+            gl::Clear(gl::COLOR_BUFFER_BIT);
+        }
+        let _ = egl.swap_buffers(self.egl_display, self.egl_surface);
+        self.surface.commit();
+        // Round-trip so the commit actually reaches the compositor before the
+        // process goes away and its objects are destroyed.
+        let _ = conn.roundtrip();
+        std::process::exit(0);
+    }
+
     pub fn draw(&mut self, _conn: &Connection, qh: &QueueHandle<Self>) {
         let mut cava_buffer: Vec<u8> = vec![0; self.bar_count as usize * 2];
         let mut unpacked_data: Vec<f32> = vec![0.0; self.bar_count as usize];
-        self.cava_reader.read_exact(&mut cava_buffer).unwrap();
+        if let Err(e) = self.cava_reader.read_exact(&mut cava_buffer) {
+            // A signal interrupts the blocking read, which is exactly how we
+            // find out it is time to go.
+            if EXITING.load(Ordering::SeqCst) {
+                self.clear_and_exit(_conn);
+            }
+            if e.kind() == std::io::ErrorKind::Interrupted {
+                return;
+            }
+            panic!("cava read failed: {e}");
+        }
+        if EXITING.load(Ordering::SeqCst) {
+            self.clear_and_exit(_conn);
+        }
         for (unpacked_data_index, i) in (0..cava_buffer.len()).step_by(2).enumerate() {
             let num = u16::from_le_bytes([cava_buffer[i], cava_buffer[i + 1]]);
             unpacked_data[unpacked_data_index] = (num as f32) / 65530.0;
