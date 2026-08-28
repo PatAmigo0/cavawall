@@ -54,6 +54,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "cavalier"
+version = "0.1.0"
+dependencies = [
+ "gl",
+ "khronos-egl",
+ "libc",
+ "serde",
+ "smithay-client-toolkit",
+ "toml",
+ "wayland-client",
+ "wayland-egl",
+ "wayland-protocols 0.31.2",
+ "wayland-protocols-wlr",
+]
+
+[[package]]
 name = "cc"
 version = "1.2.43"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -360,7 +376,7 @@ checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 [[package]]
 name = "smithay-client-toolkit"
 version = "0.20.0"
-source = "git+https://github.com/Smithay/client-toolkit.git#9aeccd9047ec631eafcd4dd63f9420b7fc3cc8d7"
+source = "git+https://github.com/Smithay/client-toolkit.git?rev=9aeccd9047ec631eafcd4dd63f9420b7fc3cc8d7#9aeccd9047ec631eafcd4dd63f9420b7fc3cc8d7"
 dependencies = [
  "bitflags",
  "bytemuck",
@@ -480,21 +496,6 @@ name = "unicode-ident"
 version = "1.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "462eeb75aeb73aea900253ce739c8e18a67423fadf006037cd3ff27e82748a06"
-
-[[package]]
-name = "wallpaper-cava"
-version = "0.1.0"
-dependencies = [
- "gl",
- "khronos-egl",
- "serde",
- "smithay-client-toolkit",
- "toml",
- "wayland-client",
- "wayland-egl",
- "wayland-protocols 0.31.2",
- "wayland-protocols-wlr",
-]
 
 [[package]]
 name = "wayland-backend"
