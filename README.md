@@ -7,13 +7,6 @@ A fork of [rs-pro0/wallpaper-cava](https://github.com/rs-pro0/wallpaper-cava),
 which did all the hard work; this adds bug fixes, packaging fixes, and two
 features. Original by [rs-pro0](https://github.com/rs-pro0). MIT, as upstream.
 
-## Why this fork exists
-
-Upstream is a small, pleasant program with a few sharp edges. Carrying the fixes
-as a stack of patches meant re-applying seven of them on every rebuild through a
-custom script — which at one point silently dropped five of the six it was
-supposed to apply. They live in the history here instead, one commit each.
-
 ### Bug fixes
 
 - **NVIDIA `EGL_BAD_SURFACE`.** The EGL context was left current on a surface
@@ -21,8 +14,8 @@ supposed to apply. They live in the history here instead, one commit each.
   surface fails `eglSwapBuffers` on its first draw, so nothing renders after a
   resize or output change. Mesa tolerates it, which is why it only ever showed
   up on NVIDIA.
-- **Pointer input trap.** The layer surface kept the default input region — its
-  whole area — so it silently took pointer focus across the screen. It never
+- **Pointer input trap.** The layer surface kept the default input region - its
+  whole area, so it silently took pointer focus across the screen. It never
   calls `set_cursor`, and a Wayland cursor keeps whatever shape the focused
   surface last asked for, so moving onto an empty workspace left a stale I-beam.
   Now the input region is empty.
@@ -37,7 +30,7 @@ supposed to apply. They live in the history here instead, one commit each.
 
 ### Packaging fixes
 
-- **`wayland-rs` submodule removed.** Nothing referenced it — no path
+- **`wayland-rs` submodule removed.** Nothing referenced it - no path
   dependency, no `[patch]`, absent from `Cargo.lock`. It cost a 3.4M checkout
   and was pinned to an SSH URL that fails for anyone without push access to
   Smithay, so `git clone --recursive` broke for every new user.
@@ -125,24 +118,4 @@ layerrule = noanim, cavawall
 ```
 
 Without it the surface can strand mid-fade at alpha 0 if the shell is recreated
-underneath a running instance.
-
-## A rejected experiment
-
-Branch `experiment/per-column-surfaces` splits the band into one layer surface
-per bar, so an unchanged bar is never committed and never repainted. The idea
-rests on measurements that are correct: Hyprland ignores client `damage_buffer`
-hints for layer surfaces, rolls a subsurface's damage into its parent, and does
-damage separate layer surfaces independently.
-
-It still loses. Damaged *area* is not the cost — commits and mapped surface
-count are. Twelve surfaces roughly doubled the compositor's CPU (5.7% -> 11.2%,
-tight spreads, empty workspace) while cutting damaged area only ~21%, because
-bars do not hold still: a 702px band moves a whole pixel for a 0.14% change in
-cava's output, so 10.8 of 12 columns redrew every frame anyway.
-
-The GPU side was never settled — utilization and power draw disagreed, and the
-runs that could have separated them were taken on a machine in use. Treat the
-GPU question as open; the CPU result alone was enough to reject the approach.
-
-The branch keeps the full reasoning in its commit message.
+underneath a running instance
