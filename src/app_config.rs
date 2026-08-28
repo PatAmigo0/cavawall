@@ -21,6 +21,7 @@ pub struct GeneralConfig {
 pub struct BarConfig {
     pub amount: u32,
     pub gap: f32,
+    pub max_height: Option<f32>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]

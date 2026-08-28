@@ -361,6 +361,7 @@ fn main() {
         windows_size_location,
         bar_count: config.bars.amount,
         bar_gap: config.bars.gap,
+        max_height: config.bars.max_height.unwrap_or(1.0),
         background_color: array_from_config_color(config.general.background_color),
         preferred_output_name: config.general.preferred_output,
         compositor,
@@ -390,6 +391,7 @@ struct AppState {
     windows_size_location: i32,
     bar_count: u32,
     bar_gap: f32,
+    max_height: f32,
     background_color: [f32; 4],
     preferred_output_name: Option<String>,
     compositor: CompositorState,
@@ -441,7 +443,9 @@ impl AppState {
         let fwidth: f32 = self.width as f32;
         let fheight: f32 = self.height as f32;
         for i in 0..self.bar_count as usize {
-            let bar_height: f32 = 2.0 * unpacked_data[i] - 1.0;
+            // NDC space: -1.0 = bottom, +1.0 = top. max_height caps how far up
+            // the full-volume bar can reach, as a fraction of total screen height.
+            let bar_height: f32 = self.max_height * 2.0 * unpacked_data[i] - 1.0;
             vertices[i * 8] = bar_gap_width * i as f32 + bar_width * i as f32 - 1.0;
             vertices[i * 8 + 1] = bar_height;
             vertices[i * 8 + 2] = bar_gap_width * i as f32 + bar_width * (i + 1) as f32 - 1.0;
