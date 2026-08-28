@@ -560,6 +560,12 @@ impl LayerShellHandler for AppState {
         );
         self.width = width;
         self.height = height;
+        // Unbind the context before destroying the surface it is still current
+        // on. NVIDIA's EGL leaves a destroyed-while-current surface in a state
+        // that makes the freshly created replacement fail eglSwapBuffers with
+        // EGL_BAD_SURFACE on the very first draw; Mesa tolerates it, which is
+        // why this only reproduces on NVIDIA.
+        egl.make_current(self.egl_display, None, None, None).ok();
         egl.destroy_surface(self.egl_display, self.egl_surface)
             .unwrap();
         self.wl_egl_surface =
