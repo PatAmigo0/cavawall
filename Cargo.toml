@@ -27,3 +27,17 @@ wayland-client = "0.31.2"
 wayland-egl = "0.32.0"
 wayland-protocols = "0.31.2"
 wayland-protocols-wlr = "0.3.1"
+
+# Upstream ships no release profile, so cargo defaults apply: no LTO, 16
+# codegen units, symbols left in. This is a long-lived background process on a
+# laptop, so trade build time for a smaller, tighter binary.
+#
+# Honest scope: this does NOT reduce GPU load. The process already sits at 0%
+# CPU -- it blocks on cava's pipe and issues a handful of GL calls per frame,
+# and the real cost is the compositor compositing a full-screen surface. These
+# flags shrink the binary and marginally tighten the hot loop, nothing more.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
