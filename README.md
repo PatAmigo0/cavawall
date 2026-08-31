@@ -78,7 +78,7 @@ See [`config.toml`](config.toml) for the annotated defaults.
 |---|---|
 | `general.framerate` | frames per second requested from cava |
 | `general.background_color` | usually fully transparent |
-| `general.preferred_output` | monitor name, e.g. `eDP-1`; omit for the first |
+| `general.preferred_output` | monitor name, e.g. `eDP-1`; omit to pick automatically |
 | `bars.amount` | number of bars |
 | `bars.gap` | gap width as a fraction of bar width |
 | `bars.max_height` | **fork addition**: bar height cap, fraction of screen |
@@ -88,7 +88,27 @@ See [`config.toml`](config.toml) for the annotated defaults.
 | `colors.*` | gradient stops, bottom to top; names are ignored |
 | `smoothing.*` | passed straight through to cava |
 
-`CAVAWALL_DEBUG=1` reports per-frame draw activity on stderr.
+`CAVAWALL_DEBUG=1` reports placement and configure activity on stderr.
+`CAVAWALL_OUTPUT=<name>` overrides `preferred_output` without touching the
+config file.
+
+### Choosing a monitor
+
+With `preferred_output` unset and no `CAVAWALL_OUTPUT`, an external monitor
+wins over the machine's own panel — anything whose connector is not `eDP*`,
+`LVDS*` or `DSI*`. This is re-evaluated on every hotplug, so unplugging the
+external monitor moves the bars to the panel and plugging it back in moves
+them home.
+
+A name that matches no connected output maps **nothing**. That is deliberate:
+falling back to another monitor would put a visualiser somewhere it was
+explicitly not asked for. Upstream's behaviour here was worse — the bootstrap
+surface stayed mapped, leaving a 256×256 box of bars on whichever output the
+compositor happened to choose.
+
+`CAVAWALL_OUTPUT` is an environment variable rather than a flag on purpose:
+argv stays exactly `[binary]`, so supervisors that identify the process by an
+exact argv match keep working.
 
 ### Mirrored bars
 
