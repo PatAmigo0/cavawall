@@ -10,7 +10,7 @@ use smithay_client_toolkit::shell::wlr_layer::{
 use smithay_client_toolkit::shell::WaylandSurface;
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState, Region},
-    output::{OutputHandler, OutputState},
+    output::{OutputHandler, OutputInfo, OutputState},
     registry::RegistryState,
 };
 use smithay_client_toolkit::{
@@ -46,6 +46,21 @@ const SILENCE_RAW: u16 = (SILENCE_THRESHOLD * 65530.0) as u16;
 /// the real decay, the remainder being hysteresis so that a gap between tracks
 /// does not park and unpark repeatedly.
 const SILENT_GRACE_FRAMES: u32 = 23;
+
+/// Connector-name prefixes that mean "the machine's own panel". Everything
+/// else -- HDMI, DP, DVI, a dock -- counts as external and is preferred.
+///
+/// Deliberately a policy rather than a per-machine hardware fact. It needs no
+/// list to keep in sync across machines, it works on a machine whose dock is
+/// DP rather than HDMI, and it survives the panel's connector being renamed --
+/// eDP-1 vs eDP-2 has been observed to change across reboots on this hardware
+/// with no hardware change at all, which is exactly what a hardcoded name
+/// cannot survive.
+const BUILTIN_CONNECTOR_PREFIXES: [&str; 3] = ["eDP", "LVDS", "DSI"];
+
+fn is_builtin_connector(name: &str) -> bool {
+    BUILTIN_CONNECTOR_PREFIXES.iter().any(|p| name.starts_with(p))
+}
 
 /// CAVAWALL_DEBUG, resolved once. Some of the call sites below sit in the
 /// per-frame path, and env::var allocates a String and takes the process-wide
@@ -181,14 +196,13 @@ fn main() {
     let cava_stdout = cava_process.stdout.unwrap();
     let cava_reader = BufReader::new(cava_stdout);
     let conn = Connection::connect_to_env().unwrap();
-    let (globals, event_queue) = registry_queue_init(&conn).unwrap();
+    let (globals, mut event_queue) = registry_queue_init(&conn).unwrap();
     let qh = event_queue.handle();
     let mut event_loop: EventLoop<AppState> =
         EventLoop::try_new().expect("Failed to initialize the event loop!");
     let loop_handle = event_loop.handle();
-    WaylandSource::new(conn.clone(), event_queue)
-        .insert(loop_handle)
-        .unwrap();
+    // WaylandSource is inserted further down, AFTER the output list has been
+    // settled with an explicit roundtrip -- see the note there.
     let frame_duration = Duration::from_secs(1) / config.general.framerate;
     let compositor = CompositorState::bind(&globals, &qh).expect("wl_compositor not available");
     let surface = compositor.create_surface(&qh);
@@ -404,6 +418,19 @@ fn main() {
     let windows_size_location =
         unsafe { gl::GetUniformLocation(shader_program, window_size_string.as_ptr()) };
 
+    // CAVAWALL_OUTPUT wins over the config file, and is how fullscreen-watch
+    // moves the visualiser between monitors: it relaunches with this set, so
+    // argv stays exactly [binary]. That matters -- the launcher, the fish
+    // toggle and fullscreen-watch itself all identify this process by an
+    // EXACT argv match, and a --output flag would have silently broken all
+    // three at once.
+    //
+    // Unset (and no preferred_output) means choose automatically.
+    let pinned_output = env::var("CAVAWALL_OUTPUT")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or(config.general.preferred_output);
+
     let mut simple_window = AppState {
         registry_state: RegistryState::new(&globals),
         output_state: OutputState::new(&globals, &qh),
@@ -427,12 +454,27 @@ fn main() {
         max_height: config.bars.max_height.unwrap_or(1.0),
         silent_frames: 0,
         background_color: array_from_config_color(config.general.background_color),
-        preferred_output_name: config.general.preferred_output,
+        pinned_output,
+        placed_on: None,
+        placed_size: None,
+        startup_settled: false,
         compositor,
         idle: false,
         qh: qh.clone(),
         conn: conn.clone(),
     };
+    // Settle the output list before choosing one. A single roundtrip
+    // dispatches the whole initial burst of wl_output events, so retarget()
+    // below sees every connected monitor at once and places exactly once. The
+    // OutputHandler callbacks it fires do nothing while startup_settled is
+    // false, which is the point.
+    event_queue.roundtrip(&mut simple_window).unwrap();
+    simple_window.startup_settled = true;
+    simple_window.retarget(&qh);
+
+    WaylandSource::new(conn.clone(), event_queue)
+        .insert(loop_handle)
+        .unwrap();
     event_loop
         .run(frame_duration, &mut simple_window, |state| state.poll_resume())
         .unwrap();
@@ -461,7 +503,22 @@ struct AppState {
     max_height: f32,
     silent_frames: u32,
     background_color: [f32; 4],
-    preferred_output_name: Option<String>,
+    /// Explicit output pin: CAVAWALL_OUTPUT, else the config's
+    /// preferred_output. None means choose automatically -- an external
+    /// monitor if one is connected, the built-in panel otherwise.
+    pinned_output: Option<String>,
+    /// Name of the output we currently have a mapped surface on. None means
+    /// nothing is drawn: either no output has been chosen yet, or the one we
+    /// were on went away.
+    placed_on: Option<String>,
+    /// Logical size that surface was built for, so an unrelated output
+    /// property change does not tear it down and rebuild it for nothing.
+    placed_size: Option<(i32, i32)>,
+    /// False until the startup roundtrip has enumerated every output. Outputs
+    /// are announced one at a time, so acting on the first one to arrive meant
+    /// placing on the laptop panel and then moving to the external monitor a
+    /// moment later -- a visible flash of bars on the wrong screen at login.
+    startup_settled: bool,
     compositor: CompositorState,
     /// Parked: silent, not committing, waiting for audio on the idle tick.
     idle: bool,
@@ -509,6 +566,12 @@ impl AppState {
             let conn = self.conn.clone();
             self.clear_and_exit(&conn);
         }
+        // Parked AND unplaced: the output went away while the audio was
+        // silent. Committing here would map a surface belonging to nothing.
+        // retarget() restarts the loop when an output comes back.
+        if self.placed_on.is_none() {
+            return;
+        }
         if !self.idle {
             // Running: the compositor's frame callbacks drive draw(), and this
             // tick has nothing to do. Deliberately NOT a second drive for
@@ -540,6 +603,142 @@ impl AppState {
                 return;
             }
         }
+    }
+
+    /// Rank a connected output; lower wins, None means "not eligible at all".
+    ///
+    /// A pin excludes everything else outright rather than merely preferring
+    /// the pinned output -- when fullscreen-watch says "eDP-1", falling back
+    /// to the monitor it just ruled out would defeat the point.
+    fn output_rank(&self, name: &str) -> Option<u8> {
+        match &self.pinned_output {
+            Some(pin) => (pin == name).then_some(0),
+            None => Some(u8::from(is_builtin_connector(name))),
+        }
+    }
+
+    /// The output we should be on, out of everything currently connected.
+    ///
+    /// Ties break on name purely so the choice is stable: two externals must
+    /// not swap between calls and rebuild the surface each time.
+    fn choose_output(&self) -> Option<(wl_output::WlOutput, OutputInfo)> {
+        self.output_state
+            .outputs()
+            .filter_map(|o| {
+                let info = self.output_state.info(&o)?;
+                // No logical size yet means the compositor has not finished
+                // describing it; set_size would have nothing to work from.
+                info.logical_size?;
+                let name = info.name.clone()?;
+                let rank = self.output_rank(&name)?;
+                Some((rank, name, o, info))
+            })
+            .min_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)))
+            .map(|(_, _, o, info)| (o, info))
+    }
+
+    /// Re-run the whole output policy against what is connected right now, and
+    /// move if the answer changed. Every OutputHandler callback funnels here so
+    /// the three of them cannot drift apart -- which is what happened before,
+    /// when update_output rebuilt the surface for any property change at all
+    /// and output_destroyed did nothing whatsoever.
+    fn retarget(&mut self, qh: &QueueHandle<Self>) {
+        // Drop a placement whose output is gone before choosing a new one.
+        // Checked against the live output list rather than trusting which
+        // output the callback named, so this holds no matter what order
+        // OutputState applies the removal in.
+        if let Some(current) = self.placed_on.clone() {
+            let still_connected = self
+                .output_state
+                .outputs()
+                .filter_map(|o| self.output_state.info(&o))
+                .any(|i| i.name.as_deref() == Some(current.as_str()));
+            if !still_connected {
+                self.placed_on = None;
+                self.placed_size = None;
+            }
+        }
+
+        let Some((output, info)) = self.choose_output() else {
+            if self.placed_on.take().is_some() || self.placed_size.take().is_some() {
+                eprintln!("cavawall: no usable output, idling until one appears");
+            }
+            return;
+        };
+        let name = info.name.clone().unwrap_or_default();
+        if self.placed_on.as_deref() == Some(name.as_str()) && self.placed_size == info.logical_size
+        {
+            return; // already there, same size -- nothing worth rebuilding for
+        }
+        self.place_on(qh, &output, &info, name);
+    }
+
+    /// Build a fresh layer surface on `output` and start drawing to it.
+    ///
+    /// Moving is always a rebuild: a layer surface belongs to the output it was
+    /// created for and there is no request to move one across.
+    fn place_on(
+        &mut self,
+        qh: &QueueHandle<Self>,
+        output: &wl_output::WlOutput,
+        info: &OutputInfo,
+        name: String,
+    ) {
+        let Some(logical_size) = info.logical_size else {
+            return;
+        };
+        if debug_enabled() {
+            eprintln!("cavawall: placing on {name} ({}x{})", logical_size.0, logical_size.1);
+        }
+        let old_surface = self.surface.clone();
+        self.surface = self.compositor.create_surface(qh);
+        self.layer_surface = self.layer_shell.create_layer_surface(
+            qh,
+            self.surface.clone(),
+            Layer::Bottom,
+            Some("cavawall"),
+            Some(output),
+        );
+        self.width = logical_size.0 as u32;
+        self.height = logical_size.1 as u32;
+        // same empty input region as at startup -- the surface is
+        // recreated here, so it would otherwise regain the default one
+        let input_region = Region::new(&self.compositor).ok();
+        if let Some(r) = &input_region {
+            self.layer_surface.set_input_region(Some(r.wl_region()));
+        }
+        // Only ask for the band the bars can actually reach, anchored to the
+        // bottom they grow from.
+        //
+        // Hyprland damages a layer by its GEOMETRY, not by the buffer damage
+        // a client declares -- verified by trying the latter first:
+        // eglSwapBuffersWithDamageKHR sent .damage_buffer(0, 377, 1920, 703)
+        // 331 times and the damage overlay still showed the whole output.
+        // Shrinking the surface moved it immediately. So surface size is the
+        // only lever a client has here.
+        //
+        // max_height caps how far up a full-volume bar goes, as a fraction of
+        // the screen, so anything above it is cleared-transparent every frame
+        // and recomposited for nothing. With the default 0.65 that is the top
+        // 35% of the output.
+        //
+        // The bar NDC is rescaled to match (see draw) so the bars look
+        // identical -- inside a surface that IS the band, they use its full
+        // height rather than max_height of it.
+        let band = ((self.height as f32 * self.max_height).ceil() as u32).clamp(1, self.height);
+        self.layer_surface.set_exclusive_zone(-1); // see note at startup
+        self.layer_surface.set_size(self.width, band);
+        self.layer_surface.set_anchor(Anchor::BOTTOM);
+        self.surface.commit();
+        drop(input_region);
+        old_surface.destroy();
+        // A fresh surface carries no frame callback and nothing parked. The
+        // configure this commit provokes is what restarts the loop, and it
+        // only draws because placed_on is set here first.
+        self.idle = false;
+        self.silent_frames = 0;
+        self.placed_on = Some(name);
+        self.placed_size = info.logical_size;
     }
 
     pub fn draw(&mut self, _conn: &Connection, qh: &QueueHandle<Self>) {
@@ -707,6 +906,10 @@ impl AppState {
         // draws had happened, and dead the moment one draw did not swap (the
         // silence park returns before this point) or the surface holding the
         // in-flight callback was destroyed (new_output does exactly that).
+        // Replacing the request with a bare commit() after the swap is worse
+        // still: no request is created at all, so the very first draw is the
+        // last one, and the trailing bufferless commit re-damages the layer by
+        // its geometry for nothing (see the park note above).
         //
         // frame-then-swap is what weston-simple-egl does, and it keeps exactly
         // one callback in flight with no dependence on a second commit.
@@ -721,88 +924,46 @@ impl OutputHandler for AppState {
         &mut self.output_state
     }
 
+    // All three funnel into retarget(), which re-derives the answer from the
+    // live output list rather than from the event. new_output used to hold the
+    // whole policy inline, update_output was a bare alias for it -- so any
+    // output property change at all tore the surface down and rebuilt it --
+    // and output_destroyed was empty, which left the visualiser stranded on a
+    // monitor that had been unplugged.
     fn new_output(
         &mut self,
         _conn: &Connection,
         qh: &QueueHandle<Self>,
-        output: wl_output::WlOutput,
+        _output: wl_output::WlOutput,
     ) {
-        let info = self.output_state.info(&output).unwrap();
-        let mut need_configuration = false;
-        if let Some(output_name) = info.name {
-            if let Some(preffered_output_name) = self.preferred_output_name.clone() {
-                if output_name == preffered_output_name {
-                    need_configuration = true;
-                }
-            }
-        }
-        if self.preferred_output_name.is_none() {
-            need_configuration = true;
-        }
-        if need_configuration {
-            let old_surface = self.surface.clone();
-            self.surface = self.compositor.create_surface(qh);
-            self.layer_surface = self.layer_shell.create_layer_surface(
-                qh,
-                self.surface.clone(),
-                Layer::Bottom,
-                Some("cavawall"),
-                Some(&output),
-            );
-            let logical_size = info.logical_size.unwrap();
-            self.width = logical_size.0 as u32;
-            self.height = logical_size.1 as u32;
-            // same empty input region as at startup -- the surface is
-            // recreated here, so it would otherwise regain the default one
-            let input_region = Region::new(&self.compositor).ok();
-            if let Some(r) = &input_region {
-                self.layer_surface.set_input_region(Some(r.wl_region()));
-            }
-            // Only ask for the band the bars can actually reach, anchored to the
-            // bottom they grow from.
-            //
-            // Hyprland damages a layer by its GEOMETRY, not by the buffer damage
-            // a client declares -- verified by trying the latter first:
-            // eglSwapBuffersWithDamageKHR sent .damage_buffer(0, 377, 1920, 703)
-            // 331 times and the damage overlay still showed the whole output.
-            // Shrinking the surface moved it immediately. So surface size is the
-            // only lever a client has here.
-            //
-            // max_height caps how far up a full-volume bar goes, as a fraction of
-            // the screen, so anything above it is cleared-transparent every frame
-            // and recomposited for nothing. With the default 0.65 that is the top
-            // 35% of the output.
-            //
-            // The bar NDC is rescaled to match (see draw) so the bars look
-            // identical -- inside a surface that IS the band, they use its full
-            // height rather than max_height of it.
-            let band = ((self.height as f32 * self.max_height).ceil() as u32)
-                .clamp(1, self.height);
-            self.layer_surface.set_exclusive_zone(-1); // see note at startup
-            self.layer_surface.set_size(self.width, band);
-            self.layer_surface.set_anchor(Anchor::BOTTOM);
-            self.surface.commit();
-            drop(input_region);
-            old_surface.destroy();
+        // Held until the startup roundtrip is done; see startup_settled.
+        if self.startup_settled {
+            self.retarget(qh);
         }
     }
 
-    // For now update_output is same as new_output, because I'm not really sure what to do with it
     fn update_output(
         &mut self,
         _conn: &Connection,
         qh: &QueueHandle<Self>,
-        output: wl_output::WlOutput,
+        _output: wl_output::WlOutput,
     ) {
-        self.new_output(_conn, qh, output);
+        // Held until the startup roundtrip is done; see startup_settled.
+        if self.startup_settled {
+            self.retarget(qh);
+        }
     }
 
     fn output_destroyed(
         &mut self,
         _conn: &Connection,
-        _qh: &QueueHandle<Self>,
+        qh: &QueueHandle<Self>,
         _output: wl_output::WlOutput,
     ) {
+        // Held until the startup roundtrip is done; see startup_settled.
+        if self.startup_settled {
+            self.retarget(qh);
+        }
     }
 }
 
@@ -868,7 +1029,19 @@ impl CompositorHandler for AppState {
 }
 
 impl LayerShellHandler for AppState {
-    fn closed(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _layer: &LayerSurface) {}
+    /// The compositor has taken the layer surface away -- normally because its
+    /// output was unplugged. Stop drawing to it and re-run the policy: if
+    /// another monitor is still connected, retarget() rebuilds there, and if
+    /// not it idles until one appears. Previously an empty stub, which left
+    /// the loop committing to a surface that no longer had anywhere to go.
+    fn closed(&mut self, _conn: &Connection, qh: &QueueHandle<Self>, layer: &LayerSurface) {
+        if layer.wl_surface() != &self.surface {
+            return;
+        }
+        self.placed_on = None;
+        self.placed_size = None;
+        self.retarget(qh);
+    }
 
     fn configure(
         &mut self,
@@ -878,12 +1051,18 @@ impl LayerShellHandler for AppState {
         configure: LayerSurfaceConfigure,
         _serial: u32,
     ) {
+        // Ignore a configure for a surface we have already replaced.
+        // place_on() builds a new surface on every move, so a late configure
+        // for the old one would otherwise resize the NEW surface's EGL
+        // surface to the OLD output's dimensions.
+        if _layer.wl_surface() != &self.surface {
+            return;
+        }
         let width = configure.new_size.0;
         let height = configure.new_size.1;
-        println!(
-            "LayerSurface configure event: width={}, height={}",
-            width, height
-        );
+        if debug_enabled() {
+            eprintln!("cavawall: configure {width}x{height} on {:?}", self.placed_on);
+        }
         self.width = width;
         self.height = height;
         // Unbind the context before destroying the surface it is still current
@@ -915,7 +1094,13 @@ impl LayerShellHandler for AppState {
         unsafe {
             gl::Viewport(0, 0, self.width as GLsizei, self.height as GLsizei);
         }
-        self.draw(_conn, qh);
-        println!("configure finished");
+        // Only draw once a real output has been chosen. main() maps a
+        // bootstrap surface purely so EGL has a window to build its context
+        // against; drawing to it attaches a buffer and MAPS it, which is how
+        // pinning a connector that is not plugged in used to put a 256x256
+        // box of bars on whatever output the compositor happened to pick.
+        if self.placed_on.is_some() {
+            self.draw(_conn, qh);
+        }
     }
 }
