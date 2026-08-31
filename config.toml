@@ -19,6 +19,12 @@ background_color = { hex = "#000000", alpha = 0.0 }
 # mono_option = "average"
 # Optionally you can set your monitor name, if your are on hyprland you can get it using `hyprctl monitors all`
 # preferred_output = ""
+# Source cava captures from, forwarded to its [input] section as
+# method=pulse, source=<this>. Left unset, cava monitors whatever the current
+# DEFAULT SINK is -- which goes silent the moment that sink's monitor does
+# not work (a Bluetooth A2DP sink, for one). Point it at a source that stays
+# put across output switches.
+# audio_source = ""
 
 [bars]
 amount = 76

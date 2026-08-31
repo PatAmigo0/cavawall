@@ -30,6 +30,21 @@ pub struct GeneralConfig {
     pub channels: Option<String>,
     /// With channels = "mono": "average" (default), "left" or "right".
     pub mono_option: Option<String>,
+    /// Forwarded to cava's [input] section as method=pulse, source=<this>.
+    ///
+    /// Left unset, cava's own default ("auto") always monitors whatever the
+    /// current DEFAULT SINK is, via PipeWire's stream.capture.sink=true
+    /// convention -- which env vars like PULSE_SOURCE cannot override, since
+    /// cava requests it directly rather than asking for a named source. That
+    /// breaks completely, not just gets quiet, the moment the default sink's
+    /// monitor does not work: confirmed on a Bluetooth A2DP sink, whose
+    /// monitor produced zero bytes over two full seconds of `parec` while
+    /// music played audibly through it. Point this at a source that stays
+    /// constant regardless of the current output device -- e.g. a
+    /// processAllOutputs-style pre-mix sink's own monitor -- to survive
+    /// output switches (Bluetooth, speakers, headphones) without silently
+    /// going dead.
+    pub audio_source: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -64,6 +79,10 @@ pub struct CavaConfig {
     pub general: CavaGeneralConfig,
     pub smoothing: CavaSmoothingConfig,
     pub output: HashMap<String, String>,
+    // Omitted (not just empty) when unset, so cava keeps its own default
+    // input method rather than this program quietly picking one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input: Option<HashMap<String, String>>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
