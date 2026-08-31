@@ -84,6 +84,7 @@ See [`config.toml`](config.toml) for the annotated defaults.
 | `bars.max_height` | **fork addition**: bar height cap, fraction of screen |
 | `general.channels` | **fork addition**: `mono` or `stereo` (see below) |
 | `general.mono_option` | **fork addition**: `average`, `left` or `right` |
+| `general.audio_source` | **fork addition**: cava input source; omit for cava's default |
 | `colors.*` | gradient stops, bottom to top; names are ignored |
 | `smoothing.*` | passed straight through to cava |
 
