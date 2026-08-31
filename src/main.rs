@@ -47,6 +47,15 @@ const SILENCE_RAW: u16 = (SILENCE_THRESHOLD * 65530.0) as u16;
 /// does not park and unpark repeatedly.
 const SILENT_GRACE_FRAMES: u32 = 23;
 
+/// CAVAWALL_DEBUG, resolved once. Some of the call sites below sit in the
+/// per-frame path, and env::var allocates a String and takes the process-wide
+/// environment lock on every call -- not something to do 45 times a second
+/// just to decide not to print.
+fn debug_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| env::var("CAVAWALL_DEBUG").is_ok_and(|v| v != "0"))
+}
+
 extern "C" fn on_terminate(_sig: libc::c_int) {
     // Only async-signal-safe work here: flip a flag, nothing else.
     EXITING.store(true, Ordering::SeqCst);
@@ -156,7 +165,7 @@ fn main() {
     // CAVAWALL_DEBUG=1 shows exactly what cava is being told. cava is spawned
     // with its config on stdin, so there is no file to inspect afterwards and
     // no other way to check a setting actually got through.
-    if std::env::var("CAVAWALL_DEBUG").is_ok_and(|v| v != "0") {
+    if debug_enabled() {
         eprintln!("cavawall: cava config >>>\n{string_cava_config}<<<");
     }
     let mut cmd = Command::new("cava");
@@ -501,6 +510,10 @@ impl AppState {
             self.clear_and_exit(&conn);
         }
         if !self.idle {
+            // Running: the compositor's frame callbacks drive draw(), and this
+            // tick has nothing to do. Deliberately NOT a second drive for
+            // draw() -- rendering ahead of the callback is what the callback
+            // exists to throttle, and cava's pipe is drained by draw() anyway.
             return;
         }
         let fd = self.cava_reader.get_ref().as_raw_fd();
@@ -607,6 +620,9 @@ impl AppState {
             self.silent_frames = 0;
         }
         if self.silent_frames > SILENT_GRACE_FRAMES {
+            if debug_enabled() {
+                eprintln!("cavawall: parking (silent_frames={})", self.silent_frames);
+            }
             // PARK. No draw, and critically no commit either.
             //
             // A bufferless commit is free for us but not for the compositor:
@@ -677,9 +693,26 @@ impl AppState {
             );
             gl::BindVertexArray(0);
         }
+        // Ask for the next callback BEFORE the swap, never after.
+        //
+        // "The frame request will take effect on the next wl_surface.commit"
+        // (wayland.xml) -- it is double-buffered state like a buffer or a
+        // damage region, so it needs a commit AFTER it to be applied.
+        // eglSwapBuffers is that commit: Mesa attaches the new buffer, adds
+        // damage, and commits, all inside the call.
+        //
+        // Requesting it afterwards instead left the request sitting in pending
+        // state with nothing left to apply it, so the loop ran on the callback
+        // committed by the PREVIOUS draw -- self-sustaining only once two
+        // draws had happened, and dead the moment one draw did not swap (the
+        // silence park returns before this point) or the surface holding the
+        // in-flight callback was destroyed (new_output does exactly that).
+        //
+        // frame-then-swap is what weston-simple-egl does, and it keeps exactly
+        // one callback in flight with no dependence on a second commit.
+        self.surface.frame(qh, self.surface.clone());
         egl.swap_buffers(self.egl_display, self.egl_surface)
             .unwrap();
-        self.surface.frame(qh, self.surface.clone());
     }
 }
 
