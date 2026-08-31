@@ -131,6 +131,12 @@ fn main() {
     if let Some(mo) = &config.general.mono_option {
         cava_output_config.insert("mono_option".into(), mo.clone());
     }
+    let cava_input_config = config.general.audio_source.as_ref().map(|src| {
+        HashMap::from([
+            ("method".into(), "pulse".into()),
+            ("source".into(), src.clone()),
+        ])
+    });
     let cava_config = CavaConfig {
         general: CavaGeneralConfig {
             framerate: config.general.framerate,
@@ -144,6 +150,7 @@ fn main() {
             noise_reduction: config.smoothing.noise_reduction,
         },
         output: cava_output_config,
+        input: cava_input_config,
     };
     let string_cava_config: String = toml::to_string(&cava_config).unwrap();
     // CAVAWALL_DEBUG=1 shows exactly what cava is being told. cava is spawned
