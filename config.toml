@@ -17,7 +17,15 @@ background_color = { hex = "#000000", alpha = 0.0 }
 # channels = "mono"
 # With mono: "average" (cava's default), "left" or "right".
 # mono_option = "average"
-# Optionally you can set your monitor name, if your are on hyprland you can get it using `hyprctl monitors all`
+# Which monitor to draw on. Left unset, an external monitor is preferred and
+# the machine's own panel (eDP*/LVDS*/DSI*) is the fallback, re-evaluated
+# whenever one is plugged in or out -- so this only needs setting to override
+# that. Names come from `hyprctl monitors all` on Hyprland.
+#
+# CAVAWALL_OUTPUT in the environment overrides this, which is how an external
+# supervisor can move the visualiser between monitors without editing a file.
+# A name that matches nothing connected draws nothing at all, deliberately,
+# rather than falling back to some other monitor.
 # preferred_output = ""
 # Source cava captures from, forwarded to its [input] section as
 # method=pulse, source=<this>. Left unset, cava monitors whatever the current
