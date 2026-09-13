@@ -88,6 +88,7 @@ use std::{
 
 pub mod app_config;
 use app_config::*;
+pub mod scheme;
 pub mod cli_help;
 use cli_help::*;
 use std::collections::HashMap;
@@ -95,6 +96,27 @@ use std::collections::HashMap;
 const VERTEX_SHADER_SRC: &str = include_str!("shaders/vertex_shader.glsl");
 
 const FRAGMENT_SHADER_SRC: &str = include_str!("shaders/fragment_shader.glsl");
+
+/// Log a resolved palette as hex, which is how it is written in the config and
+/// in the scheme -- printing the f32 quads it becomes would be unreadable.
+fn debug_palette(what: &str, rgba: &[[f32; 4]]) {
+    if !debug_enabled() {
+        return;
+    }
+    let stops: Vec<String> = rgba
+        .iter()
+        .map(|c| {
+            format!(
+                "#{:02x}{:02x}{:02x}@{:.2}",
+                (c[0] * 255.0).round() as u8,
+                (c[1] * 255.0).round() as u8,
+                (c[2] * 255.0).round() as u8,
+                c[3]
+            )
+        })
+        .collect();
+    eprintln!("cavawall: {what} palette: {}", stops.join(" "));
+}
 
 fn main() {
     let config_filename: String;
@@ -142,6 +164,15 @@ fn main() {
         Ok(config) => config,
         Err(error) => panic!("Error parsing config: {}", error.message()),
     };
+    // Effective bar count. Startup-only by construction: it is written into
+    // the spawned cava's config below and baked into the index buffer further
+    // down, so there is no honest way to follow it live. See SchemeConfig::bars.
+    let follow_bars = config.scheme.as_ref().and_then(|s| s.bars).unwrap_or(false);
+    let bar_count = if follow_bars {
+        scheme::bar_count().unwrap_or(config.bars.amount)
+    } else {
+        config.bars.amount
+    };
     let mut cava_output_config: HashMap<String, String> = HashMap::from([
         ("method".into(), "raw".into()),
         ("raw_target".into(), "/dev/stdout".into()),
@@ -164,7 +195,7 @@ fn main() {
     let cava_config = CavaConfig {
         general: CavaGeneralConfig {
             framerate: config.general.framerate,
-            bars: config.bars.amount,
+            bars: bar_count,
             autosens: config.general.autosens,
             sensitivity: config.general.sensitivity,
         },
@@ -354,23 +385,26 @@ fn main() {
     let mut vao = 0;
     let mut ebo = 0;
     let mut gradient_colors_ssbo = 0;
-    let gradient_colors_rgba: Vec<[f32; 4]> = config
-        .colors
-        .iter()
-        .map(|color| array_from_config_color((color.1).clone()))
-        .collect();
+    // Ordered once and kept. A live re-resolve reuses this exact Vec rather
+    // than walking the HashMap again, which would be free to hand back a
+    // different order and silently reshuffle the gradient mid-session.
+    let color_stops = ordered_stops(&config.colors);
+    let follow_colors = config.scheme.as_ref().and_then(|s| s.colors).unwrap_or(false);
+    let initial_rgba = resolve_stops(
+        &color_stops,
+        if follow_colors { scheme::colours() } else { None }.as_ref(),
+    );
+    debug_palette(
+        if follow_colors { "initial (live)" } else { "initial (static)" },
+        &initial_rgba,
+    );
+    let buffer_data = gradient_buffer(&initial_rgba);
+    // Only watch when the palette actually follows the scheme, so the Option
+    // alone says whether live colours are on -- no second flag to disagree.
+    let scheme_watch = if follow_colors { scheme::Watch::new() } else { None };
 
-    let gradient_colors_size = gradient_colors_rgba.len() as i32;
-    let mut buffer_data: Vec<u8> = (gradient_colors_size).to_le_bytes().to_vec();
-    buffer_data.extend([0, 0, 0, 0].repeat(3)); // Fix for vec4 alignment
-    for color in gradient_colors_rgba.iter() {
-        for color_value in color {
-            buffer_data.extend_from_slice(&color_value.to_le_bytes());
-        }
-    }
-
-    let mut indices: Vec<u16> = vec![0; config.bars.amount as usize * 6];
-    for i in 0..config.bars.amount as usize {
+    let mut indices: Vec<u16> = vec![0; bar_count as usize * 6];
+    for i in 0..bar_count as usize {
         indices[i * 6] = i as u16 * 4;
         indices[i * 6 + 1] = i as u16 * 4 + 1;
         indices[i * 6 + 2] = i as u16 * 4 + 2;
@@ -449,7 +483,10 @@ fn main() {
         vao,
         vbo,
         windows_size_location,
-        bar_count: config.bars.amount,
+        bar_count,
+        gradient_colors_ssbo,
+        color_stops,
+        scheme_watch,
         bar_gap: config.bars.gap,
         max_height: config.bars.max_height.unwrap_or(1.0),
         silent_frames: 0,
@@ -499,6 +536,14 @@ struct AppState {
     vbo: u32,
     windows_size_location: i32,
     bar_count: u32,
+    /// Kept so the palette can be re-uploaded in place. Upstream created this
+    /// buffer and dropped the handle, which was fine when colours could only
+    /// ever be set once.
+    gradient_colors_ssbo: u32,
+    /// The configured stops, already in gradient order.
+    color_stops: Vec<ConfigColor>,
+    /// None when colours do not follow the scheme.
+    scheme_watch: Option<scheme::Watch>,
     bar_gap: f32,
     max_height: f32,
     silent_frames: u32,
@@ -548,6 +593,38 @@ impl AppState {
         std::process::exit(0);
     }
 
+    /// Re-resolve the palette against the current scheme and re-upload it.
+    ///
+    /// Cheap enough to do inline: one small buffer upload, no pipeline rebuild,
+    /// no surface reconfigure. Nothing reachable from here can change the stop
+    /// COUNT -- a role the scheme lacks falls back to that stop's own hex rather
+    /// than dropping it -- so no geometry is invalidated and the next frame
+    /// simply draws in the new colours.
+    ///
+    /// A scheme that will not read or parse leaves the current palette alone
+    /// instead of falling back to the static one. The file is written while we
+    /// may be reading it, and a momentary flash of the fallback palette every
+    /// time the wallpaper changes would be worse than a frame of staleness.
+    fn reload_colors(&mut self) {
+        let Some(live) = scheme::colours() else {
+            return;
+        };
+        let rgba = resolve_stops(&self.color_stops, Some(&live));
+        debug_palette("reloaded", &rgba);
+        let buf = gradient_buffer(&rgba);
+        unsafe {
+            gl::BindBuffer(gl::SHADER_STORAGE_BUFFER, self.gradient_colors_ssbo);
+            gl::BufferData(
+                gl::SHADER_STORAGE_BUFFER,
+                buf.len() as GLsizeiptr,
+                buf.as_ptr() as *const ffi::c_void,
+                gl::STATIC_DRAW,
+            );
+            gl::BindBufferBase(gl::SHADER_STORAGE_BUFFER, 0, self.gradient_colors_ssbo);
+            gl::BindBuffer(gl::SHADER_STORAGE_BUFFER, 0);
+        }
+    }
+
     /// Called on every event-loop timeout, whether or not the compositor sent
     /// anything. While parked this is the only thing running: it drains whatever
     /// cava has produced and unparks the moment a sample crosses the threshold.
@@ -572,6 +649,26 @@ impl AppState {
         if self.placed_on.is_none() {
             return;
         }
+
+        // Deliberately below the placement guard rather than above it. Both of
+        // these touch GL -- one re-uploads the SSBO, the other clears the
+        // surface before exec'ing -- and unplaced means there is no layer
+        // surface and no EGL surface to be current on. The cost is that a
+        // scheme or bar-count change arriving while no output is usable is not
+        // applied until the next one; the alternative is GL calls against a
+        // surface that does not exist, and nothing is on screen to update
+        // anyway.
+        //
+        // Above the idle early-return, though: parked means no draw and no
+        // commit, so a change arriving while silent would otherwise sit unread
+        // until audio resumed, and the bars would come back stale. Re-uploading
+        // costs one buffer write and needs no redraw -- parked implies the bars
+        // are already at zero, so there is nothing on screen whose colour
+        // anyone could see change.
+        if self.scheme_watch.as_ref().is_some_and(|w| w.take_event()) {
+            self.reload_colors();
+        }
+
         if !self.idle {
             // Running: the compositor's frame callbacks drive draw(), and this
             // tick has nothing to do. Deliberately NOT a second drive for
