@@ -40,7 +40,16 @@ amount = 76
 gap = 0.1
 
 [colors]
-# These parameters can be named however you like, only the values matter here.
+# The stops form a gradient from the TOP of the surface down, and their ORDER
+# matters -- the shader mixes each stop into the next one.
+#
+# Upstream's comment here said they "can be named however you like, only the
+# values matter", which was not true: this section deserialises into a hash map,
+# so the order came back arbitrary and randomised per run, and the gradient was
+# quietly shuffled on every launch. Stops are now ordered by the number at the
+# end of the key, which makes both `gradient_color_1..8` and `c1..c8` come out
+# in the order they are written. A key ending in no digits still works; it just
+# sorts by name, after the numbered ones.
 gradient_color_1 = '#94e2d5'
 gradient_color_2 = '#89dceb'
 gradient_color_3 = '#74c7ec'
@@ -49,6 +58,22 @@ gradient_color_5 = '#cba6f7'
 gradient_color_6 = '#f5c2e7'
 gradient_color_7 = '#eba0ac'
 gradient_color_8 = '#f38ba8'
+
+# Optional. Take part of the configuration from Caelestia's live state instead
+# of from this file, so its settings UI stays the single place those values are
+# set. Absent -- as it is on any machine without Caelestia -- means follow
+# nothing, and everything above applies as written.
+#
+# [scheme]
+# # Resolve each [colors] stop through a `role` key against Caelestia's palette,
+# # and re-resolve whenever the wallpaper changes. Applied in place, with no
+# # restart. Give the stop both a role and a hex; the hex stays the fallback:
+# #   c1 = { hex = "#ffcc80", alpha = 0.65, role = "yellow" }
+# colors = true
+# # Take the bar count from services.visualiserBars rather than [bars] amount.
+# # Startup-only: the count is written into the spawned cava's config and baked
+# # into the index buffer, so following it live would mean respawning cava.
+# bars = true
 
 [smoothing]
 # Smoothing just passes these parameters to cava, so description is also copied(I didn't add support to deprecated options)

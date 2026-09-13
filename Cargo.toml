@@ -22,6 +22,9 @@ khronos-egl = { version = "6.0.0", features = [
     "1_5",
 ] }
 serde = { version = "1.0.203", features = ["derive"] }
+# Caelestia writes JSON; reading it here is what removes the external script
+# that used to translate it into this program's TOML.
+serde_json = "1"
 # Pinned to an explicit revision. Upstream tracked this git dependency without
 # one, so cargo re-resolved it to whatever HEAD happened to be -- and HEAD has
 # since moved the delegate macros, which breaks the build outright. That is why
