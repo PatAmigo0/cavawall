@@ -119,17 +119,32 @@ pub fn bar_count() -> Option<u32> {
     }
 }
 
-/// A non-blocking inotify watch on the scheme directory.
+/// A non-blocking inotify watch over both files cavawall follows.
 ///
-/// Non-blocking on purpose: this is polled from the render loop's timeout
-/// callback, which must never stall waiting on a file that may not change for
-/// hours. The cost of a poll is one `read` returning EAGAIN.
+/// One inotify instance, not one per directory: a single fd carries any number
+/// of watch descriptors, and `inotify_event.wd` says which fired. So a frame
+/// costs one `read` returning EAGAIN rather than one per file.
+///
+/// Non-blocking on purpose: this is polled from the render loop and must never
+/// stall on a file that may not change for hours.
 pub struct Watch {
     fd: RawFd,
-    file: &'static str,
-    /// Owned rather than a local in `take_event`, which runs per watch per
-    /// frame: a zero-initialised 4 KiB local is a 4 KiB memset each time.
+    /// -1 when that file is not being followed.
+    scheme_wd: i32,
+    shell_wd: i32,
+    /// Owned rather than a local in `take`, which runs once per frame: a
+    /// zero-initialised 4 KiB local is a 4 KiB memset each time.
     buf: Box<EventBuf>,
+}
+
+/// Which of the watched files changed since the last drain.
+///
+/// Both answered at once because draining is destructive: asking one question
+/// at a time would make the second always come back false.
+#[derive(Default, Clone, Copy)]
+pub struct Changed {
+    pub scheme: bool,
+    pub shell: bool,
 }
 
 /// Backing store for the inotify queue, with its alignment pinned.
@@ -142,38 +157,62 @@ pub struct Watch {
 struct EventBuf([u8; 4096]);
 
 impl Watch {
-    /// None when there is nothing to watch - the directory does not exist (no
-    /// Caelestia), or inotify is unavailable. The caller carries on with
-    /// whatever the config file said.
-    pub fn new(dir: &Path, file: &'static str) -> Option<Self> {
-        if !dir.is_dir() {
+    /// None when nothing was asked for, or nothing could be watched - no
+    /// Caelestia, or inotify unavailable. The caller carries on with whatever
+    /// the config file said.
+    ///
+    /// Directories are watched rather than the files themselves, so a name
+    /// check is still needed on each event; see `take`.
+    pub fn new(scheme: bool, shell: bool) -> Option<Self> {
+        if !scheme && !shell {
             return None;
         }
         let fd = unsafe { libc::inotify_init1(libc::IN_CLOEXEC | libc::IN_NONBLOCK) };
         if fd < 0 {
             return None;
         }
-        let path = CString::new(dir.as_os_str().as_bytes()).ok()?;
+        let mut w = Self {
+            fd,
+            scheme_wd: -1,
+            shell_wd: -1,
+            buf: Box::new(EventBuf([0; 4096])),
+        };
+        if scheme {
+            w.scheme_wd = w.add(scheme_dir());
+        }
+        if shell {
+            w.shell_wd = w.add(shell_dir());
+        }
+        if w.scheme_wd < 0 && w.shell_wd < 0 {
+            return None; // Drop closes the fd
+        }
+        Some(w)
+    }
+
+    /// -1 if the directory is missing or the watch could not be added.
+    fn add(&self, dir: &Path) -> i32 {
+        if !dir.is_dir() {
+            return -1;
+        }
+        let Ok(path) = CString::new(dir.as_os_str().as_bytes()) else {
+            return -1;
+        };
         // IN_MOVED_TO as well as IN_CLOSE_WRITE: a write-then-rename produces
         // only the former, and which one a writer uses is not ours to decide.
         let mask = libc::IN_CLOSE_WRITE | libc::IN_MOVED_TO;
-        if unsafe { libc::inotify_add_watch(fd, path.as_ptr(), mask) } < 0 {
-            unsafe { libc::close(fd) };
-            return None;
-        }
-        Some(Self { fd, file, buf: Box::new(EventBuf([0; 4096])) })
+        unsafe { libc::inotify_add_watch(self.fd, path.as_ptr(), mask) }
     }
 
-    /// Drain every queued event and report whether any of them touched the file
-    /// this watch cares about.
+    /// Drain every queued event and report which watched files they touched.
     ///
     /// Draining fully in one call is the point: a write-then-rename delivers two
     /// events for one logical change, and reacting to each in turn would
     /// re-upload the same palette twice.
-    pub fn take_event(&mut self) -> bool {
+    pub fn take(&mut self) -> Changed {
         const HDR: usize = std::mem::size_of::<libc::inotify_event>();
+        let (scheme_wd, shell_wd) = (self.scheme_wd, self.shell_wd);
         let buf = &mut self.buf.0;
-        let mut hit = false;
+        let mut hit = Changed::default();
         loop {
             let n = unsafe { libc::read(self.fd, buf.as_mut_ptr().cast(), buf.len()) };
             if n <= 0 {
@@ -193,10 +232,15 @@ impl Watch {
                 // record must not expose bytes from an earlier one.
                 let end = (start + ev.len as usize).min(n);
                 if start < end {
-                    // The name is NUL-padded out to the record length.
+                    // The name is NUL-padded out to the record length. Matched
+                    // against the descriptor as well, so a shell.json dropped
+                    // into the scheme directory cannot pass for the real one.
                     let name = buf[start..end].split(|b| *b == 0).next().unwrap_or(&[]);
-                    if name == self.file.as_bytes() {
-                        hit = true;
+                    if ev.wd == scheme_wd && name == SCHEME_FILE.as_bytes() {
+                        hit.scheme = true;
+                    }
+                    if ev.wd == shell_wd && name == SHELL_FILE.as_bytes() {
+                        hit.shell = true;
                     }
                 }
                 off = start + ev.len as usize;
