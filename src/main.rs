@@ -79,6 +79,8 @@ use std::ffi::CString;
 use std::io::Write;
 use std::process::{exit, ChildStdout};
 use std::os::fd::AsRawFd;
+use std::path::PathBuf;
+use std::os::unix::ffi::OsStrExt;
 use std::{env, fs, ptr};
 use std::{
     io::{BufReader, Read},
@@ -221,6 +223,10 @@ fn main() {
         .stdin(Stdio::piped())
         .spawn()
         .expect("failed to spawn cava process");
+    // Captured before the field moves below leave `cava_process` partially moved
+    // and unusable as a whole. Needed so a re-exec can reap this child: see
+    // reexec(), where not having it leaked a zombie per bar-count change.
+    let cava_pid = cava_process.id();
     let mut cava_stdin = cava_process.stdin.unwrap();
     cava_stdin.write_all(string_cava_config.as_bytes()).unwrap();
     drop(cava_stdin);
@@ -401,7 +407,18 @@ fn main() {
     let buffer_data = gradient_buffer(&initial_rgba);
     // Only watch when the palette actually follows the scheme, so the Option
     // alone says whether live colours are on -- no second flag to disagree.
-    let scheme_watch = if follow_colors { scheme::Watch::new() } else { None };
+    let scheme_watch = if follow_colors {
+        scheme::Watch::new(scheme::scheme_dir(), scheme::SCHEME_FILE)
+    } else {
+        None
+    };
+    // Watched for the same reason the scheme is, but acted on differently: a new
+    // bar count cannot be applied in place, so this one re-execs. See reexec().
+    let bars_watch = if follow_bars {
+        scheme::Watch::new(scheme::shell_dir(), scheme::SHELL_FILE)
+    } else {
+        None
+    };
 
     let mut indices: Vec<u16> = vec![0; bar_count as usize * 6];
     for i in 0..bar_count as usize {
@@ -484,9 +501,11 @@ fn main() {
         vbo,
         windows_size_location,
         bar_count,
+        cava_pid,
         gradient_colors_ssbo,
         color_stops,
         scheme_watch,
+        bars_watch,
         bar_gap: config.bars.gap,
         max_height: config.bars.max_height.unwrap_or(1.0),
         silent_frames: 0,
@@ -544,6 +563,10 @@ struct AppState {
     color_stops: Vec<ConfigColor>,
     /// None when colours do not follow the scheme.
     scheme_watch: Option<scheme::Watch>,
+    /// None when the bar count does not follow Caelestia's settings.
+    bars_watch: Option<scheme::Watch>,
+    /// The cava child, kept so a re-exec can kill and reap it.
+    cava_pid: u32,
     bar_gap: f32,
     max_height: f32,
     silent_frames: u32,
@@ -591,6 +614,85 @@ impl AppState {
         // process goes away and its objects are destroyed.
         let _ = conn.roundtrip();
         std::process::exit(0);
+    }
+
+    /// Start over, because the bar count changed and cannot be changed in place.
+    ///
+    /// It reaches the GPU as an index buffer sized once at startup, and reaches
+    /// cava as a config written to that child's stdin at exec time. Neither is
+    /// reachable from here, so a fresh process is the only honest way to apply
+    /// a new count -- which is why colours update live and this does not.
+    ///
+    /// exec, rather than spawning cavawall-launch as everything else does. exec
+    /// keeps the PID, so every guard built on "is one running" stays true right
+    /// through the swap: the launcher's flock and 5s kill-wait, and
+    /// fullscreen-watch's instance count. There is never a moment with zero or
+    /// two instances, so the stacking race that lock exists for cannot start
+    /// here. The environment carries over too, so a CAVAWALL_OUTPUT that
+    /// fullscreen-watch set to move us to another monitor survives the restart.
+    fn reexec(&mut self) {
+        // The same transparent frame clear_and_exit paints, for the same reason:
+        // on exec our Wayland connection closes exactly as it would on a kill,
+        // and the compositor does not reliably repaint under a layer surface
+        // that just disappears. Without this the old bars stay burnt onto the
+        // wallpaper until something else damages that strip.
+        unsafe {
+            gl::ClearColor(0.0, 0.0, 0.0, 0.0);
+            gl::Clear(gl::COLOR_BUFFER_BIT);
+        }
+        let _ = egl.swap_buffers(self.egl_display, self.egl_surface);
+        self.surface.commit();
+        let _ = self.conn.roundtrip();
+
+        // Kill and reap cava before replacing our image, because exec keeps the
+        // PID and therefore keeps the children: the outgoing cava stays OUR
+        // child, the incoming image has no handle on it and never waits for it,
+        // and nothing else will ever collect it. It dies on its own the moment
+        // its stdout pipe closes, so what is left is a zombie -- one per
+        // bar-count change, all parented to a process that will not reap them.
+        // Measured before this existed: eight changes, seven <defunct> cava.
+        //
+        // SIGKILL rather than SIGTERM: cava owns no surface, no files and no
+        // cleanup worth waiting on, and we want it gone before the exec rather
+        // than at some point after it.
+        unsafe { libc::kill(self.cava_pid as libc::pid_t, libc::SIGKILL) };
+        // Reaps that child and any zombie an earlier re-exec left behind, since
+        // those are still ours for the same reason. Terminates on ECHILD.
+        loop {
+            if unsafe { libc::waitpid(-1, ptr::null_mut(), 0) } <= 0 {
+                break;
+            }
+        }
+
+        // argv[0] before current_exe(): cavawall-launch execs us by absolute
+        // path, and after a `cargo install` over a running instance
+        // /proc/self/exe reads back as "<path> (deleted)", which will not exec.
+        // Both are checked for existence so neither can hand over a dead path.
+        let program: Option<PathBuf> = env::args_os()
+            .next()
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute() && p.exists())
+            .or_else(|| env::current_exe().ok().filter(|p| p.exists()));
+        let args: Vec<CString> = env::args_os()
+            .filter_map(|a| CString::new(a.as_os_str().as_bytes()).ok())
+            .collect();
+
+        if let Some(program) = program {
+            if let Ok(prog) = CString::new(program.as_os_str().as_bytes()) {
+                let mut argv: Vec<*const libc::c_char> =
+                    args.iter().map(|a| a.as_ptr()).collect();
+                argv.push(ptr::null());
+                unsafe { libc::execv(prog.as_ptr(), argv.as_ptr()) };
+            }
+        }
+        // Only reachable if the exec failed. Carrying on at the old bar count
+        // beats dying over a settings change: the surface just cleared gets
+        // repainted by the next draw, so the visible cost is one blank frame.
+        eprintln!(
+            "cavawall: re-exec failed, keeping {} bars: {}",
+            self.bar_count,
+            std::io::Error::last_os_error()
+        );
     }
 
     /// Re-resolve the palette against the current scheme and re-upload it.
@@ -665,6 +767,18 @@ impl AppState {
         // costs one buffer write and needs no redraw -- parked implies the bars
         // are already at zero, so there is nothing on screen whose colour
         // anyone could see change.
+        //
+        // Bars first: a changed count re-execs, which re-reads the scheme on the
+        // way up anyway, so resolving colours before that would be thrown away.
+        if self.bars_watch.as_ref().is_some_and(|w| w.take_event()) {
+            // Every settings change rewrites the whole of shell.json, so most
+            // wake-ups here are about something else entirely. Compare before
+            // acting -- restarting the visualiser because an unrelated toggle
+            // moved would be indefensible.
+            if scheme::bar_count().is_some_and(|n| n != self.bar_count) {
+                self.reexec();
+            }
+        }
         if self.scheme_watch.as_ref().is_some_and(|w| w.take_event()) {
             self.reload_colors();
         }

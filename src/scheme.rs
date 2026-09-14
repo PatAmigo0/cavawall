@@ -24,7 +24,8 @@ use std::os::fd::RawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 
-const SCHEME_FILE: &str = "scheme.json";
+pub const SCHEME_FILE: &str = "scheme.json";
+pub const SHELL_FILE: &str = "shell.json";
 
 fn home() -> PathBuf {
     PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/root".into()))
@@ -49,6 +50,11 @@ pub fn scheme_dir() -> PathBuf {
     state_dir().join("caelestia")
 }
 
+/// Directory holding shell.json, Caelestia's own settings file.
+pub fn shell_dir() -> PathBuf {
+    config_dir().join("caelestia")
+}
+
 /// Role name -> bare `rrggbb`, as Caelestia writes it (no leading `#`).
 pub fn colours() -> Option<HashMap<String, String>> {
     let raw = std::fs::read_to_string(scheme_dir().join(SCHEME_FILE)).ok()?;
@@ -68,7 +74,7 @@ pub fn colours() -> Option<HashMap<String, String>> {
 /// well above anything the settings UI offers and only exists so a corrupt file
 /// cannot ask for a gigabyte of indices.
 pub fn bar_count() -> Option<u32> {
-    let raw = std::fs::read_to_string(config_dir().join("caelestia/shell.json")).ok()?;
+    let raw = std::fs::read_to_string(shell_dir().join(SHELL_FILE)).ok()?;
     let parsed: serde_json::Value = serde_json::from_str(&raw).ok()?;
     let n = parsed.get("services")?.get("visualiserBars")?.as_u64()?;
     if (1..=512).contains(&n) {
@@ -85,13 +91,14 @@ pub fn bar_count() -> Option<u32> {
 /// hours. The cost of a poll is one `read` returning EAGAIN.
 pub struct Watch {
     fd: RawFd,
+    file: &'static str,
 }
 
 impl Watch {
-    /// None when there is nothing to watch -- no Caelestia state directory, or
-    /// inotify unavailable. The caller keeps its static colours either way.
-    pub fn new() -> Option<Self> {
-        let dir = scheme_dir();
+    /// None when there is nothing to watch -- the directory does not exist (no
+    /// Caelestia), or inotify is unavailable. The caller carries on with
+    /// whatever the config file said.
+    pub fn new(dir: PathBuf, file: &'static str) -> Option<Self> {
         if !dir.is_dir() {
             return None;
         }
@@ -107,11 +114,11 @@ impl Watch {
             unsafe { libc::close(fd) };
             return None;
         }
-        Some(Self { fd })
+        Some(Self { fd, file })
     }
 
-    /// Drain every queued event and report whether any of them touched
-    /// scheme.json.
+    /// Drain every queued event and report whether any of them touched the file
+    /// this watch cares about.
     ///
     /// Draining fully in one call is the point: a write-then-rename delivers two
     /// events for one logical change, and reacting to each in turn would
@@ -136,7 +143,7 @@ impl Watch {
                     let start = off + hdr;
                     let raw = &buf[start..(start + len).min(buf.len())];
                     let name = raw.split(|b| *b == 0).next().unwrap_or(&[]);
-                    if name == SCHEME_FILE.as_bytes() {
+                    if name == self.file.as_bytes() {
                         hit = true;
                     }
                 }
