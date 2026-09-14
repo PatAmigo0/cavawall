@@ -71,8 +71,10 @@ gradient_color_8 = '#f38ba8'
 # #   c1 = { hex = "#ffcc80", alpha = 0.65, role = "yellow" }
 # colors = true
 # # Take the bar count from services.visualiserBars rather than [bars] amount.
-# # Startup-only: the count is written into the spawned cava's config and baked
-# # into the index buffer, so following it live would mean respawning cava.
+# # The count cannot change in place -- it is written into the spawned cava's
+# # config at exec time and baked into the GPU index buffer -- so cavawall
+# # re-execs itself when it changes. exec keeps the PID, so anything guarding on
+# # "is one running" never sees zero or two instances.
 # bars = true
 
 [smoothing]
