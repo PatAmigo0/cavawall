@@ -70,6 +70,17 @@ because Hyprland does not reliably repaint under a layer surface that vanishes.
 - The bar count is **startup-only**: it is written into cava's config at exec
   time and baked into the index buffer. Changing it re-execs (`reexec()`), which
   must kill and reap cava first - exec keeps the PID, so it keeps the children.
+- The inotify watch is polled from `draw()`, not registered with calloop. That
+  looks backwards and is not: calloop polls once at the top of `dispatch_events`
+  and then dispatches ready sources, while `WaylandSource::process_events` loops
+  on `dispatch_pending` until the queue drains - and every `draw()` in that loop
+  calls `eglSwapBuffers`, which reads the socket and refills it. The loop does
+  not end while audio plays, so no second poll happens and a registered source
+  would be starved exactly as the timeout callback is. Measured: `draw=29,
+  poll_resume=0` over the first second of playback.
+- The fragment shader indexes `gradient_colors_size - 2` with no lower bound.
+  That is safe only because `gradient_buffer()` uploads a lone configured stop
+  twice; do not "optimise" that duplication away.
 
 ## Before calling it done
 
