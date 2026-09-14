@@ -54,15 +54,15 @@ because Hyprland does not reliably repaint under a layer surface that vanishes.
   colour - and `Uniform2f` only in `configure()`. `draw()` binds `ARRAY_BUFFER`
   and nothing else. Anything that binds a vertex array or a program, or leaves
   `ARRAY_BUFFER` pointing elsewhere, breaks that invariant silently.
-- **Only the two top corners of each bar move.** The x columns and the bottom
-  edge come from `static_vertices()` at startup; do not recompute them per frame.
+- **One float per bar is the entire per-frame vertex payload.** Bars are
+  instances of a static unit quad; width and stride are uniforms and the column
+  comes from `gl_InstanceID`. Do not reintroduce a per-bar vertex array.
 - **Silence is decided in exactly one place**, `is_silent()`, on the raw u16
   samples. `draw()` parks on it and `poll_resume()` unparks on it; two copies
   drift and the visualiser parks at one threshold and wakes at another.
 
 ## Things that look wrong but are not
 
-- `DrawElements` takes an **index count**, not bytes: `bar_count * 6`.
 - `surface.frame()` goes **before** `swap_buffers`, not after - the request is
   double-buffered state and needs a commit after it, which the swap provides.
 - The park path deliberately does **not** commit. Hyprland damages a layer by
