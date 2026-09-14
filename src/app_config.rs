@@ -249,18 +249,29 @@ fn live_colour(stop: &ConfigColor, scheme: Option<&HashMap<String, String>>) -> 
 pub fn gradient_buffer(rgba: &[[f32; 4]]) -> Vec<u8> {
     /// i32 count plus three words of padding to reach the stops' vec4 alignment.
     const HEADER: usize = 16;
+    let stops = uploaded_stops(rgba.len());
     // Sized up front: the old form allocated a 4-byte Vec, a second one from
     // `repeat(3)` to copy zeroes out of, then grew the first to length.
-    let mut buf = Vec::with_capacity(HEADER + std::mem::size_of_val(rgba));
-    buf.extend_from_slice(&(rgba.len() as i32).to_le_bytes());
+    let mut buf = Vec::with_capacity(HEADER + stops * std::mem::size_of::<[f32; 4]>());
+    buf.extend_from_slice(&(stops as i32).to_le_bytes());
     buf.extend_from_slice(&[0u8; HEADER - 4]);
-    for color in rgba {
+    // A lone stop is written twice. It costs 16 bytes and lets the shader index
+    // `size - 2` unconditionally, which is what makes its clamp branchless.
+    for color in rgba.iter().chain(rgba.last().filter(|_| rgba.len() == 1)) {
         for v in color {
             buf.extend_from_slice(&v.to_le_bytes());
         }
     }
-    debug_assert_eq!(buf.len(), HEADER + std::mem::size_of_val(rgba));
+    debug_assert_eq!(buf.len(), HEADER + stops * std::mem::size_of::<[f32; 4]>());
     buf
+}
+
+/// Stops as the GPU sees them: a single configured stop is uploaded twice, so
+/// the fragment shader always has a pair to mix between. `GradientScale` must
+/// be derived from this, not from the configured count.
+#[must_use]
+pub fn uploaded_stops(configured: usize) -> usize {
+    configured.max(2)
 }
 
 #[cfg(test)]
@@ -351,6 +362,18 @@ mod tests {
     /// The layout the fragment shader's std430 block declares. If these two ever
     /// disagree the result is silent garbage, so the count and the padding are
     /// pinned here rather than left to be re-derived by eye.
+    /// A one-colour `[colors]` must still give the shader two stops to mix
+    /// between, or its unconditional `size - 2` index goes negative.
+    #[test]
+    fn a_lone_stop_is_uploaded_twice() {
+        let buf = gradient_buffer(&[[0.25, 0.5, 0.75, 1.0]]);
+        assert_eq!(&buf[0..4], &2i32.to_le_bytes(), "count reported to the shader");
+        assert_eq!(buf.len(), 16 + 2 * 16);
+        assert_eq!(&buf[16..32], &buf[32..48], "both stops identical");
+        assert_eq!(uploaded_stops(1), 2);
+        assert_eq!(uploaded_stops(8), 8);
+    }
+
     #[test]
     fn gradient_buffer_matches_std430_layout() {
         let buf = gradient_buffer(&[[1.0, 0.0, 0.0, 1.0], [0.0, 1.0, 0.0, 1.0]]);
