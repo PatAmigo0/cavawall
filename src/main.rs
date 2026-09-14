@@ -25,7 +25,7 @@ use wayland_client::{
 };
 use wayland_egl::WlEglSurface;
 
-use core::{ffi, panic};
+use core::ffi;
 use egl::API as egl;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -40,19 +40,36 @@ const SILENCE_THRESHOLD: f32 = 0.005;
 /// The same threshold in cava's raw 16-bit units, for comparing without
 /// unpacking to f32 first.
 const SILENCE_RAW: u16 = (SILENCE_THRESHOLD * 65530.0) as u16;
+
+/// `2.0 * (n / 65530.0) - 1.0` folded into one multiply-add per bar.
+const BAR_NDC_SCALE: f32 = 2.0 / 65530.0;
+
 /// Frames of continuous silence before parking. Measured, not guessed: with
 /// monstercat=1.5 and noise_reduction=60 a tone cut from full volume decays
-/// below the threshold in 8 frames (0.18s). 23 frames is 0.51s -- roughly 3x
+/// below the threshold in 8 frames (0.18s). 23 frames is 0.51s - roughly 3x
 /// the real decay, the remainder being hysteresis so that a gap between tracks
 /// does not park and unpark repeatedly.
 const SILENT_GRACE_FRAMES: u32 = 23;
 
+/// Is this raw cava frame silence?
+///
+/// The one place that question is answered. draw() parks on it and
+/// poll_resume() unparks on it, and they used to ask it in different units.
+/// Deciding on raw bytes also keeps f32 unpacking off the silent path.
+fn is_silent(frame: &[u8]) -> bool {
+    frame
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .all(|s| u16::from_le_bytes(*s) <= SILENCE_RAW)
+}
+
 /// Connector-name prefixes that mean "the machine's own panel". Everything
-/// else -- HDMI, DP, DVI, a dock -- counts as external and is preferred.
+/// else - HDMI, DP, DVI, a dock - counts as external and is preferred.
 ///
 /// Deliberately a policy rather than a per-machine hardware fact. It needs no
 /// list to keep in sync across machines, it works on a machine whose dock is
-/// DP rather than HDMI, and it survives the panel's connector being renamed --
+/// DP rather than HDMI, and it survives the panel's connector being renamed -
 /// eDP-1 vs eDP-2 has been observed to change across reboots on this hardware
 /// with no hardware change at all, which is exactly what a hardcoded name
 /// cannot survive.
@@ -64,18 +81,18 @@ fn is_builtin_connector(name: &str) -> bool {
 
 /// CAVAWALL_DEBUG, resolved once. Some of the call sites below sit in the
 /// per-frame path, and env::var allocates a String and takes the process-wide
-/// environment lock on every call -- not something to do 45 times a second
+/// environment lock on every call - not something to do 45 times a second
 /// just to decide not to print.
 fn debug_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| env::var("CAVAWALL_DEBUG").is_ok_and(|v| v != "0"))
+    *ON.get_or_init(|| env::var_os("CAVAWALL_DEBUG").is_some_and(|v| v != "0"))
 }
 
 extern "C" fn on_terminate(_sig: libc::c_int) {
     // Only async-signal-safe work here: flip a flag, nothing else.
     EXITING.store(true, Ordering::SeqCst);
 }
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 use std::io::Write;
 use std::process::{exit, ChildStdout};
 use std::os::fd::AsRawFd;
@@ -99,8 +116,116 @@ const VERTEX_SHADER_SRC: &str = include_str!("shaders/vertex_shader.glsl");
 
 const FRAGMENT_SHADER_SRC: &str = include_str!("shaders/fragment_shader.glsl");
 
+/// The vertex buffer with everything the audio does not move already in it.
+///
+/// A bar is a quad of four `[x, y]` vertices - top-left, top-right,
+/// bottom-left, bottom-right - and only the two TOP y values move per frame.
+/// The rest follows from the bar count and gap, fixed until a re-exec. They
+/// were recomputed every frame - four int-to-float conversions, four
+/// multiplies and two adds per bar - to write back the same six floats.
+fn static_vertices(bar_count: u32, gap: f32) -> Box<[f32]> {
+    let bars = bar_count as f32;
+    // NDC is 2.0 wide, shared by `bars` bars and `bars - 1` gaps of `gap` bars.
+    let bar_width = 2.0 / (bars + (bars - 1.0) * gap);
+    // Left edge to the next left edge.
+    let stride = bar_width * (1.0 + gap);
+    let mut v = vec![0.0f32; bar_count as usize * 8].into_boxed_slice();
+    for (i, quad) in v.as_chunks_mut::<8>().0.iter_mut().enumerate() {
+        let left = stride * i as f32 - 1.0;
+        let right = left + bar_width;
+        quad[0] = left; // top-left x; quad[1] is the height, written per frame
+        quad[2] = right; // top-right x; quad[3] likewise
+        quad[4] = left; // bottom-left
+        quad[5] = -1.0;
+        quad[6] = right; // bottom-right
+        quad[7] = -1.0;
+    }
+    v
+}
+
+/// Compile and link the one program this renderer has.
+///
+/// # Panics
+///
+/// On a compile or link failure, with the driver's log. COMPILE_STATUS went
+/// unchecked before, so a bad shader surfaced only as a link failure whose log
+/// does not name the offending line.
+fn build_program() -> u32 {
+    let vert = compile_shader(gl::VERTEX_SHADER, VERTEX_SHADER_SRC, "vertex");
+    let frag = compile_shader(gl::FRAGMENT_SHADER, FRAGMENT_SHADER_SRC, "fragment");
+    // SAFETY: main() has a current EGL context and loaded GL symbols by here.
+    unsafe {
+        let program = gl::CreateProgram();
+        gl::AttachShader(program, vert);
+        gl::AttachShader(program, frag);
+        gl::LinkProgram(program);
+        let mut status: gl::types::GLint = 0;
+        gl::GetProgramiv(program, gl::LINK_STATUS, &mut status);
+        if status != gl::TRUE as gl::types::GLint {
+            panic!("shader program failed to link:\n{}", program_log(program));
+        }
+        // The linked program holds everything it needs; left attached, as they
+        // were, both stages stay alive for the life of the process.
+        gl::DetachShader(program, vert);
+        gl::DetachShader(program, frag);
+        gl::DeleteShader(vert);
+        gl::DeleteShader(frag);
+        program
+    }
+}
+
+/// Compile one stage straight from a `&str`: glShaderSource takes an explicit
+/// length, so the `CString` only added a NUL the driver was told to ignore.
+fn compile_shader(kind: gl::types::GLenum, src: &str, what: &str) -> u32 {
+    // SAFETY: as build_program; `src` outlives the ShaderSource call.
+    unsafe {
+        let shader = gl::CreateShader(kind);
+        gl::ShaderSource(
+            shader,
+            1,
+            &src.as_ptr().cast::<gl::types::GLchar>(),
+            &(src.len() as gl::types::GLint),
+        );
+        gl::CompileShader(shader);
+        let mut status: gl::types::GLint = 0;
+        gl::GetShaderiv(shader, gl::COMPILE_STATUS, &mut status);
+        if status != gl::TRUE as gl::types::GLint {
+            let mut len: gl::types::GLint = 0;
+            gl::GetShaderiv(shader, gl::INFO_LOG_LENGTH, &mut len);
+            panic!(
+                "{what} shader failed to compile:\n{}",
+                read_log(len, |n, written, buf| gl::GetShaderInfoLog(shader, n, written, buf))
+            );
+        }
+        shader
+    }
+}
+
+fn program_log(program: u32) -> String {
+    // SAFETY: live program name, current context.
+    unsafe {
+        let mut len: gl::types::GLint = 0;
+        gl::GetProgramiv(program, gl::INFO_LOG_LENGTH, &mut len);
+        read_log(len, |n, written, buf| gl::GetProgramInfoLog(program, n, written, buf))
+    }
+}
+
+/// Drain an info log. Lossy and truncated to what was actually written: this
+/// only runs on the way to a panic, so a short write must not turn a compile
+/// error into an unrelated UTF-8 one.
+unsafe fn read_log(
+    len: gl::types::GLint,
+    get: impl Fn(GLsizei, *mut GLsizei, *mut gl::types::GLchar),
+) -> String {
+    let mut buf = vec![0u8; len.max(0) as usize];
+    let mut written: GLsizei = 0;
+    get(len, &mut written, buf.as_mut_ptr().cast());
+    buf.truncate(written.max(0) as usize);
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
 /// Log a resolved palette as hex, which is how it is written in the config and
-/// in the scheme -- printing the f32 quads it becomes would be unreadable.
+/// in the scheme - printing the f32 quads it becomes would be unreadable.
 fn debug_palette(what: &str, rgba: &[[f32; 4]]) {
     if !debug_enabled() {
         return;
@@ -120,36 +245,38 @@ fn debug_palette(what: &str, rgba: &[[f32; 4]]) {
     eprintln!("cavawall: {what} palette: {}", stops.join(" "));
 }
 
+/// Config path when no `--config` was given. The inherited path is now built
+/// only once the preferred one is ruled out, not unconditionally.
+fn default_config_path() -> PathBuf {
+    let home = PathBuf::from(env::var_os("HOME").expect("Unable to get home directory"));
+    let own = home.join(".config/cavawall/config.toml");
+    if own.exists() {
+        return own;
+    }
+    // Upstream's path is still honoured so that anyone switching over from
+    // wallpaper-cava keeps a working visualiser before they move anything.
+    let inherited = home.join(".config/wallpaper-cava/config.toml");
+    if inherited.exists() {
+        eprintln!(
+            "cavawall: using {}\n\
+             cavawall: move it to ~/.config/cavawall/config.toml when convenient",
+            inherited.display()
+        );
+        return inherited;
+    }
+    PathBuf::from("config.toml")
+}
+
 fn main() {
-    let config_filename: String;
-    let args: Vec<String> = env::args().collect();
-    if args.len() == 3 {
-        if args[1] != "--config" {
+    let mut args = env::args_os().skip(1);
+    let config_filename = match (args.next(), args.next(), args.next()) {
+        (None, _, _) => default_config_path(),
+        (Some(flag), Some(path), None) if flag == "--config" => PathBuf::from(path),
+        _ => {
             print_help();
             exit(0);
         }
-        config_filename = args[2].clone();
-    } else if args.len() != 1 {
-        print_help();
-        exit(0);
-    } else {
-        let home_dir = env::var("HOME").expect("Unable to get home directory");
-        let own = format!("{}/.config/cavawall/config.toml", home_dir);
-        // Upstream's path is still honoured so that anyone switching over from
-        // wallpaper-cava keeps a working visualiser before they move anything.
-        let inherited = format!("{}/.config/wallpaper-cava/config.toml", home_dir);
-        config_filename = if fs::metadata(&own).is_ok() {
-            own
-        } else if fs::metadata(&inherited).is_ok() {
-            eprintln!(
-                "cavawall: using {inherited}\n\
-                 cavawall: move it to ~/.config/cavawall/config.toml when convenient"
-            );
-            inherited
-        } else {
-            "config.toml".to_string()
-        }
-    }
+    };
     // Shut down cleanly on SIGTERM so the surface can be cleared first. A hard
     // kill leaves the last frame burnt into the background: the layer surface
     // goes away, but Hyprland does not reliably repaint underneath it, so a
@@ -161,7 +288,8 @@ fn main() {
         libc::signal(libc::SIGINT, on_terminate as *const () as libc::sighandler_t);
     }
 
-    let config_str = fs::read_to_string(config_filename).expect("Unable to read config file");
+    let config_str = fs::read_to_string(&config_filename)
+        .unwrap_or_else(|e| panic!("unable to read {}: {e}", config_filename.display()));
     let config: Config = match toml::from_str(&config_str) {
         Ok(config) => config,
         Err(error) => panic!("Error parsing config: {}", error.message()),
@@ -175,6 +303,14 @@ fn main() {
     } else {
         config.bars.amount
     };
+    // Both ends are silent failures in release: zero divides by zero in the
+    // bar-width maths, and past MAX_BARS the u16 indices wrap onto other bars'
+    // vertices. scheme::bar_count() clamps; `[bars] amount` never did.
+    const MAX_BARS: u32 = (u16::MAX as u32 - 3) / 4;
+    assert!(
+        (1..=MAX_BARS).contains(&bar_count),
+        "bar count must be between 1 and {MAX_BARS}, got {bar_count}"
+    );
     let mut cava_output_config: HashMap<String, String> = HashMap::from([
         ("method".into(), "raw".into()),
         ("raw_target".into(), "/dev/stdout".into()),
@@ -218,6 +354,11 @@ fn main() {
     }
     let mut cmd = Command::new("cava");
     cmd.arg("-p").arg("/dev/stdin");
+    // The `Child` is taken apart rather than kept: exec keeps our PID and so
+    // keeps this child, so what must survive is the raw pid. reexec() kills and
+    // waits before replacing our image, and a cava that dies on its own takes
+    // draw() out through clear_and_exit(), after which init collects it.
+    #[allow(clippy::zombie_processes)]
     let cava_process = cmd
         .stdout(Stdio::piped())
         .stdin(Stdio::piped())
@@ -239,7 +380,7 @@ fn main() {
         EventLoop::try_new().expect("Failed to initialize the event loop!");
     let loop_handle = event_loop.handle();
     // WaylandSource is inserted further down, AFTER the output list has been
-    // settled with an explicit roundtrip -- see the note there.
+    // settled with an explicit roundtrip - see the note there.
     let frame_duration = Duration::from_secs(1) / config.general.framerate;
     let compositor = CompositorState::bind(&globals, &qh).expect("wl_compositor not available");
     let surface = compositor.create_surface(&qh);
@@ -256,7 +397,7 @@ fn main() {
     // Without this the surface keeps the default input region (its whole area),
     // so it silently takes pointer focus over the entire screen. It never calls
     // set_cursor, and in Wayland the cursor shape is whatever the focused
-    // surface last asked for -- so the shape from the previous window (e.g. the
+    // surface last asked for - so the shape from the previous window (e.g. the
     // I-beam from a terminal) stays until some other client sets one. Moving
     // onto an "empty" workspace leaves a stale cursor.
     //
@@ -273,7 +414,7 @@ fn main() {
     // area other layers have reserved", so any bar with an exclusive zone
     // shifts and shrinks the wallpaper: on a 1920-wide output with a bar, this
     // surface was placed at x=25 and ran 25px off the right edge. -1 means
-    // "ignore exclusive zones", which is what a wallpaper wants -- it belongs
+    // "ignore exclusive zones", which is what a wallpaper wants - it belongs
     // to the output, not to whatever is left over.
     layer_surface.set_exclusive_zone(-1);
     layer_surface.set_size(256, 256);
@@ -334,59 +475,22 @@ fn main() {
     )
     .unwrap();
     gl::load_with(|name| egl.get_proc_address(name).unwrap() as *const std::ffi::c_void);
+    // CStr, not CString::from_raw: glGetString returns a pointer into the
+    // driver's static string table, and from_raw claims ownership, so the
+    // String it became freed a block Rust never allocated. Also handles the
+    // null the old form dereferenced outright.
     let version = unsafe {
-        let data = gl::GetString(gl::VERSION) as *const i8;
-        CString::from_raw(data as *mut _).into_string().unwrap()
+        let data = gl::GetString(gl::VERSION);
+        if data.is_null() {
+            std::borrow::Cow::Borrowed("unknown")
+        } else {
+            CStr::from_ptr(data.cast()).to_string_lossy()
+        }
     };
 
-    println!("OpenGL version: {}", version);
+    println!("OpenGL version: {version}");
     println!("EGL version: {}", egl.version());
-    let vert_shader_source = CString::new(VERTEX_SHADER_SRC).unwrap();
-    let vert_shader = unsafe { gl::CreateShader(gl::VERTEX_SHADER) };
-    unsafe {
-        gl::ShaderSource(
-            vert_shader,
-            1,
-            &vert_shader_source.as_ptr(),
-            std::ptr::null(),
-        );
-        gl::CompileShader(vert_shader);
-    }
-    let frag_shader_source = CString::new(FRAGMENT_SHADER_SRC).unwrap();
-    let frag_shader = unsafe { gl::CreateShader(gl::FRAGMENT_SHADER) };
-    unsafe {
-        gl::ShaderSource(
-            frag_shader,
-            1,
-            &frag_shader_source.as_ptr(),
-            std::ptr::null(),
-        );
-        gl::CompileShader(frag_shader);
-    }
-
-    let shader_program = unsafe { gl::CreateProgram() };
-    unsafe {
-        gl::AttachShader(shader_program, vert_shader);
-        gl::AttachShader(shader_program, frag_shader);
-        gl::LinkProgram(shader_program);
-        let mut status = gl::FALSE as gl::types::GLint;
-        gl::GetProgramiv(shader_program, gl::LINK_STATUS, &mut status);
-        if status != 1 {
-            let mut error_log_size: gl::types::GLint = 0;
-            gl::GetProgramiv(shader_program, gl::INFO_LOG_LENGTH, &mut error_log_size);
-            let mut error_log: Vec<u8> = Vec::with_capacity(error_log_size as usize);
-            gl::GetProgramInfoLog(
-                shader_program,
-                error_log_size,
-                &mut error_log_size,
-                error_log.as_mut_ptr() as *mut _,
-            );
-
-            error_log.set_len(error_log_size as usize);
-            let log = String::from_utf8(error_log).unwrap();
-            panic!("{}", log);
-        }
-    }
+    let shader_program = build_program();
     let mut vbo = 0;
     let mut vao = 0;
     let mut ebo = 0;
@@ -406,7 +510,7 @@ fn main() {
     );
     let buffer_data = gradient_buffer(&initial_rgba);
     // Only watch when the palette actually follows the scheme, so the Option
-    // alone says whether live colours are on -- no second flag to disagree.
+    // alone says whether live colours are on - no second flag to disagree.
     let scheme_watch = if follow_colors {
         scheme::Watch::new(scheme::scheme_dir(), scheme::SCHEME_FILE)
     } else {
@@ -420,15 +524,19 @@ fn main() {
         None
     };
 
-    let mut indices: Vec<u16> = vec![0; bar_count as usize * 6];
-    for i in 0..bar_count as usize {
-        indices[i * 6] = i as u16 * 4;
-        indices[i * 6 + 1] = i as u16 * 4 + 1;
-        indices[i * 6 + 2] = i as u16 * 4 + 2;
-        indices[i * 6 + 3] = i as u16 * 4 + 1;
-        indices[i * 6 + 4] = i as u16 * 4 + 2;
-        indices[i * 6 + 5] = i as u16 * 4 + 3;
+    // Two triangles per bar sharing the 1-2 edge, extended a pair at a time
+    // rather than six bounds-checked stores through a recomputed base index.
+    let mut indices: Vec<u16> = Vec::with_capacity(bar_count as usize * 6);
+    for bar in 0..bar_count as u16 {
+        let v = bar * 4;
+        indices.extend_from_slice(&[v, v + 1, v + 2, v + 1, v + 2, v + 3]);
     }
+
+    // Sized from the bar count, which cannot change without a re-exec, so both
+    // are allocated once here rather than on every frame. See static_vertices.
+    let vertices = static_vertices(bar_count, config.bars.gap);
+    let cava_buffer = vec![0u8; bar_count as usize * 2].into_boxed_slice();
+    let background_color = array_from_config_color(&config.general.background_color);
 
     let window_size_string = CString::new("WindowSize").unwrap();
     unsafe {
@@ -463,7 +571,24 @@ fn main() {
             std::ptr::null(),
         );
         gl::EnableVertexAttribArray(0);
-        gl::BindVertexArray(0);
+
+        // Render state that never changes, set once instead of per frame.
+        // draw() re-issued all four every frame and unbound the vertex array
+        // only to rebind the same one 16ms later. The only thing that undoes
+        // any of it is clear_and_exit/reexec, both on the way out.
+        //
+        // Rests on nothing else binding a vertex array or a program;
+        // reload_colors() touches only SHADER_STORAGE_BUFFER and resets it.
+        // ARRAY_BUFFER is left to draw(), where it is load-bearing.
+        gl::UseProgram(shader_program);
+        gl::Enable(gl::BLEND);
+        gl::BlendFunc(gl::SRC_ALPHA, gl::ONE_MINUS_SRC_ALPHA);
+        gl::ClearColor(
+            background_color[0],
+            background_color[1],
+            background_color[2],
+            background_color[3],
+        );
     }
 
     let windows_size_location =
@@ -471,7 +596,7 @@ fn main() {
 
     // CAVAWALL_OUTPUT wins over the config file, and is how fullscreen-watch
     // moves the visualiser between monitors: it relaunches with this set, so
-    // argv stays exactly [binary]. That matters -- the launcher, the fish
+    // argv stays exactly [binary]. That matters - the launcher, the fish
     // toggle and fullscreen-watch itself all identify this process by an
     // EXACT argv match, and a --output flag would have silently broken all
     // three at once.
@@ -496,8 +621,6 @@ fn main() {
         egl_config,
         egl_context,
         egl_display,
-        shader_program,
-        vao,
         vbo,
         windows_size_location,
         bar_count,
@@ -506,10 +629,11 @@ fn main() {
         color_stops,
         scheme_watch,
         bars_watch,
-        bar_gap: config.bars.gap,
+        vertices,
+        cava_buffer,
         max_height: config.bars.max_height.unwrap_or(1.0),
         silent_frames: 0,
-        background_color: array_from_config_color(config.general.background_color),
+        background_color,
         pinned_output,
         placed_on: None,
         placed_size: None,
@@ -550,8 +674,9 @@ struct AppState {
     egl_config: egl::Config,
     egl_context: egl::Context,
     egl_display: egl::Display,
-    shader_program: u32,
-    vao: u32,
+    /// The vertex buffer draw() streams into. The program, vertex array and
+    /// index buffer need no handle: bound once at startup, never rebound. The
+    /// SSBO below is the exception - the palette is re-uploaded in place.
     vbo: u32,
     windows_size_location: i32,
     bar_count: u32,
@@ -567,12 +692,19 @@ struct AppState {
     bars_watch: Option<scheme::Watch>,
     /// The cava child, kept so a re-exec can kill and reap it.
     cava_pid: u32,
-    bar_gap: f32,
+    /// Vertex buffer, reused. All but the two top corners of each bar is
+    /// filled in at startup; see static_vertices.
+    vertices: Box<[f32]>,
+    /// One raw cava frame, reused. Both were `vec![..]` locals in draw(), so an
+    /// idle machine still did three allocations and three frees per frame.
+    cava_buffer: Box<[u8]>,
     max_height: f32,
     silent_frames: u32,
+    /// Only read to restore the clear colour if a re-exec fails; it is set once
+    /// at startup now rather than per frame.
     background_color: [f32; 4],
     /// Explicit output pin: CAVAWALL_OUTPUT, else the config's
-    /// preferred_output. None means choose automatically -- an external
+    /// preferred_output. None means choose automatically - an external
     /// monitor if one is connected, the built-in panel otherwise.
     pinned_output: Option<String>,
     /// Name of the output we currently have a mapped surface on. None means
@@ -585,12 +717,12 @@ struct AppState {
     /// False until the startup roundtrip has enumerated every output. Outputs
     /// are announced one at a time, so acting on the first one to arrive meant
     /// placing on the laptop panel and then moving to the external monitor a
-    /// moment later -- a visible flash of bars on the wrong screen at login.
+    /// moment later - a visible flash of bars on the wrong screen at login.
     startup_settled: bool,
     compositor: CompositorState,
     /// Parked: silent, not committing, waiting for audio on the idle tick.
     idle: bool,
-    /// Kept so the idle tick can request a frame callback -- event_loop.run's
+    /// Kept so the idle tick can request a frame callback - event_loop.run's
     /// callback hands back only &mut AppState, not the QueueHandle.
     qh: QueueHandle<AppState>,
     /// Same reason, for clear_and_exit: SIGTERM must be honoured while parked,
@@ -603,7 +735,7 @@ impl AppState {
     /// compositor is left with a clean surface rather than our last set of
     /// bars. Without this a hard kill leaves that frame visible on the
     /// background until something else forces a repaint.
-    fn clear_and_exit(&mut self, conn: &Connection) -> ! {
+    fn clear_and_exit(&mut self) -> ! {
         unsafe {
             gl::ClearColor(0.0, 0.0, 0.0, 0.0);
             gl::Clear(gl::COLOR_BUFFER_BIT);
@@ -612,7 +744,7 @@ impl AppState {
         self.surface.commit();
         // Round-trip so the commit actually reaches the compositor before the
         // process goes away and its objects are destroyed.
-        let _ = conn.roundtrip();
+        let _ = self.conn.roundtrip();
         std::process::exit(0);
     }
 
@@ -626,7 +758,7 @@ impl AppState {
     /// gets a turn when the Wayland source runs out of work. While audio is
     /// playing it never does: the compositor's frame callbacks arrive faster
     /// than draw() can consume cava frames at 45fps, so there is always another
-    /// event waiting. Measured on this machine -- zero invocations in six
+    /// event waiting. Measured on this machine - zero invocations in six
     /// seconds of playback, against ~270 expected. poll_resume is reached only
     /// once draw() parks on silence, which is exactly what its own doc comment
     /// says and exactly what makes it the wrong place to watch a file from.
@@ -636,8 +768,8 @@ impl AppState {
     /// happened until it stopped. Every test of this passed because a test
     /// machine with no audio is permanently parked.
     ///
-    /// Guarded on placement because both paths touch GL -- one re-uploads the
-    /// SSBO, the other clears the surface before exec'ing -- and unplaced means
+    /// Guarded on placement because both paths touch GL - one re-uploads the
+    /// SSBO, the other clears the surface before exec'ing - and unplaced means
     /// there is no EGL surface to be current on. A change arriving while no
     /// output is usable waits for the next one; nothing is on screen anyway.
     fn poll_external(&mut self) {
@@ -646,16 +778,16 @@ impl AppState {
         }
         // Bars first: a changed count re-execs, which re-reads the scheme on the
         // way up anyway, so resolving colours before that would be thrown away.
-        if self.bars_watch.as_ref().is_some_and(|w| w.take_event()) {
+        if self.bars_watch.as_mut().is_some_and(|w| w.take_event()) {
             // Every settings change rewrites the whole of shell.json, so most
             // wake-ups here are about something else entirely. Compare before
-            // acting -- restarting the visualiser because an unrelated toggle
+            // acting - restarting the visualiser because an unrelated toggle
             // moved would be indefensible.
             if scheme::bar_count().is_some_and(|n| n != self.bar_count) {
                 self.reexec();
             }
         }
-        if self.scheme_watch.as_ref().is_some_and(|w| w.take_event()) {
+        if self.scheme_watch.as_mut().is_some_and(|w| w.take_event()) {
             self.reload_colors();
         }
     }
@@ -665,7 +797,7 @@ impl AppState {
     /// It reaches the GPU as an index buffer sized once at startup, and reaches
     /// cava as a config written to that child's stdin at exec time. Neither is
     /// reachable from here, so a fresh process is the only honest way to apply
-    /// a new count -- which is why colours update live and this does not.
+    /// a new count - which is why colours update live and this does not.
     ///
     /// exec, rather than spawning cavawall-launch as everything else does. exec
     /// keeps the PID, so every guard built on "is one running" stays true right
@@ -692,7 +824,7 @@ impl AppState {
         // PID and therefore keeps the children: the outgoing cava stays OUR
         // child, the incoming image has no handle on it and never waits for it,
         // and nothing else will ever collect it. It dies on its own the moment
-        // its stdout pipe closes, so what is left is a zombie -- one per
+        // its stdout pipe closes, so what is left is a zombie - one per
         // bar-count change, all parented to a process that will not reap them.
         // Measured before this existed: eight changes, seven <defunct> cava.
         //
@@ -732,6 +864,17 @@ impl AppState {
         // Only reachable if the exec failed. Carrying on at the old bar count
         // beats dying over a settings change: the surface just cleared gets
         // repainted by the next draw, so the visible cost is one blank frame.
+        //
+        // The clear colour has to go back: it is set once at startup now, so
+        // the transparent one above would otherwise stand for the session.
+        unsafe {
+            gl::ClearColor(
+                self.background_color[0],
+                self.background_color[1],
+                self.background_color[2],
+                self.background_color[3],
+            );
+        }
         eprintln!(
             "cavawall: re-exec failed, keeping {} bars: {}",
             self.bar_count,
@@ -743,8 +886,8 @@ impl AppState {
     ///
     /// Cheap enough to do inline: one small buffer upload, no pipeline rebuild,
     /// no surface reconfigure. Nothing reachable from here can change the stop
-    /// COUNT -- a role the scheme lacks falls back to that stop's own hex rather
-    /// than dropping it -- so no geometry is invalidated and the next frame
+    /// COUNT - a role the scheme lacks falls back to that stop's own hex rather
+    /// than dropping it - so no geometry is invalidated and the next frame
     /// simply draws in the new colours.
     ///
     /// A scheme that will not read or parse leaves the current palette alone
@@ -784,10 +927,9 @@ impl AppState {
         // SIGTERM is caught by a handler that only sets EXITING; the checks that
         // act on it live in draw(), which does not run while parked. Without
         // this, a parked instance ignores SIGTERM entirely and has to be killed
-        // -- which is exactly what happened once this parking existed.
+        // - which is exactly what happened once this parking existed.
         if EXITING.load(Ordering::SeqCst) {
-            let conn = self.conn.clone();
-            self.clear_and_exit(&conn);
+            self.clear_and_exit();
         }
         // Parked AND unplaced: the output went away while the audio was
         // silent. Committing here would map a surface belonging to nothing.
@@ -801,30 +943,25 @@ impl AppState {
         if !self.idle {
             // Running: the compositor's frame callbacks drive draw(), and this
             // tick has nothing to do. Deliberately NOT a second drive for
-            // draw() -- rendering ahead of the callback is what the callback
+            // draw() - rendering ahead of the callback is what the callback
             // exists to throttle, and cava's pipe is drained by draw() anyway.
             return;
         }
         let fd = self.cava_reader.get_ref().as_raw_fd();
-        let mut buf = vec![0u8; self.bar_count as usize * 2];
         loop {
             let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
             if unsafe { libc::poll(&mut pfd, 1, 0) } <= 0 || pfd.revents & libc::POLLIN == 0 {
                 return; // nothing waiting; stay parked
             }
-            if self.cava_reader.read_exact(&mut buf).is_err() {
+            if self.cava_reader.read_exact(&mut self.cava_buffer).is_err() {
                 return;
             }
-            if buf
-                .chunks_exact(2)
-                .any(|c| u16::from_le_bytes([c[0], c[1]]) > SILENCE_RAW)
-            {
+            if !is_silent(&self.cava_buffer) {
                 // Unpark: one commit restarts the frame-callback loop, and
                 // rendering is driven by the compositor again from here.
                 self.idle = false;
                 self.silent_frames = 0;
-                let qh = self.qh.clone();
-                self.surface.frame(&qh, self.surface.clone());
+                self.surface.frame(&self.qh, self.surface.clone());
                 self.surface.commit();
                 return;
             }
@@ -834,7 +971,7 @@ impl AppState {
     /// Rank a connected output; lower wins, None means "not eligible at all".
     ///
     /// A pin excludes everything else outright rather than merely preferring
-    /// the pinned output -- when fullscreen-watch says "eDP-1", falling back
+    /// the pinned output - when fullscreen-watch says "eDP-1", falling back
     /// to the monitor it just ruled out would defeat the point.
     fn output_rank(&self, name: &str) -> Option<u8> {
         match &self.pinned_output {
@@ -847,7 +984,10 @@ impl AppState {
     ///
     /// Ties break on name purely so the choice is stable: two externals must
     /// not swap between calls and rebuild the surface each time.
-    fn choose_output(&self) -> Option<(wl_output::WlOutput, OutputInfo)> {
+    ///
+    /// Hands back the name it already resolved; the caller used to clone the
+    /// same `String` a second time to get at it.
+    fn choose_output(&self) -> Option<(wl_output::WlOutput, OutputInfo, String)> {
         self.output_state
             .outputs()
             .filter_map(|o| {
@@ -860,12 +1000,12 @@ impl AppState {
                 Some((rank, name, o, info))
             })
             .min_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)))
-            .map(|(_, _, o, info)| (o, info))
+            .map(|(_, name, o, info)| (o, info, name))
     }
 
     /// Re-run the whole output policy against what is connected right now, and
     /// move if the answer changed. Every OutputHandler callback funnels here so
-    /// the three of them cannot drift apart -- which is what happened before,
+    /// the three of them cannot drift apart - which is what happened before,
     /// when update_output rebuilt the surface for any property change at all
     /// and output_destroyed did nothing whatsoever.
     fn retarget(&mut self, qh: &QueueHandle<Self>) {
@@ -873,28 +1013,29 @@ impl AppState {
         // Checked against the live output list rather than trusting which
         // output the callback named, so this holds no matter what order
         // OutputState applies the removal in.
-        if let Some(current) = self.placed_on.clone() {
-            let still_connected = self
-                .output_state
+        //
+        // Borrowed, not cloned: `placed_on` and `output_state` are separate
+        // fields, so both shared borrows coexist.
+        let still_connected = self.placed_on.as_deref().is_none_or(|current| {
+            self.output_state
                 .outputs()
                 .filter_map(|o| self.output_state.info(&o))
-                .any(|i| i.name.as_deref() == Some(current.as_str()));
-            if !still_connected {
-                self.placed_on = None;
-                self.placed_size = None;
-            }
+                .any(|i| i.name.as_deref() == Some(current))
+        });
+        if !still_connected {
+            self.placed_on = None;
+            self.placed_size = None;
         }
 
-        let Some((output, info)) = self.choose_output() else {
+        let Some((output, info, name)) = self.choose_output() else {
             if self.placed_on.take().is_some() || self.placed_size.take().is_some() {
                 eprintln!("cavawall: no usable output, idling until one appears");
             }
             return;
         };
-        let name = info.name.clone().unwrap_or_default();
         if self.placed_on.as_deref() == Some(name.as_str()) && self.placed_size == info.logical_size
         {
-            return; // already there, same size -- nothing worth rebuilding for
+            return; // already there, same size - nothing worth rebuilding for
         }
         self.place_on(qh, &output, &info, name);
     }
@@ -927,7 +1068,7 @@ impl AppState {
         );
         self.width = logical_size.0 as u32;
         self.height = logical_size.1 as u32;
-        // same empty input region as at startup -- the surface is
+        // same empty input region as at startup - the surface is
         // recreated here, so it would otherwise regain the default one
         let input_region = Region::new(&self.compositor).ok();
         if let Some(r) = &input_region {
@@ -937,7 +1078,7 @@ impl AppState {
         // bottom they grow from.
         //
         // Hyprland damages a layer by its GEOMETRY, not by the buffer damage
-        // a client declares -- verified by trying the latter first:
+        // a client declares - verified by trying the latter first:
         // eglSwapBuffersWithDamageKHR sent .damage_buffer(0, 377, 1920, 703)
         // 331 times and the damage overlay still showed the whole output.
         // Shrinking the surface moved it immediately. So surface size is the
@@ -949,7 +1090,7 @@ impl AppState {
         // 35% of the output.
         //
         // The bar NDC is rescaled to match (see draw) so the bars look
-        // identical -- inside a surface that IS the band, they use its full
+        // identical - inside a surface that IS the band, they use its full
         // height rather than max_height of it.
         let band = ((self.height as f32 * self.max_height).ceil() as u32).clamp(1, self.height);
         self.layer_surface.set_exclusive_zone(-1); // see note at startup
@@ -974,21 +1115,26 @@ impl AppState {
         // read per watch per frame, returning EAGAIN in the overwhelming
         // majority of them.
         self.poll_external();
-        let mut cava_buffer: Vec<u8> = vec![0; self.bar_count as usize * 2];
-        let mut unpacked_data: Vec<f32> = vec![0.0; self.bar_count as usize];
-        if let Err(e) = self.cava_reader.read_exact(&mut cava_buffer) {
+        if let Err(e) = self.cava_reader.read_exact(&mut self.cava_buffer) {
             // A signal interrupts the blocking read, which is exactly how we
             // find out it is time to go.
             if EXITING.load(Ordering::SeqCst) {
-                self.clear_and_exit(_conn);
+                self.clear_and_exit();
             }
             if e.kind() == std::io::ErrorKind::Interrupted {
                 return;
             }
+            // cava is gone and the pipe read back EOF. Leave the way SIGTERM
+            // does: `panic = "abort"` skips all cleanup, so panicking here
+            // leaves the last frame of bars burnt onto the wallpaper.
+            if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                eprintln!("cavawall: cava exited, shutting down");
+                self.clear_and_exit();
+            }
             panic!("cava read failed: {e}");
         }
         if EXITING.load(Ordering::SeqCst) {
-            self.clear_and_exit(_conn);
+            self.clear_and_exit();
         }
 
         // Drop stale frames and render the newest.
@@ -996,14 +1142,14 @@ impl AppState {
         // cava writes at the configured framerate regardless of whether we are
         // keeping up. Reading exactly one frame per draw means a stall leaves a
         // backlog in the pipe, and on recovery every queued frame is rendered in
-        // turn -- the visualiser freezes, then fast-forwards through the audio
+        // turn - the visualiser freezes, then fast-forwards through the audio
         // it missed. Skipping to the newest frame keeps it in step with what is
         // actually playing.
         //
         // The BufReader's own buffer has to be checked as well as the fd: bytes
         // already pulled out of the pipe are invisible to poll(), so polling
         // alone would report "nothing waiting" while a backlog sat in memory.
-        let frame_len = cava_buffer.len();
+        let frame_len = self.cava_buffer.len();
         let fd = self.cava_reader.get_ref().as_raw_fd();
         let mut skipped = 0u32;
         while skipped < 512 {
@@ -1016,36 +1162,32 @@ impl AppState {
             if !ready {
                 break;
             }
-            if self.cava_reader.read_exact(&mut cava_buffer).is_err() {
+            if self.cava_reader.read_exact(&mut self.cava_buffer).is_err() {
                 break;
             }
             skipped += 1;
         }
 
-        for (unpacked_data_index, i) in (0..cava_buffer.len()).step_by(2).enumerate() {
-            let num = u16::from_le_bytes([cava_buffer[i], cava_buffer[i + 1]]);
-            unpacked_data[unpacked_data_index] = (num as f32) / 65530.0;
-        }
         // Skip GPU work while the audio is silent. cava emits frames at the
         // configured framerate whether or not anything is playing, so without
         // this the full-screen surface is recomposited 60x/sec forever just to
-        // draw bars that are all zero -- measurably pinning an integrated GPU.
+        // draw bars that are all zero - measurably pinning an integrated GPU.
         //
         // Commit with no new buffer instead of drawing: that still schedules
         // Grace before parking, so the bars finish falling to zero rather than
         // freezing part-way down.
         //
         // Measured, not guessed: with monstercat=1.5 and noise_reduction=60, a
-        // tone cut from full volume decays below the threshold in 8 frames --
+        // tone cut from full volume decays below the threshold in 8 frames -
         // 0.18s. The original 90 (2.0s) was 11x that. 23 frames is 0.51s, still
         // ~3x the real decay.
         //
         // The remainder is hysteresis rather than decay: a quiet passage or a
         // gap between tracks would otherwise park and unpark repeatedly. That
-        // costs almost nothing -- parking sets a flag, unparking is one commit
-        // -- and is invisible, since the bars are already at zero whenever it
+        // costs almost nothing - parking sets a flag, unparking is one commit
+        // - and is invisible, since the bars are already at zero whenever it
         // happens.
-        if unpacked_data.iter().all(|&v| v < SILENCE_THRESHOLD) {
+        if is_silent(&self.cava_buffer) {
             self.silent_frames = self.silent_frames.saturating_add(1);
         } else {
             self.silent_frames = 0;
@@ -1059,7 +1201,7 @@ impl AppState {
             // A bufferless commit is free for us but not for the compositor:
             // Hyprland damages a layer by its GEOMETRY on any commit, buffer
             // attached or not, so every one recomposited the whole band. The
-            // original comment here claimed it "produces no damage" -- false,
+            // original comment here claimed it "produces no damage" - false,
             // and visible in the damage overlay as a flash on an idle workspace
             // with no audio playing.
             //
@@ -1072,69 +1214,52 @@ impl AppState {
             return;
         }
 
-        let bar_width: f32 =
-            2.0 / (self.bar_count as f32 + (self.bar_count as f32 - 1.0) * self.bar_gap);
-        let bar_gap_width: f32 = bar_width * self.bar_gap;
-        let mut vertices: Vec<f32> = vec![0.0; self.bar_count as usize * 8];
-        let fwidth: f32 = self.width as f32;
-        let fheight: f32 = self.height as f32;
-        for i in 0..self.bar_count as usize {
-            // NDC space: -1.0 = bottom, +1.0 = top. max_height is NOT applied
-            // here any more: the surface has already been sized to that fraction
-            // of the screen, so a full-volume bar fills it exactly. Applying it
-            // twice would make the bars max_height^2 of the screen -- which is
-            // what the first attempt at this looked like, visibly short.
-            let bar_height: f32 = 2.0 * unpacked_data[i] - 1.0;
-            vertices[i * 8] = bar_gap_width * i as f32 + bar_width * i as f32 - 1.0;
-            vertices[i * 8 + 1] = bar_height;
-            vertices[i * 8 + 2] = bar_gap_width * i as f32 + bar_width * (i + 1) as f32 - 1.0;
-            vertices[i * 8 + 3] = bar_height;
-            vertices[i * 8 + 4] = bar_gap_width * i as f32 + bar_width * i as f32 - 1.0;
-            vertices[i * 8 + 5] = -1.0;
-            vertices[i * 8 + 6] = bar_gap_width * i as f32 + bar_width * (i + 1) as f32 - 1.0;
-            vertices[i * 8 + 7] = -1.0;
+        // Only the two top corners move. NDC: -1.0 bottom, +1.0 top.
+        // max_height is NOT applied here - the surface is already sized to
+        // that fraction of the screen, so a full-volume bar fills it exactly.
+        // Applying it twice made the bars max_height^2 tall, visibly short.
+        //
+        // `as_chunks` hands back fixed-size arrays, so the stores carry no
+        // bounds checks and the unpack from cava's bytes folds into one pass.
+        let (quads, _) = self.vertices.as_chunks_mut::<8>();
+        let (samples, _) = self.cava_buffer.as_chunks::<2>();
+        for (quad, sample) in quads.iter_mut().zip(samples) {
+            let top = f32::from(u16::from_le_bytes(*sample)) * BAR_NDC_SCALE - 1.0;
+            quad[1] = top;
+            quad[3] = top;
         }
         unsafe {
-            gl::BindVertexArray(self.vao);
+            // The only binding draw() still makes: BufferData writes through
+            // it. Everything else is set once at startup - see the note there.
             gl::BindBuffer(gl::ARRAY_BUFFER, self.vbo);
             gl::BufferData(
                 gl::ARRAY_BUFFER,
-                (vertices.len() * std::mem::size_of::<f32>()) as gl::types::GLsizeiptr,
-                vertices.as_ptr() as *const _,
+                std::mem::size_of_val(&*self.vertices) as GLsizeiptr,
+                self.vertices.as_ptr().cast(),
                 gl::DYNAMIC_DRAW,
             );
-            gl::Enable(gl::BLEND);
-            gl::BlendFunc(gl::SRC_ALPHA, gl::ONE_MINUS_SRC_ALPHA);
-            gl::ClearColor(
-                self.background_color[0],
-                self.background_color[1],
-                self.background_color[2],
-                self.background_color[3],
-            );
             gl::Clear(gl::COLOR_BUFFER_BIT);
-            gl::UseProgram(self.shader_program);
-            gl::Uniform2f(self.windows_size_location, fwidth, fheight);
             gl::DrawElements(
                 gl::TRIANGLES,
-                (self.bar_count as usize * 3 * std::mem::size_of::<u16>()) as gl::types::GLsizei,
-                // I don't know why * 3 works here, I thought that it is supposed to be * 6, but it
-                // works, so I'll keep it like this for now.
+                // Six indices per bar. The old spelling reached the same
+                // number only via a stray `size_of::<u16>()`; this argument is
+                // an index count, so "fixing" that would have halved the draw.
+                (self.bar_count * 6) as GLsizei,
                 gl::UNSIGNED_SHORT,
                 ptr::null(),
             );
-            gl::BindVertexArray(0);
         }
         // Ask for the next callback BEFORE the swap, never after.
         //
         // "The frame request will take effect on the next wl_surface.commit"
-        // (wayland.xml) -- it is double-buffered state like a buffer or a
+        // (wayland.xml) - it is double-buffered state like a buffer or a
         // damage region, so it needs a commit AFTER it to be applied.
         // eglSwapBuffers is that commit: Mesa attaches the new buffer, adds
         // damage, and commits, all inside the call.
         //
         // Requesting it afterwards instead left the request sitting in pending
         // state with nothing left to apply it, so the loop ran on the callback
-        // committed by the PREVIOUS draw -- self-sustaining only once two
+        // committed by the PREVIOUS draw - self-sustaining only once two
         // draws had happened, and dead the moment one draw did not swap (the
         // silence park returns before this point) or the surface holding the
         // in-flight callback was destroyed (new_output does exactly that).
@@ -1158,8 +1283,8 @@ impl OutputHandler for AppState {
 
     // All three funnel into retarget(), which re-derives the answer from the
     // live output list rather than from the event. new_output used to hold the
-    // whole policy inline, update_output was a bare alias for it -- so any
-    // output property change at all tore the surface down and rebuilt it --
+    // whole policy inline, update_output was a bare alias for it - so any
+    // output property change at all tore the surface down and rebuilt it -
     // and output_destroyed was empty, which left the visualiser stranded on a
     // monitor that had been unplugged.
     fn new_output(
@@ -1261,7 +1386,7 @@ impl CompositorHandler for AppState {
 }
 
 impl LayerShellHandler for AppState {
-    /// The compositor has taken the layer surface away -- normally because its
+    /// The compositor has taken the layer surface away - normally because its
     /// output was unplugged. Stop drawing to it and re-run the policy: if
     /// another monitor is still connected, retarget() rebuilds there, and if
     /// not it idles until one appears. Previously an empty stub, which left
@@ -1325,6 +1450,14 @@ impl LayerShellHandler for AppState {
         .unwrap();
         unsafe {
             gl::Viewport(0, 0, self.width as GLsizei, self.height as GLsizei);
+            // The only uniform, and the only place its value can change;
+            // draw() re-uploaded it every frame. Fine here because the one
+            // program is bound at startup and never unbound.
+            gl::Uniform2f(
+                self.windows_size_location,
+                self.width as f32,
+                self.height as f32,
+            );
         }
         // Only draw once a real output has been chosen. main() maps a
         // bootstrap surface purely so EGL has a window to build its context
@@ -1333,6 +1466,87 @@ impl LayerShellHandler for AppState {
         // box of bars on whatever output the compositor happened to pick.
         if self.placed_on.is_some() {
             self.draw(_conn, qh);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The quad layout `static_vertices` writes and the index buffer `main`
+    /// uploads have to describe the same four vertices per bar, in the same
+    /// order. They are built hundreds of lines apart and nothing but this
+    /// connects them; getting it wrong renders as silent garbage.
+    #[test]
+    fn quads_run_left_to_right_and_sit_on_the_bottom_edge() {
+        let v = static_vertices(4, 0.0);
+        let quads = v.as_chunks::<8>().0;
+        assert_eq!(quads.len(), 4);
+        // With no gap the four bars tile NDC -1..1 exactly, edge to edge.
+        assert!((quads[0][0] - -1.0).abs() < 1e-6, "first bar starts at -1");
+        assert!((quads[3][6] - 1.0).abs() < 1e-6, "last bar ends at +1");
+        for q in quads {
+            assert!(q[2] > q[0], "top edge runs left to right");
+            assert_eq!(q[4], q[0], "left column shares one x");
+            assert_eq!(q[6], q[2], "right column shares one x");
+            assert_eq!((q[5], q[7]), (-1.0, -1.0), "bars are anchored to the bottom");
+        }
+        for pair in quads.windows(2) {
+            assert!((pair[0][6] - pair[1][0]).abs() < 1e-6, "no gap means touching");
+        }
+    }
+
+    #[test]
+    fn gap_is_a_fraction_of_bar_width() {
+        let v = static_vertices(2, 0.5);
+        let q = v.as_chunks::<8>().0;
+        let bar = q[0][2] - q[0][0];
+        let gap = q[1][0] - q[0][2];
+        assert!((gap - bar * 0.5).abs() < 1e-6, "bar {bar}, gap {gap}");
+    }
+
+    /// A single bar has to fill the surface, not divide by zero on the
+    /// `bars - 1` gaps it does not have.
+    #[test]
+    fn one_bar_spans_the_whole_surface() {
+        let v = static_vertices(1, 0.1);
+        let q = v.as_chunks::<8>().0;
+        assert_eq!((q[0][0], q[0][2]), (-1.0, 1.0));
+    }
+
+    /// draw() and poll_resume() must not be able to disagree about what silence
+    /// is: they are the park and unpark halves of one decision. This pins the
+    /// shared predicate to the f32 threshold draw() used to apply on its own.
+    #[test]
+    fn silence_boundary_matches_the_f32_threshold() {
+        let frame = |n: u16| n.to_le_bytes();
+        let loudest_silent = SILENCE_RAW;
+        assert!(is_silent(&frame(loudest_silent)));
+        assert!(!is_silent(&frame(loudest_silent + 1)));
+        assert!(f32::from(loudest_silent) / 65530.0 < SILENCE_THRESHOLD);
+        assert!(f32::from(loudest_silent + 1) / 65530.0 >= SILENCE_THRESHOLD);
+    }
+
+    /// One loud bar in an otherwise quiet frame keeps the visualiser awake.
+    #[test]
+    fn a_single_loud_bar_is_not_silence() {
+        let mut frame = [0u8; 8];
+        frame[6..8].copy_from_slice(&u16::MAX.to_le_bytes());
+        assert!(!is_silent(&frame));
+        assert!(is_silent(&[0u8; 8]));
+    }
+
+    /// Full scale maps to the top of the surface and zero to the bottom, with
+    /// the folded constant matching the divide-then-scale it replaced.
+    #[test]
+    fn bar_height_spans_ndc() {
+        let ndc = |n: u16| f32::from(n) * BAR_NDC_SCALE - 1.0;
+        assert!((ndc(0) - -1.0).abs() < 1e-6);
+        assert!((ndc(65530) - 1.0).abs() < 1e-6);
+        for n in [1u16, 327, 1000, 32768, 65000] {
+            let was = 2.0 * (f32::from(n) / 65530.0) - 1.0;
+            assert!((ndc(n) - was).abs() < 1e-6, "{n}: {} vs {was}", ndc(n));
         }
     }
 }
