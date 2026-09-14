@@ -616,6 +616,50 @@ impl AppState {
         std::process::exit(0);
     }
 
+    /// Act on the Caelestia watches: a new palette, or a new bar count.
+    ///
+    /// Called from BOTH draw() and poll_resume(), because between them they are
+    /// the only two states this program has and NEITHER covers the other.
+    ///
+    /// poll_resume alone is not enough, which is the trap this function exists
+    /// to close. It runs from calloop's timeout callback, and that callback only
+    /// gets a turn when the Wayland source runs out of work. While audio is
+    /// playing it never does: the compositor's frame callbacks arrive faster
+    /// than draw() can consume cava frames at 45fps, so there is always another
+    /// event waiting. Measured on this machine -- zero invocations in six
+    /// seconds of playback, against ~270 expected. poll_resume is reached only
+    /// once draw() parks on silence, which is exactly what its own doc comment
+    /// says and exactly what makes it the wrong place to watch a file from.
+    ///
+    /// The effect was that every live update here silently required silence:
+    /// change the wallpaper or the bar count with music playing and nothing
+    /// happened until it stopped. Every test of this passed because a test
+    /// machine with no audio is permanently parked.
+    ///
+    /// Guarded on placement because both paths touch GL -- one re-uploads the
+    /// SSBO, the other clears the surface before exec'ing -- and unplaced means
+    /// there is no EGL surface to be current on. A change arriving while no
+    /// output is usable waits for the next one; nothing is on screen anyway.
+    fn poll_external(&mut self) {
+        if self.placed_on.is_none() {
+            return;
+        }
+        // Bars first: a changed count re-execs, which re-reads the scheme on the
+        // way up anyway, so resolving colours before that would be thrown away.
+        if self.bars_watch.as_ref().is_some_and(|w| w.take_event()) {
+            // Every settings change rewrites the whole of shell.json, so most
+            // wake-ups here are about something else entirely. Compare before
+            // acting -- restarting the visualiser because an unrelated toggle
+            // moved would be indefensible.
+            if scheme::bar_count().is_some_and(|n| n != self.bar_count) {
+                self.reexec();
+            }
+        }
+        if self.scheme_watch.as_ref().is_some_and(|w| w.take_event()) {
+            self.reload_colors();
+        }
+    }
+
     /// Start over, because the bar count changed and cannot be changed in place.
     ///
     /// It reaches the GPU as an index buffer sized once at startup, and reaches
@@ -752,36 +796,7 @@ impl AppState {
             return;
         }
 
-        // Deliberately below the placement guard rather than above it. Both of
-        // these touch GL -- one re-uploads the SSBO, the other clears the
-        // surface before exec'ing -- and unplaced means there is no layer
-        // surface and no EGL surface to be current on. The cost is that a
-        // scheme or bar-count change arriving while no output is usable is not
-        // applied until the next one; the alternative is GL calls against a
-        // surface that does not exist, and nothing is on screen to update
-        // anyway.
-        //
-        // Above the idle early-return, though: parked means no draw and no
-        // commit, so a change arriving while silent would otherwise sit unread
-        // until audio resumed, and the bars would come back stale. Re-uploading
-        // costs one buffer write and needs no redraw -- parked implies the bars
-        // are already at zero, so there is nothing on screen whose colour
-        // anyone could see change.
-        //
-        // Bars first: a changed count re-execs, which re-reads the scheme on the
-        // way up anyway, so resolving colours before that would be thrown away.
-        if self.bars_watch.as_ref().is_some_and(|w| w.take_event()) {
-            // Every settings change rewrites the whole of shell.json, so most
-            // wake-ups here are about something else entirely. Compare before
-            // acting -- restarting the visualiser because an unrelated toggle
-            // moved would be indefensible.
-            if scheme::bar_count().is_some_and(|n| n != self.bar_count) {
-                self.reexec();
-            }
-        }
-        if self.scheme_watch.as_ref().is_some_and(|w| w.take_event()) {
-            self.reload_colors();
-        }
+        self.poll_external();
 
         if !self.idle {
             // Running: the compositor's frame callbacks drive draw(), and this
@@ -953,6 +968,12 @@ impl AppState {
     }
 
     pub fn draw(&mut self, _conn: &Connection, qh: &QueueHandle<Self>) {
+        // Before any GL work, and before the blocking read below: while audio is
+        // playing this is the ONLY path that runs, so it is the only chance a
+        // scheme or bar-count change gets to be noticed. Costs one non-blocking
+        // read per watch per frame, returning EAGAIN in the overwhelming
+        // majority of them.
+        self.poll_external();
         let mut cava_buffer: Vec<u8> = vec![0; self.bar_count as usize * 2];
         let mut unpacked_data: Vec<f32> = vec![0.0; self.bar_count as usize];
         if let Err(e) = self.cava_reader.read_exact(&mut cava_buffer) {
