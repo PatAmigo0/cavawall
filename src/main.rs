@@ -508,21 +508,19 @@ fn main() {
         if follow_colors { "initial (live)" } else { "initial (static)" },
         &initial_rgba,
     );
+    assert!(
+        !initial_rgba.is_empty(),
+        "[colors] needs at least one stop to build a gradient from"
+    );
     let buffer_data = gradient_buffer(&initial_rgba);
-    // Only watch when the palette actually follows the scheme, so the Option
-    // alone says whether live colours are on - no second flag to disagree.
-    let scheme_watch = if follow_colors {
-        scheme::Watch::new(scheme::scheme_dir(), scheme::SCHEME_FILE)
-    } else {
-        None
-    };
-    // Watched for the same reason the scheme is, but acted on differently: a new
-    // bar count cannot be applied in place, so this one re-execs. See reexec().
-    let bars_watch = if follow_bars {
-        scheme::Watch::new(scheme::shell_dir(), scheme::SHELL_FILE)
-    } else {
-        None
-    };
+    // As the GPU sees it, which is not the configured count when there is only
+    // one stop. GradientScale below has to agree with the shader's own
+    // gradient_colors_size, so both come from here.
+    let gradient_stops = uploaded_stops(initial_rgba.len()) as u32;
+    // One watch over both files. The two are acted on differently - a palette
+    // is re-uploaded in place, a new bar count re-execs - but they arrive
+    // through the same inotify fd, so a frame costs one read, not two.
+    let watch = scheme::Watch::new(follow_colors, follow_bars);
 
     // Two triangles per bar sharing the 1-2 edge, extended a pair at a time
     // rather than six bounds-checked stores through a recomputed base index.
@@ -538,7 +536,7 @@ fn main() {
     let cava_buffer = vec![0u8; bar_count as usize * 2].into_boxed_slice();
     let background_color = array_from_config_color(&config.general.background_color);
 
-    let window_size_string = CString::new("WindowSize").unwrap();
+    let gradient_scale_name = CString::new("GradientScale").unwrap();
     unsafe {
         gl::GenVertexArrays(1, &mut vao);
         gl::BindVertexArray(vao);
@@ -591,8 +589,8 @@ fn main() {
         );
     }
 
-    let windows_size_location =
-        unsafe { gl::GetUniformLocation(shader_program, window_size_string.as_ptr()) };
+    let gradient_scale_location =
+        unsafe { gl::GetUniformLocation(shader_program, gradient_scale_name.as_ptr()) };
 
     // CAVAWALL_OUTPUT wins over the config file, and is how fullscreen-watch
     // moves the visualiser between monitors: it relaunches with this set, so
@@ -622,13 +620,13 @@ fn main() {
         egl_context,
         egl_display,
         vbo,
-        windows_size_location,
+        gradient_scale_location,
+        gradient_stops,
         bar_count,
         cava_pid,
         gradient_colors_ssbo,
         color_stops,
-        scheme_watch,
-        bars_watch,
+        watch,
         vertices,
         cava_buffer,
         max_height: config.bars.max_height.unwrap_or(1.0),
@@ -678,7 +676,9 @@ struct AppState {
     /// index buffer need no handle: bound once at startup, never rebound. The
     /// SSBO below is the exception - the palette is re-uploaded in place.
     vbo: u32,
-    windows_size_location: i32,
+    gradient_scale_location: i32,
+    /// Stops in the SSBO, which is 2 even when one colour is configured.
+    gradient_stops: u32,
     bar_count: u32,
     /// Kept so the palette can be re-uploaded in place. Upstream created this
     /// buffer and dropped the handle, which was fine when colours could only
@@ -686,10 +686,8 @@ struct AppState {
     gradient_colors_ssbo: u32,
     /// The configured stops, already in gradient order.
     color_stops: Vec<ConfigColor>,
-    /// None when colours do not follow the scheme.
-    scheme_watch: Option<scheme::Watch>,
-    /// None when the bar count does not follow Caelestia's settings.
-    bars_watch: Option<scheme::Watch>,
+    /// None when neither the palette nor the bar count follows Caelestia.
+    watch: Option<scheme::Watch>,
     /// The cava child, kept so a re-exec can kill and reap it.
     cava_pid: u32,
     /// Vertex buffer, reused. All but the two top corners of each bar is
@@ -768,6 +766,16 @@ impl AppState {
     /// happened until it stopped. Every test of this passed because a test
     /// machine with no audio is permanently parked.
     ///
+    /// Registering the inotify fd with calloop as an event source does NOT fix
+    /// this, which is the obvious-looking alternative. calloop polls once at
+    /// the top of dispatch_events and then dispatches the ready sources;
+    /// WaylandSource::process_events loops on dispatch_pending until the queue
+    /// drains, and every draw() in that loop calls eglSwapBuffers, which reads
+    /// the socket and refills the queue. So the loop does not end while audio
+    /// plays, no second poll happens, and a source would be starved exactly as
+    /// the timeout callback is. Re-measured: draw=29, poll_resume=0 over the
+    /// first second of playback.
+    ///
     /// Guarded on placement because both paths touch GL - one re-uploads the
     /// SSBO, the other clears the surface before exec'ing - and unplaced means
     /// there is no EGL surface to be current on. A change arriving while no
@@ -776,9 +784,15 @@ impl AppState {
         if self.placed_on.is_none() {
             return;
         }
+        let changed = self.watch.as_mut().map(scheme::Watch::take).unwrap_or_default();
+        // Ordered so the common case (nothing changed) never reaches
+        // debug_enabled(). The watch is otherwise unobservable from outside.
+        if (changed.scheme || changed.shell) && debug_enabled() {
+            eprintln!("cavawall: watch fired scheme={} shell={}", changed.scheme, changed.shell);
+        }
         // Bars first: a changed count re-execs, which re-reads the scheme on the
         // way up anyway, so resolving colours before that would be thrown away.
-        if self.bars_watch.as_mut().is_some_and(|w| w.take_event()) {
+        if changed.shell {
             // Every settings change rewrites the whole of shell.json, so most
             // wake-ups here are about something else entirely. Compare before
             // acting - restarting the visualiser because an unrelated toggle
@@ -787,7 +801,7 @@ impl AppState {
                 self.reexec();
             }
         }
-        if self.scheme_watch.as_mut().is_some_and(|w| w.take_event()) {
+        if changed.scheme {
             self.reload_colors();
         }
     }
@@ -1453,10 +1467,13 @@ impl LayerShellHandler for AppState {
             // The only uniform, and the only place its value can change;
             // draw() re-uploaded it every frame. Fine here because the one
             // program is bound at startup and never unbound.
-            gl::Uniform2f(
-                self.windows_size_location,
-                self.width as f32,
-                self.height as f32,
+            //
+            // The stop count folds in with the height so the shader multiplies
+            // once instead of converting, multiplying and dividing per
+            // fragment. The count cannot change without a re-exec.
+            gl::Uniform1f(
+                self.gradient_scale_location,
+                (self.gradient_stops - 1) as f32 / self.height as f32,
             );
         }
         // Only draw once a real output has been chosen. main() maps a
