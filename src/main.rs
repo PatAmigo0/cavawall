@@ -44,6 +44,59 @@ const SILENCE_RAW: u16 = (SILENCE_THRESHOLD * 65530.0) as u16;
 /// `2.0 * (n / 65530.0) - 1.0` folded into one multiply-add per bar.
 const BAR_NDC_SCALE: f32 = 2.0 / 65530.0;
 
+/// Damage rectangles emitted per frame.
+///
+/// Bars are bucketed into this many columns and each bucket reports one rect
+/// spanning what changed inside it. A rect per bar would describe the change
+/// most tightly, but rect COUNT costs the compositor too: measured on this
+/// machine, 76 rects covering a quarter of the band cost ~3.5pp of Hyprland CPU
+/// above idle against ~2.7pp for a single rect of the same area, where full
+/// damage costs ~5.0pp and the bare commit ~2.2pp. A handful of fat rects sits
+/// near the cheap end of that without collapsing to the bounding box.
+const DAMAGE_BUCKETS: usize = 8;
+
+/// `eglSwapBuffersWithDamageKHR`, resolved once.
+///
+/// Plain `eglSwapBuffers` declares the WHOLE surface damaged, so the compositor
+/// recomposites the entire band every frame no matter how little moved. The
+/// pixels are about half of what a frame costs Hyprland and all of that half is
+/// recoverable; the other half is the commit itself, which nothing can avoid at
+/// a fixed framerate.
+///
+/// None of this is GPU work. Every bar is still drawn - this only changes what
+/// the compositor is told to re-read.
+type SwapDamageFn = unsafe extern "system" fn(
+    egl::EGLDisplay,
+    egl::EGLSurface,
+    *const egl::Int,
+    egl::Int,
+) -> egl::Boolean;
+
+/// The extension, or None when the driver lacks it and plain swaps are used.
+///
+/// CAVAWALL_NO_DAMAGE=1 forces the old full-surface behaviour, so the two can
+/// be compared with one binary and one variable. Measuring two builds against
+/// each other measures the builds as well as the change.
+fn load_swap_with_damage(display: egl::Display) -> Option<SwapDamageFn> {
+    if env::var_os("CAVAWALL_NO_DAMAGE").is_some_and(|v| v != "0") {
+        return None;
+    }
+    let exts = egl.query_string(Some(display), egl::EXTENSIONS).ok()?;
+    let exts = exts.to_str().ok()?;
+    // KHR and EXT differ only in name; either is fine.
+    let name = if exts.contains("EGL_KHR_swap_buffers_with_damage") {
+        "eglSwapBuffersWithDamageKHR"
+    } else if exts.contains("EGL_EXT_swap_buffers_with_damage") {
+        "eglSwapBuffersWithDamageEXT"
+    } else {
+        return None;
+    };
+    let f = egl.get_proc_address(name)?;
+    // SAFETY: eglGetProcAddress returned a pointer for this exact name, whose
+    // signature is fixed by the extension spec.
+    Some(unsafe { std::mem::transmute::<extern "system" fn(), SwapDamageFn>(f) })
+}
+
 /// Frames of continuous silence before parking. Measured, not guessed: with
 /// monstercat=1.5 and noise_reduction=60 a tone cut from full volume decays
 /// below the threshold in 8 frames (0.18s). 23 frames is 0.51s - roughly 3x
@@ -482,6 +535,16 @@ fn main() {
 
     println!("OpenGL version: {version}");
     println!("EGL version: {}", egl.version());
+    if debug_enabled() {
+        eprintln!(
+            "cavawall: swap-with-damage {}",
+            if load_swap_with_damage(egl_display).is_some() {
+                "available"
+            } else {
+                "MISSING - every frame will declare the whole surface"
+            }
+        );
+    }
     let shader_program = build_program();
     let mut quad_vbo = 0;
     let mut height_vbo = 0;
@@ -628,8 +691,13 @@ fn main() {
         gradient_colors_ssbo,
         color_stops,
         watch,
+        prev_heights: vec![0.0f32; bar_count as usize].into_boxed_slice(),
         heights,
         cava_buffer,
+        bar_width,
+        bar_stride,
+        swap_damage: load_swap_with_damage(egl_display),
+        force_full_damage: true,
         max_height: config.bars.max_height.unwrap_or(1.0),
         silent_frames: 0,
         background_color,
@@ -697,6 +765,19 @@ struct AppState {
     /// One raw cava frame, reused. Both were `vec![..]` locals in draw(), so an
     /// idle machine still did three allocations and three frees per frame.
     cava_buffer: Box<[u8]>,
+    /// Last frame's heights, so damage can be the span each bar actually moved
+    /// through rather than the whole band.
+    prev_heights: Box<[f32]>,
+    /// Bar geometry in NDC, kept to turn a bar index into pixel columns.
+    bar_width: f32,
+    bar_stride: f32,
+    /// None when the driver has no swap-with-damage extension; then every frame
+    /// declares the whole surface, exactly as before.
+    swap_damage: Option<SwapDamageFn>,
+    /// Next frame must declare everything: the previous heights describe a
+    /// different surface, or every pixel changed for a reason bar heights do
+    /// not capture - a new palette, a resize, coming back from parked.
+    force_full_damage: bool,
     max_height: f32,
     silent_frames: u32,
     /// Only read to restore the clear colour if a re-exec fails; it is set once
@@ -915,6 +996,10 @@ impl AppState {
         };
         let rgba = resolve_stops(&self.color_stops, Some(&live));
         debug_palette("reloaded", &rgba);
+        // Every bar is repainted in new colours, which bar heights do not
+        // describe: without this the next frame would declare only the bars
+        // that moved and leave the rest in the old palette on screen.
+        self.force_full_damage = true;
         let buf = gradient_buffer(&rgba);
         unsafe {
             gl::BindBuffer(gl::SHADER_STORAGE_BUFFER, self.gradient_colors_ssbo);
@@ -976,6 +1061,9 @@ impl AppState {
                 // rendering is driven by the compositor again from here.
                 self.idle = false;
                 self.silent_frames = 0;
+                // Parked frames were never presented, so prev_heights describes
+                // a frame older than whatever is on screen.
+                self.force_full_damage = true;
                 self.surface.frame(&self.qh, self.surface.clone());
                 self.surface.commit();
                 return;
@@ -1121,6 +1209,118 @@ impl AppState {
         self.silent_frames = 0;
         self.placed_on = Some(name);
         self.placed_size = info.logical_size;
+    }
+
+    /// Rectangles covering everything that moved since the last presented frame.
+    ///
+    /// EGL wants surface coordinates with the origin bottom-left, which is the
+    /// direction bar heights already run, so nothing has to be flipped.
+    ///
+    /// Sound because draw() repaints the WHOLE buffer every frame: the pixels
+    /// outside these rects are bit-identical to what the compositor already
+    /// holds, so telling it to keep them is true. An app that rendered
+    /// incrementally into an aged back buffer would need EGL_BUFFER_AGE_EXT
+    /// here; this one does not.
+    fn damage_rects(&self, out: &mut [egl::Int]) -> usize {
+        damage_rects(
+            &self.heights,
+            &self.prev_heights,
+            self.bar_width,
+            self.bar_stride,
+            self.width,
+            self.height,
+            out,
+        )
+    }
+
+}
+
+/// Rectangles covering everything that moved, in EGL surface coordinates.
+///
+/// Free rather than a method so it can be tested: it is pure arithmetic over
+/// two height arrays, and an under-reported rect leaves a stale strip of bar on
+/// screen that no test touching GL would catch either.
+#[allow(clippy::too_many_arguments)]
+fn damage_rects(
+    heights: &[f32],
+    prev: &[f32],
+    bar_width: f32,
+    bar_stride: f32,
+    width: u32,
+    height: u32,
+    out: &mut [egl::Int],
+) -> usize {
+    {
+        let (w, h) = (width as f32, height as f32);
+        let bars = heights.len();
+        // x0, y0, x1, y1 per bucket; left inverted so "no change" is detectable.
+        let mut boxes = [[f32::MAX, f32::MAX, f32::MIN, f32::MIN]; DAMAGE_BUCKETS];
+        for (i, (&new, &old)) in heights.iter().zip(prev.iter()).enumerate() {
+            if new == old {
+                continue;
+            }
+            let b = i * DAMAGE_BUCKETS / bars.max(1);
+            let x0 = bar_stride * i as f32 * 0.5 * w;
+            let x1 = (bar_stride * i as f32 + bar_width) * 0.5 * w;
+            let (lo, hi) = if new < old { (new, old) } else { (old, new) };
+            let bx = &mut boxes[b.min(DAMAGE_BUCKETS - 1)];
+            bx[0] = bx[0].min(x0);
+            bx[1] = bx[1].min((lo + 1.0) * 0.5 * h);
+            bx[2] = bx[2].max(x1);
+            bx[3] = bx[3].max((hi + 1.0) * 0.5 * h);
+        }
+
+        let mut n = 0;
+        for bx in &boxes {
+            if bx[0] > bx[2] {
+                continue; // nothing in this bucket moved
+            }
+            // Widened by a pixel each way: the NDC-to-pixel conversion rounds,
+            // and a rect one pixel short leaves a stale line on screen.
+            let x0 = (bx[0].floor() as i32 - 1).clamp(0, width as i32);
+            let y0 = (bx[1].floor() as i32 - 1).clamp(0, height as i32);
+            let x1 = (bx[2].ceil() as i32 + 1).clamp(0, width as i32);
+            let y1 = (bx[3].ceil() as i32 + 1).clamp(0, height as i32);
+            if x1 > x0 && y1 > y0 {
+                out[n..n + 4].copy_from_slice(&[x0, y0, x1 - x0, y1 - y0]);
+                n += 4;
+            }
+        }
+        n
+    }
+}
+
+impl AppState {
+    /// Present the frame, telling the compositor only what changed.
+    fn present(&mut self) {
+        let mut rects = [0 as egl::Int; DAMAGE_BUCKETS * 4];
+        let len = match self.swap_damage {
+            Some(_) if !self.force_full_damage => self.damage_rects(&mut rects),
+            // Whole surface. Not the same as passing zero rects, which means
+            // "nothing changed" and would present a frame nobody redraws.
+            _ => {
+                rects[..4].copy_from_slice(&[0, 0, self.width as i32, self.height as i32]);
+                4
+            }
+        };
+        self.force_full_damage = false;
+        self.prev_heights.copy_from_slice(&self.heights);
+
+        match self.swap_damage {
+            // SAFETY: display and surface are current and live, and `rects`
+            // holds `len` valid ints, which is `len / 4` complete rectangles.
+            Some(f) => unsafe {
+                f(
+                    self.egl_display.as_ptr(),
+                    self.egl_surface.as_ptr(),
+                    rects.as_ptr(),
+                    (len / 4) as egl::Int,
+                );
+            },
+            None => {
+                egl.swap_buffers(self.egl_display, self.egl_surface).unwrap();
+            }
+        }
     }
 
     pub fn draw(&mut self, _conn: &Connection, qh: &QueueHandle<Self>) {
@@ -1275,8 +1475,7 @@ impl AppState {
         // frame-then-swap is what weston-simple-egl does, and it keeps exactly
         // one callback in flight with no dependence on a second commit.
         self.surface.frame(qh, self.surface.clone());
-        egl.swap_buffers(self.egl_display, self.egl_surface)
-            .unwrap();
+        self.present();
     }
 }
 
@@ -1452,6 +1651,9 @@ impl LayerShellHandler for AppState {
             Some(self.egl_context),
         )
         .unwrap();
+        // A new EGL surface has undefined contents, and the compositor holds
+        // nothing for it: the first frame after this has to be whole.
+        self.force_full_damage = true;
         unsafe {
             gl::Viewport(0, 0, self.width as GLsizei, self.height as GLsizei);
             // The only uniform, and the only place its value can change;
@@ -1531,6 +1733,139 @@ mod tests {
         for c in corners {
             assert!(c[0] == 0.0 || c[0] == 1.0, "corner.x is an edge selector");
             assert!(c[1] == 0.0 || c[1] == 1.0, "corner.y is a bottom/top selector");
+        }
+    }
+
+    /// Damage must COVER every pixel that changed. Under-reporting leaves a
+    /// stale strip of the old bar on screen, which is invisible to any test
+    /// that only checks the rects look reasonable - so these check containment
+    /// against the span each bar actually moved through.
+    fn rects_of(heights: &[f32], prev: &[f32], w: u32, h: u32) -> Vec<[i32; 4]> {
+        let bars = heights.len() as f32;
+        let (bw, stride) = bar_geometry(heights.len() as u32, 0.0);
+        let _ = bars;
+        let mut out = [0i32; DAMAGE_BUCKETS * 4];
+        let n = damage_rects(heights, prev, bw, stride, w, h, &mut out);
+        out[..n].as_chunks::<4>().0.to_vec()
+    }
+
+    /// The pixel row a height sits on, the same mapping the shader uses.
+    fn row(ndc: f32, h: u32) -> i32 {
+        ((ndc + 1.0) * 0.5 * h as f32) as i32
+    }
+
+    #[test]
+    fn nothing_moving_damages_nothing() {
+        let hs = [0.0, -0.5, 0.25, 1.0];
+        assert!(rects_of(&hs, &hs, 1920, 703).is_empty());
+    }
+
+    #[test]
+    fn a_moved_bar_is_fully_covered() {
+        let prev = [-1.0, -1.0, -1.0, -1.0];
+        let new = [-1.0, 0.5, -1.0, -1.0]; // bar 1 rises from the floor
+        let rects = rects_of(&new, &prev, 1920, 703);
+        assert_eq!(rects.len(), 1, "one bucket moved, one rect");
+        let [x, y, rw, rh] = rects[0];
+        let (lo, hi) = (row(-1.0, 703), row(0.5, 703));
+        assert!(y <= lo && y + rh >= hi, "covers the span the bar swept: {rects:?}");
+        // And it is a slice of the width, not the whole band.
+        assert!(rw < 1920 / 2, "one bar of four should not span the surface: {rw}");
+        assert!(x >= 0 && x + rw <= 1920 && y >= 0 && y + rh <= 703, "in bounds");
+    }
+
+    #[test]
+    fn a_falling_bar_covers_the_same_span_as_a_rising_one() {
+        let a = rects_of(&[-1.0, 0.5, -1.0, -1.0], &[-1.0, -1.0, -1.0, -1.0], 1920, 703);
+        let b = rects_of(&[-1.0, -1.0, -1.0, -1.0], &[-1.0, 0.5, -1.0, -1.0], 1920, 703);
+        assert_eq!(a, b, "direction must not change what is damaged");
+    }
+
+    /// The invariant that matters: EVERY bar that moved is fully inside some
+    /// rect. Anything less leaves a stale strip of the old bar on screen. A bar
+    /// that did NOT move needs no coverage, which is the whole point.
+    #[test]
+    fn every_moved_bar_is_covered_and_the_rect_count_stays_capped() {
+        let (w, h) = (1920u32, 703u32);
+        let bars = 76usize;
+        let (bw, stride) = bar_geometry(bars as u32, 0.0);
+        let prev = vec![-1.0f32; bars];
+        // i % 7 == 0 leaves that bar exactly where it was, so the input mixes
+        // moved and unmoved bars the way a real frame does.
+        let new: Vec<f32> = (0..bars).map(|i| -1.0 + (i % 7) as f32 * 0.2).collect();
+        let rects = rects_of(&new, &prev, w, h);
+        assert!(!rects.is_empty() && rects.len() <= DAMAGE_BUCKETS, "{}", rects.len());
+
+        let mut moved = 0;
+        for i in 0..bars {
+            if new[i] == prev[i] {
+                continue;
+            }
+            moved += 1;
+            let x0 = (stride * i as f32 * 0.5 * w as f32) as i32;
+            let x1 = ((stride * i as f32 + bw) * 0.5 * w as f32).ceil() as i32;
+            let (lo, hi) = (row(prev[i].min(new[i]), h), row(prev[i].max(new[i]), h));
+            assert!(
+                rects.iter().any(|r| {
+                    r[0] <= x0 && r[0] + r[2] >= x1 && r[1] <= lo && r[1] + r[3] >= hi
+                }),
+                "bar {i} moved {:?}->{:?} (x {x0}..{x1}, y {lo}..{hi}) is not covered by {rects:?}",
+                prev[i], new[i]
+            );
+        }
+        assert!(moved > 60, "the fixture should move most bars, moved {moved}");
+    }
+
+    /// Nothing in the damage maths may assume this panel. The surface size
+    /// comes from the compositor's configure and the band from
+    /// `bars.max_height`, so the same frame has to work at any resolution -
+    /// these are three real ones plus the max_height fractions they imply.
+    #[test]
+    fn damage_is_resolution_independent() {
+        let bars = 40usize;
+        let (bw, stride) = bar_geometry(bars as u32, 0.1);
+        let prev = vec![-1.0f32; bars];
+        let new: Vec<f32> = (0..bars).map(|i| -1.0 + (i % 5) as f32 * 0.3).collect();
+
+        for (w, full_h, frac) in [(1920u32, 1080u32, 0.65f32), (2560, 1440, 0.5), (1366, 768, 1.0)] {
+            let h = (full_h as f32 * frac).ceil() as u32;
+            let mut out = [0i32; DAMAGE_BUCKETS * 4];
+            let n = damage_rects(&new, &prev, bw, stride, w, h, &mut out);
+            let rects: Vec<&[i32]> = out[..n].as_chunks::<4>().0.iter().map(|r| &r[..]).collect();
+            assert!(!rects.is_empty(), "{w}x{h}: nothing damaged");
+            for r in &rects {
+                assert!(r[0] >= 0 && r[1] >= 0, "{w}x{h}: {r:?}");
+                assert!(r[0] + r[2] <= w as i32, "{w}x{h}: past the right edge {r:?}");
+                assert!(r[1] + r[3] <= h as i32, "{w}x{h}: past the top {r:?}");
+            }
+            // Every moved bar still covered, at this size too.
+            for i in 0..bars {
+                if new[i] == prev[i] {
+                    continue;
+                }
+                let x0 = (stride * i as f32 * 0.5 * w as f32) as i32;
+                let x1 = ((stride * i as f32 + bw) * 0.5 * w as f32).ceil() as i32;
+                let (lo, hi) = (row(prev[i].min(new[i]), h), row(prev[i].max(new[i]), h));
+                assert!(
+                    rects.iter().any(|r| r[0] <= x0 && r[0] + r[2] >= x1
+                        && r[1] <= lo && r[1] + r[3] >= hi),
+                    "{w}x{h}: bar {i} uncovered"
+                );
+            }
+        }
+    }
+
+    /// Bars at the very top and bottom must not produce rects outside the
+    /// surface, which the one-pixel widening could otherwise do.
+    #[test]
+    fn rects_stay_inside_the_surface_at_the_extremes() {
+        for (a, b) in [(-1.0f32, 1.0f32), (1.0, -1.0)] {
+            let rects = rects_of(&[a, a], &[b, b], 1920, 703);
+            for r in &rects {
+                assert!(r[0] >= 0 && r[1] >= 0, "{r:?}");
+                assert!(r[0] + r[2] <= 1920 && r[1] + r[3] <= 703, "{r:?}");
+                assert!(r[2] > 0 && r[3] > 0, "degenerate rect {r:?}");
+            }
         }
     }
 
