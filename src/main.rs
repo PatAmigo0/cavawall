@@ -47,24 +47,39 @@ const BAR_NDC_SCALE: f32 = 2.0 / 65530.0;
 /// Damage rectangles emitted per frame.
 ///
 /// Bars are bucketed into this many columns and each bucket reports one rect
-/// spanning what changed inside it. A rect per bar would describe the change
-/// most tightly, but rect COUNT costs the compositor too: measured on this
-/// machine, 76 rects covering a quarter of the band cost ~3.5pp of Hyprland CPU
-/// above idle against ~2.7pp for a single rect of the same area, where full
-/// damage costs ~5.0pp and the bare commit ~2.2pp. A handful of fat rects sits
-/// near the cheap end of that without collapsing to the bounding box.
+/// spanning what changed inside it, rather than one rect per bar. Rect COUNT
+/// costs a compositor as well as area - measured with an SHM probe, 76 rects
+/// covering a quarter of a band cost more than a single rect of the same area -
+/// so a handful of fat rects sits near the cheap end without collapsing to the
+/// bounding box.
 const DAMAGE_BUCKETS: usize = 8;
 
 /// `eglSwapBuffersWithDamageKHR`, resolved once.
 ///
-/// Plain `eglSwapBuffers` declares the WHOLE surface damaged, so the compositor
-/// recomposites the entire band every frame no matter how little moved. The
-/// pixels are about half of what a frame costs Hyprland and all of that half is
-/// recoverable; the other half is the commit itself, which nothing can avoid at
-/// a fixed framerate.
+/// Plain `eglSwapBuffers` declares the WHOLE surface damaged. Declaring what
+/// actually moved is what the protocol asks a client to do, and is kept for
+/// that reason rather than for a number.
 ///
-/// None of this is GPU work. Every bar is still drawn - this only changes what
-/// the compositor is told to re-read.
+/// Honest scope, because the first version of this comment claimed a saving
+/// that does not exist here. Measured on this machine, same binary A/B'd with
+/// CAVAWALL_NO_DAMAGE: Hyprland's CPU is unchanged, and so is cavawall's own.
+/// It is neutral, not a win.
+///
+/// The reason is the buffer type. An SHM client makes the compositor upload
+/// each damaged region into a texture, so its cost tracks damaged area - that
+/// is what an earlier probe measured, and why a saving was predicted. cavawall
+/// hands over a dmabuf (wl_drm + zwp_linux_dmabuf_v1), which already IS a
+/// texture: there is no upload to shrink. Check the protocol before trusting
+/// any damage measurement:
+///     WAYLAND_DEBUG=1 <client> 2>&1 | grep -oE 'wl_shm|zwp_linux_dmabuf_v1'
+///
+/// Kept anyway: it costs nothing measurable on either side, it is what a
+/// well-behaved client does, and it is the difference between workable and
+/// hopeless anywhere the surface does go through SHM or over a wire - a VM,
+/// software rendering, waypipe.
+///
+/// None of it is GPU work either. Every bar is still drawn; this only changes
+/// what the compositor is told to re-read.
 type SwapDamageFn = unsafe extern "system" fn(
     egl::EGLDisplay,
     egl::EGLSurface,
