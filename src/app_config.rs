@@ -14,7 +14,7 @@ pub struct Config {
 ///
 /// This section is deliberately additive: an older cavawall ignores an unknown
 /// top-level section, and ignores the unknown `role` key inside a colour entry,
-/// so a config carrying both still runs on one -- it just renders the static
+/// so a config carrying both still runs on one - it just renders the static
 /// palette and the configured bar count. That matters because this file is
 /// stowed to every machine, and they do not all get rebuilt at once.
 #[derive(Serialize, Deserialize, Debug, Default)]
@@ -45,7 +45,7 @@ pub struct GeneralConfig {
     /// cava defaults to stereo, and in stereo mode it does not give each bar a
     /// distinct frequency band: it splits the bars in half, drawing the LEFT
     /// channel reversed across the left half and the RIGHT channel across the
-    /// right half. With near-identical channels -- most music -- the two halves
+    /// right half. With near-identical channels - most music - the two halves
     /// come out as mirror images, bass meeting in the middle. That reads as a
     /// symmetric visualiser, which is a look, but it is not what most people
     /// expect from a full-width wallpaper spectrum.
@@ -59,14 +59,14 @@ pub struct GeneralConfig {
     ///
     /// Left unset, cava's own default ("auto") always monitors whatever the
     /// current DEFAULT SINK is, via PipeWire's stream.capture.sink=true
-    /// convention -- which env vars like PULSE_SOURCE cannot override, since
+    /// convention - which env vars like PULSE_SOURCE cannot override, since
     /// cava requests it directly rather than asking for a named source. That
     /// breaks completely, not just gets quiet, the moment the default sink's
     /// monitor does not work: confirmed on a Bluetooth A2DP sink, whose
     /// monitor produced zero bytes over two full seconds of `parec` while
     /// music played audibly through it. Point this at a source that stays
-    /// constant regardless of the current output device -- e.g. a
-    /// processAllOutputs-style pre-mix sink's own monitor -- to survive
+    /// constant regardless of the current output device - e.g. a
+    /// processAllOutputs-style pre-mix sink's own monitor - to survive
     /// output switches (Bluetooth, speakers, headphones) without silently
     /// going dead.
     pub audio_source: Option<String>,
@@ -130,19 +130,26 @@ pub struct CavaSmoothingConfig {
     pub noise_reduction: Option<f32>,
 }
 
-pub fn color_from_hex(hex: String, a: f32) -> [f32; 4] {
-    let r = u8::from_str_radix(&hex[1..3], 16).unwrap() as f32 / 255f32;
-    let g = u8::from_str_radix(&hex[3..5], 16).unwrap() as f32 / 255f32;
-    let b = u8::from_str_radix(&hex[5..7], 16).unwrap() as f32 / 255f32;
-    [r, g, b, a]
+/// Parse a colour from the config file, where a bad value is a startup error
+/// rather than something to survive: this file does not change under us.
+///
+/// # Panics
+///
+/// If `hex` is not six hex digits, optionally prefixed with `#`.
+pub fn color_from_hex(hex: &str, a: f32) -> [f32; 4] {
+    match try_color_from_hex(hex, a) {
+        Some(rgba) => rgba,
+        None => panic!("invalid colour {hex:?}: expected #rrggbb"),
+    }
 }
 
-pub fn array_from_config_color(color: ConfigColor) -> [f32; 4] {
+/// Borrows rather than consumes: this runs per stop on every palette reload,
+/// and the old signature cloned the hex `String` twice per call to read six
+/// characters out of it.
+pub fn array_from_config_color(color: &ConfigColor) -> [f32; 4] {
     match color {
-        ConfigColor::Simple(hex) => color_from_hex(hex.to_string(), 1.0),
-        ConfigColor::Complex(color) => {
-            color_from_hex(color.hex.to_string(), color.alpha.unwrap_or(1.0))
-        }
+        ConfigColor::Simple(hex) => color_from_hex(hex, 1.0),
+        ConfigColor::Complex(color) => color_from_hex(&color.hex, color.alpha.unwrap_or(1.0)),
     }
 }
 
@@ -152,18 +159,28 @@ pub fn array_from_config_color(color: ConfigColor) -> [f32; 4] {
 /// the scheme is re-read while the visualiser is running, and a truncated or
 /// half-written file must not take the process down mid-song.
 pub fn try_color_from_hex(hex: &str, a: f32) -> Option<[f32; 4]> {
-    let h = hex.strip_prefix('#').unwrap_or(hex);
-    if h.len() != 6 || !h.bytes().all(|b| b.is_ascii_hexdigit()) {
+    // The slice pattern is the length check, and decoding nibbles directly
+    // replaces three `from_str_radix` calls over re-sliced `&str`s.
+    let &[r1, r0, g1, g0, b1, b0] = hex.strip_prefix('#').unwrap_or(hex).as_bytes() else {
         return None;
+    };
+    let byte = |hi: u8, lo: u8| Some(f32::from((hex_nibble(hi)? << 4) | hex_nibble(lo)?) / 255.0);
+    Some([byte(r1, r0)?, byte(g1, g0)?, byte(b1, b0)?, a])
+}
+
+const fn hex_nibble(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
     }
-    let c = |i: usize| u8::from_str_radix(&h[i..i + 2], 16).ok().map(|v| v as f32 / 255.0);
-    Some([c(0)?, c(2)?, c(4)?, a])
 }
 
 /// The `[colors]` stops in gradient order.
 ///
-/// The shader treats the SSBO as an ordered ramp -- it mixes stop `i` into
-/// `i + 1` down the surface -- but the section deserialises into a HashMap,
+/// The shader treats the SSBO as an ordered ramp - it mixes stop `i` into
+/// `i + 1` down the surface - but the section deserialises into a HashMap,
 /// whose iteration order is arbitrary AND randomised per process. Upstream fed
 /// that straight to the GPU, so the gradient was shuffled on every launch. It
 /// went unnoticed here because the palette in use was eight near-identical
@@ -171,25 +188,30 @@ pub fn try_color_from_hex(hex: &str, a: f32) -> Option<[f32; 4]> {
 /// this repo also ships would have made it obvious.
 ///
 /// Ordered on the key's trailing number where it has one, so this handles both
-/// naming styles in use -- `c1..c8` and upstream's `gradient_color_1..8` -- and
+/// naming styles in use - `c1..c8` and upstream's `gradient_color_1..8` - and
 /// puts c10 after c9 rather than after c1, which a plain string sort would not.
 /// A key with no trailing digits keeps a stable place at the end, sorted by
 /// name: losing a stop silently is worse than giving it an arbitrary position.
 pub fn ordered_stops(colors: &HashMap<String, ConfigColor>) -> Vec<ConfigColor> {
     fn trailing_number(k: &str) -> Option<u64> {
         let digits = k.trim_end_matches(|c: char| !c.is_ascii_digit());
-        let start = digits.len() - digits.chars().rev().take_while(|c| c.is_ascii_digit()).count();
+        // Counted in bytes: the run is ASCII digits, so the count is also a
+        // valid byte index.
+        let start = digits.len() - digits.bytes().rev().take_while(u8::is_ascii_digit).count();
         digits[start..].parse().ok()
     }
-    let mut stops: Vec<(bool, u64, String, ConfigColor)> = colors
+    // Sorts on borrowed keys, cloning only the colours that reach the result.
+    let mut stops: Vec<(bool, u64, &str, &ConfigColor)> = colors
         .iter()
         .map(|(k, v)| {
             let n = trailing_number(k);
-            (n.is_none(), n.unwrap_or(0), k.clone(), v.clone())
+            (n.is_none(), n.unwrap_or(0), k.as_str(), v)
         })
         .collect();
-    stops.sort_by(|a, b| (a.0, a.1, &a.2).cmp(&(b.0, b.1, &b.2)));
-    stops.into_iter().map(|(_, _, _, v)| v).collect()
+    // Unstable is free: map keys are unique, so there are no ties to preserve,
+    // and it skips `sort_by`'s scratch allocation.
+    stops.sort_unstable_by(|a, b| (a.0, a.1, a.2).cmp(&(b.0, b.1, b.2)));
+    stops.into_iter().map(|(_, _, _, v)| v.clone()).collect()
 }
 
 /// Resolve ordered stops to RGBA, routing each through the live scheme when one
@@ -204,19 +226,18 @@ pub fn resolve_stops(
 ) -> Vec<[f32; 4]> {
     stops
         .iter()
-        .map(|stop| {
-            if let (ConfigColor::Complex(c), Some(sc)) = (stop, scheme) {
-                if let Some(role) = &c.role {
-                    if let Some(live) = sc.get(role) {
-                        if let Some(rgba) = try_color_from_hex(live, c.alpha.unwrap_or(1.0)) {
-                            return rgba;
-                        }
-                    }
-                }
-            }
-            array_from_config_color(stop.clone())
-        })
+        .map(|stop| live_colour(stop, scheme).unwrap_or_else(|| array_from_config_color(stop)))
         .collect()
+}
+
+/// The scheme's colour for this stop, if a scheme, a role and a parsable value
+/// are all present. `None` is every fallback path rolled into one.
+fn live_colour(stop: &ConfigColor, scheme: Option<&HashMap<String, String>>) -> Option<[f32; 4]> {
+    let ConfigColor::Complex(c) = stop else {
+        return None;
+    };
+    let live = scheme?.get(c.role.as_deref()?)?;
+    try_color_from_hex(live, c.alpha.unwrap_or(1.0))
 }
 
 /// Pack stops into the std430 layout the fragment shader declares: an int
@@ -226,13 +247,19 @@ pub fn resolve_stops(
 /// the shader's `GradientColors` block disagree the result is silent garbage on
 /// screen, so there is exactly one copy of it.
 pub fn gradient_buffer(rgba: &[[f32; 4]]) -> Vec<u8> {
-    let mut buf: Vec<u8> = (rgba.len() as i32).to_le_bytes().to_vec();
-    buf.extend([0, 0, 0, 0].repeat(3));
+    /// i32 count plus three words of padding to reach the stops' vec4 alignment.
+    const HEADER: usize = 16;
+    // Sized up front: the old form allocated a 4-byte Vec, a second one from
+    // `repeat(3)` to copy zeroes out of, then grew the first to length.
+    let mut buf = Vec::with_capacity(HEADER + std::mem::size_of_val(rgba));
+    buf.extend_from_slice(&(rgba.len() as i32).to_le_bytes());
+    buf.extend_from_slice(&[0u8; HEADER - 4]);
     for color in rgba {
         for v in color {
             buf.extend_from_slice(&v.to_le_bytes());
         }
     }
+    debug_assert_eq!(buf.len(), HEADER + std::mem::size_of_val(rgba));
     buf
 }
 
@@ -305,11 +332,11 @@ mod tests {
         let junk: HashMap<String, String> =
             [("mauve".to_string(), "not-a-colour".to_string())].into_iter().collect();
         for scheme in [None, Some(&empty), Some(&junk)] {
-            let got = resolve_stops(&vec![roled("#00ff00", "mauve")], scheme);
+            let got = resolve_stops(&[roled("#00ff00", "mauve")], scheme);
             assert_eq!(got[0], [0.0, 1.0, 0.0, 0.5]);
         }
         // No role at all.
-        assert_eq!(resolve_stops(&vec![stop("#0000ff")], Some(&junk))[0], [0.0, 0.0, 1.0, 1.0]);
+        assert_eq!(resolve_stops(&[stop("#0000ff")], Some(&junk))[0], [0.0, 0.0, 1.0, 1.0]);
     }
 
     #[test]

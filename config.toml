@@ -19,7 +19,7 @@ background_color = { hex = "#000000", alpha = 0.0 }
 # mono_option = "average"
 # Which monitor to draw on. Left unset, an external monitor is preferred and
 # the machine's own panel (eDP*/LVDS*/DSI*) is the fallback, re-evaluated
-# whenever one is plugged in or out -- so this only needs setting to override
+# whenever one is plugged in or out - so this only needs setting to override
 # that. Names come from `hyprctl monitors all` on Hyprland.
 #
 # CAVAWALL_OUTPUT in the environment overrides this, which is how an external
@@ -29,7 +29,7 @@ background_color = { hex = "#000000", alpha = 0.0 }
 # preferred_output = ""
 # Source cava captures from, forwarded to its [input] section as
 # method=pulse, source=<this>. Left unset, cava monitors whatever the current
-# DEFAULT SINK is -- which goes silent the moment that sink's monitor does
+# DEFAULT SINK is - which goes silent the moment that sink's monitor does
 # not work (a Bluetooth A2DP sink, for one). Point it at a source that stays
 # put across output switches.
 # audio_source = ""
@@ -41,7 +41,7 @@ gap = 0.1
 
 [colors]
 # The stops form a gradient from the TOP of the surface down, and their ORDER
-# matters -- the shader mixes each stop into the next one.
+# matters - the shader mixes each stop into the next one.
 #
 # Upstream's comment here said they "can be named however you like, only the
 # values matter", which was not true: this section deserialises into a hash map,
@@ -61,7 +61,7 @@ gradient_color_8 = '#f38ba8'
 
 # Optional. Take part of the configuration from Caelestia's live state instead
 # of from this file, so its settings UI stays the single place those values are
-# set. Absent -- as it is on any machine without Caelestia -- means follow
+# set. Absent - as it is on any machine without Caelestia - means follow
 # nothing, and everything above applies as written.
 #
 # [scheme]
@@ -71,8 +71,8 @@ gradient_color_8 = '#f38ba8'
 # #   c1 = { hex = "#ffcc80", alpha = 0.65, role = "yellow" }
 # colors = true
 # # Take the bar count from services.visualiserBars rather than [bars] amount.
-# # The count cannot change in place -- it is written into the spawned cava's
-# # config at exec time and baked into the GPU index buffer -- so cavawall
+# # The count cannot change in place - it is written into the spawned cava's
+# # config at exec time and baked into the GPU index buffer - so cavawall
 # # re-execs itself when it changes. exec keeps the PID, so anything guarding on
 # # "is one running" never sees zero or two instances.
 # bars = true

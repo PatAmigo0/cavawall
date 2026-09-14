@@ -5,7 +5,7 @@
 //! values, rewrote the `[colors]` block of config.toml in place, and restarted
 //! the process so it would re-read it. That worked, but the config file it
 //! rewrote is a stowed, version-controlled file, so every wallpaper change
-//! produced a diff in a file whose remaining content is hand-written prose --
+//! produced a diff in a file whose remaining content is hand-written prose -
 //! and the restart had to be gated on whether a fullscreen watcher had
 //! deliberately stopped the visualiser, because relaunching it on top of a game
 //! was exactly the thing that watcher existed to prevent.
@@ -15,14 +15,15 @@
 //! no restart to get wrong.
 //!
 //! Nothing here is required. Every function returns an Option and every failure
-//! path -- no Caelestia, no scheme yet, a half-written file, a renamed key --
+//! path - no Caelestia, no scheme yet, a half-written file, a renamed key -
 //! leaves the static configuration in force.
 
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::os::fd::RawFd;
 use std::os::unix::ffi::OsStrExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 pub const SCHEME_FILE: &str = "scheme.json";
 pub const SHELL_FILE: &str = "shell.json";
@@ -46,23 +47,39 @@ fn config_dir() -> PathBuf {
 /// Directory holding scheme.json. Watched rather than the file itself: the
 /// writer may replace the inode rather than truncate it, and a watch on the old
 /// inode would then go quiet forever while looking perfectly healthy.
-pub fn scheme_dir() -> PathBuf {
-    state_dir().join("caelestia")
+///
+/// Resolved once: every call otherwise re-read the environment, which takes a
+/// process-wide lock and allocates, for a path that cannot change.
+pub fn scheme_dir() -> &'static Path {
+    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    DIR.get_or_init(|| state_dir().join("caelestia"))
 }
 
 /// Directory holding shell.json, Caelestia's own settings file.
-pub fn shell_dir() -> PathBuf {
-    config_dir().join("caelestia")
+pub fn shell_dir() -> &'static Path {
+    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    DIR.get_or_init(|| config_dir().join("caelestia"))
 }
 
 /// Role name -> bare `rrggbb`, as Caelestia writes it (no leading `#`).
 pub fn colours() -> Option<HashMap<String, String>> {
     let raw = std::fs::read_to_string(scheme_dir().join(SCHEME_FILE)).ok()?;
     let parsed: serde_json::Value = serde_json::from_str(&raw).ok()?;
-    let obj = parsed.get("colours")?.as_object()?;
+    let serde_json::Value::Object(mut root) = parsed else {
+        return None;
+    };
+    let serde_json::Value::Object(obj) = root.remove("colours")? else {
+        return None;
+    };
+    // Moved out of the parsed document, not copied: the keys and hex values
+    // are already owned, so cloning each duplicated the whole palette per
+    // wallpaper change. Non-string values are still skipped, not rejected.
     Some(
-        obj.iter()
-            .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
+        obj.into_iter()
+            .filter_map(|(k, v)| match v {
+                serde_json::Value::String(hex) => Some((k, hex)),
+                _ => None,
+            })
             .collect(),
     )
 }
@@ -74,9 +91,27 @@ pub fn colours() -> Option<HashMap<String, String>> {
 /// well above anything the settings UI offers and only exists so a corrupt file
 /// cannot ask for a gigabyte of indices.
 pub fn bar_count() -> Option<u32> {
+    /// Absent `services` is not a failure - it just means nothing to follow.
+    #[derive(serde::Deserialize)]
+    struct Shell {
+        #[serde(default)]
+        services: Services,
+    }
+
+    #[derive(serde::Deserialize, Default)]
+    struct Services {
+        #[serde(rename = "visualiserBars")]
+        visualiser_bars: Option<u64>,
+    }
+
     let raw = std::fs::read_to_string(shell_dir().join(SHELL_FILE)).ok()?;
-    let parsed: serde_json::Value = serde_json::from_str(&raw).ok()?;
-    let n = parsed.get("services")?.get("visualiserBars")?.as_u64()?;
+    // Naming only the field of interest lets serde walk past the rest without
+    // building a `Value` tree. Caelestia rewrites shell.json on every settings
+    // change and this runs on each one.
+    let n = serde_json::from_str::<Shell>(&raw)
+        .ok()?
+        .services
+        .visualiser_bars?;
     if (1..=512).contains(&n) {
         Some(n as u32)
     } else {
@@ -92,13 +127,25 @@ pub fn bar_count() -> Option<u32> {
 pub struct Watch {
     fd: RawFd,
     file: &'static str,
+    /// Owned rather than a local in `take_event`, which runs per watch per
+    /// frame: a zero-initialised 4 KiB local is a 4 KiB memset each time.
+    buf: Box<EventBuf>,
 }
 
+/// Backing store for the inotify queue, with its alignment pinned.
+///
+/// Events are read out of it through a `&inotify_event`, which needs 4-byte
+/// alignment; a bare `[u8; N]` guarantees none, and an under-aligned reference
+/// is UB even where the load would work. The kernel pads each record, so
+/// pinning the base covers the whole walk.
+#[repr(C, align(8))]
+struct EventBuf([u8; 4096]);
+
 impl Watch {
-    /// None when there is nothing to watch -- the directory does not exist (no
+    /// None when there is nothing to watch - the directory does not exist (no
     /// Caelestia), or inotify is unavailable. The caller carries on with
     /// whatever the config file said.
-    pub fn new(dir: PathBuf, file: &'static str) -> Option<Self> {
+    pub fn new(dir: &Path, file: &'static str) -> Option<Self> {
         if !dir.is_dir() {
             return None;
         }
@@ -114,7 +161,7 @@ impl Watch {
             unsafe { libc::close(fd) };
             return None;
         }
-        Some(Self { fd, file })
+        Some(Self { fd, file, buf: Box::new(EventBuf([0; 4096])) })
     }
 
     /// Drain every queued event and report whether any of them touched the file
@@ -123,31 +170,36 @@ impl Watch {
     /// Draining fully in one call is the point: a write-then-rename delivers two
     /// events for one logical change, and reacting to each in turn would
     /// re-upload the same palette twice.
-    pub fn take_event(&self) -> bool {
+    pub fn take_event(&mut self) -> bool {
+        const HDR: usize = std::mem::size_of::<libc::inotify_event>();
+        let buf = &mut self.buf.0;
         let mut hit = false;
-        let mut buf = [0u8; 4096];
         loop {
-            let n = unsafe {
-                libc::read(self.fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len())
-            };
+            let n = unsafe { libc::read(self.fd, buf.as_mut_ptr().cast(), buf.len()) };
             if n <= 0 {
                 // EAGAIN: queue empty, which is the normal case every frame.
                 return hit;
             }
+            let n = n as usize;
             let mut off = 0usize;
-            let hdr = std::mem::size_of::<libc::inotify_event>();
-            while off + hdr <= n as usize {
-                let ev = unsafe { &*(buf.as_ptr().add(off) as *const libc::inotify_event) };
-                let len = ev.len as usize;
-                if len > 0 {
-                    let start = off + hdr;
-                    let raw = &buf[start..(start + len).min(buf.len())];
-                    let name = raw.split(|b| *b == 0).next().unwrap_or(&[]);
+            while off + HDR <= n {
+                // SAFETY: the kernel just wrote `n` bytes, of which
+                // `off .. off + HDR` is a whole header; `EventBuf` pins the
+                // base alignment and inotify pads each record, so `off` stays
+                // a multiple of it.
+                let ev = unsafe { &*buf.as_ptr().add(off).cast::<libc::inotify_event>() };
+                let start = off + HDR;
+                // Clamped to what was read, not to the buffer: a truncated
+                // record must not expose bytes from an earlier one.
+                let end = (start + ev.len as usize).min(n);
+                if start < end {
+                    // The name is NUL-padded out to the record length.
+                    let name = buf[start..end].split(|b| *b == 0).next().unwrap_or(&[]);
                     if name == self.file.as_bytes() {
                         hit = true;
                     }
                 }
-                off += hdr + len;
+                off = start + ev.len as usize;
             }
         }
     }

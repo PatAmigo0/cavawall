@@ -12,7 +12,7 @@ features. Original by [rs-pro0](https://github.com/rs-pro0). MIT, as upstream.
 - **Gradient stops were shuffled on every launch.** The fragment shader reads
   the SSBO as an ordered ramp, mixing stop *i* into *i+1* down the surface, but
   `[colors]` deserialises into a `HashMap` and upstream fed its iteration
-  straight to the GPU -- arbitrary order, randomised per process. The config's
+  straight to the GPU - arbitrary order, randomised per process. The config's
   claim that the keys "can be named however you like, only the values matter"
   had it exactly backwards. Stops are now ordered by the number at the end of
   the key, covering both `gradient_color_1..8` and `c1..c8`, and putting `c10`
@@ -66,7 +66,7 @@ features. Original by [rs-pro0](https://github.com/rs-pro0). MIT, as upstream.
   stop may carry a `role` alongside its `hex`; with `[scheme] colors = true`
   those resolve against Caelestia's live scheme, re-resolved in place whenever
   it changes. The SSBO is re-uploaded directly, so there is no restart and no
-  config file is ever rewritten -- which is the point, since the alternative is
+  config file is ever rewritten - which is the point, since the alternative is
   a script generating colour values into a version-controlled file.
 
   `[scheme] bars = true` takes the bar count from Caelestia's
@@ -75,7 +75,7 @@ features. Original by [rs-pro0](https://github.com/rs-pro0). MIT, as upstream.
   index buffer. So cavawall **re-execs itself** when it changes. `exec` keeps
   the PID, so the launcher's lock, its kill-wait, and any external "is one
   running" check never observe zero or two instances, and an inherited
-  `CAVAWALL_OUTPUT` survives. The outgoing cava is killed and reaped first --
+  `CAVAWALL_OUTPUT` survives. The outgoing cava is killed and reaped first -
   exec keeps the children too, and an unreaped one is a zombie nothing will
   ever collect.
 
