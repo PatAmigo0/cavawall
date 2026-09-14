@@ -535,10 +535,15 @@ fn main() {
 
     println!("OpenGL version: {version}");
     println!("EGL version: {}", egl.version());
+    // Resolved once, here, and carried into AppState. draw() then only matches
+    // on the stored Option, so a frame costs a null check - no env lookup and
+    // no eglGetProcAddress. Reporting the same value that gets used, rather
+    // than resolving a second time, keeps one source of truth for it.
+    let swap_damage = load_swap_with_damage(egl_display);
     if debug_enabled() {
         eprintln!(
             "cavawall: swap-with-damage {}",
-            if load_swap_with_damage(egl_display).is_some() {
+            if swap_damage.is_some() {
                 "available"
             } else {
                 "MISSING - every frame will declare the whole surface"
@@ -696,7 +701,7 @@ fn main() {
         cava_buffer,
         bar_width,
         bar_stride,
-        swap_damage: load_swap_with_damage(egl_display),
+        swap_damage,
         force_full_damage: true,
         max_height: config.bars.max_height.unwrap_or(1.0),
         silent_frames: 0,
