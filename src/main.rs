@@ -116,32 +116,23 @@ const VERTEX_SHADER_SRC: &str = include_str!("shaders/vertex_shader.glsl");
 
 const FRAGMENT_SHADER_SRC: &str = include_str!("shaders/fragment_shader.glsl");
 
-/// The vertex buffer with everything the audio does not move already in it.
+/// Bar width and stride in NDC, both fixed until a re-exec.
 ///
-/// A bar is a quad of four `[x, y]` vertices - top-left, top-right,
-/// bottom-left, bottom-right - and only the two TOP y values move per frame.
-/// The rest follows from the bar count and gap, fixed until a re-exec. They
-/// were recomputed every frame - four int-to-float conversions, four
-/// multiplies and two adds per bar - to write back the same six floats.
-fn static_vertices(bar_count: u32, gap: f32) -> Box<[f32]> {
+/// Handed to the vertex shader as uniforms, which is what lets a bar's geometry
+/// be one instance of a unit quad rather than four vertices in a buffer.
+fn bar_geometry(bar_count: u32, gap: f32) -> (f32, f32) {
     let bars = bar_count as f32;
     // NDC is 2.0 wide, shared by `bars` bars and `bars - 1` gaps of `gap` bars.
     let bar_width = 2.0 / (bars + (bars - 1.0) * gap);
     // Left edge to the next left edge.
-    let stride = bar_width * (1.0 + gap);
-    let mut v = vec![0.0f32; bar_count as usize * 8].into_boxed_slice();
-    for (i, quad) in v.as_chunks_mut::<8>().0.iter_mut().enumerate() {
-        let left = stride * i as f32 - 1.0;
-        let right = left + bar_width;
-        quad[0] = left; // top-left x; quad[1] is the height, written per frame
-        quad[2] = right; // top-right x; quad[3] likewise
-        quad[4] = left; // bottom-left
-        quad[5] = -1.0;
-        quad[6] = right; // bottom-right
-        quad[7] = -1.0;
-    }
-    v
+    (bar_width, bar_width * (1.0 + gap))
 }
+
+/// One unit quad in triangle-strip order: top-left, top-right, bottom-left,
+/// bottom-right. The same two triangles the index buffer used to spell out,
+/// except that each instance is its own strip, so bars cannot run into one
+/// another and there is nothing left to index.
+const UNIT_QUAD: [f32; 8] = [0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0];
 
 /// Compile and link the one program this renderer has.
 ///
@@ -303,10 +294,11 @@ fn main() {
     } else {
         config.bars.amount
     };
-    // Both ends are silent failures in release: zero divides by zero in the
-    // bar-width maths, and past MAX_BARS the u16 indices wrap onto other bars'
-    // vertices. scheme::bar_count() clamps; `[bars] amount` never did.
-    const MAX_BARS: u32 = (u16::MAX as u32 - 3) / 4;
+    // Zero divides by zero in the bar-width maths. The ceiling is now only a
+    // sanity bound - instancing removed the u16 index buffer that used to
+    // impose one - and 4096 bars is already sub-pixel on any real monitor.
+    // scheme::bar_count() clamps; `[bars] amount` never did.
+    const MAX_BARS: u32 = 4096;
     assert!(
         (1..=MAX_BARS).contains(&bar_count),
         "bar count must be between 1 and {MAX_BARS}, got {bar_count}"
@@ -491,9 +483,9 @@ fn main() {
     println!("OpenGL version: {version}");
     println!("EGL version: {}", egl.version());
     let shader_program = build_program();
-    let mut vbo = 0;
+    let mut quad_vbo = 0;
+    let mut height_vbo = 0;
     let mut vao = 0;
-    let mut ebo = 0;
     let mut gradient_colors_ssbo = 0;
     // Ordered once and kept. A live re-resolve reuses this exact Vec rather
     // than walking the HashMap again, which would be free to hand back a
@@ -522,35 +514,20 @@ fn main() {
     // through the same inotify fd, so a frame costs one read, not two.
     let watch = scheme::Watch::new(follow_colors, follow_bars);
 
-    // Two triangles per bar sharing the 1-2 edge, extended a pair at a time
-    // rather than six bounds-checked stores through a recomputed base index.
-    let mut indices: Vec<u16> = Vec::with_capacity(bar_count as usize * 6);
-    for bar in 0..bar_count as u16 {
-        let v = bar * 4;
-        indices.extend_from_slice(&[v, v + 1, v + 2, v + 1, v + 2, v + 3]);
-    }
-
     // Sized from the bar count, which cannot change without a re-exec, so both
-    // are allocated once here rather than on every frame. See static_vertices.
-    let vertices = static_vertices(bar_count, config.bars.gap);
+    // are allocated once here rather than on every frame.
+    let heights = vec![0.0f32; bar_count as usize].into_boxed_slice();
     let cava_buffer = vec![0u8; bar_count as usize * 2].into_boxed_slice();
+    let (bar_width, bar_stride) = bar_geometry(bar_count, config.bars.gap);
     let background_color = array_from_config_color(&config.general.background_color);
 
     let gradient_scale_name = CString::new("GradientScale").unwrap();
     unsafe {
         gl::GenVertexArrays(1, &mut vao);
         gl::BindVertexArray(vao);
-        gl::GenBuffers(1, &mut vbo);
-        gl::GenBuffers(1, &mut ebo);
+        gl::GenBuffers(1, &mut quad_vbo);
+        gl::GenBuffers(1, &mut height_vbo);
         gl::GenBuffers(1, &mut gradient_colors_ssbo);
-        gl::BindBuffer(gl::ARRAY_BUFFER, vbo);
-        gl::BindBuffer(gl::ELEMENT_ARRAY_BUFFER, ebo);
-        gl::BufferData(
-            gl::ELEMENT_ARRAY_BUFFER,
-            (indices.len() * std::mem::size_of::<u16>()) as gl::types::GLsizeiptr,
-            indices.as_ptr() as *const ffi::c_void,
-            gl::STATIC_DRAW,
-        );
         gl::BindBuffer(gl::SHADER_STORAGE_BUFFER, gradient_colors_ssbo);
         gl::BufferData(
             gl::SHADER_STORAGE_BUFFER,
@@ -560,15 +537,29 @@ fn main() {
         );
         gl::BindBufferBase(gl::SHADER_STORAGE_BUFFER, 0, gradient_colors_ssbo);
         gl::BindBuffer(gl::SHADER_STORAGE_BUFFER, 0);
-        gl::VertexAttribPointer(
-            0,
-            2,
-            gl::FLOAT,
-            gl::FALSE,
-            (2 * std::mem::size_of::<f32>()) as gl::types::GLsizei,
-            std::ptr::null(),
+        // Attribute 0: the quad itself, uploaded once and never touched again.
+        gl::BindBuffer(gl::ARRAY_BUFFER, quad_vbo);
+        gl::BufferData(
+            gl::ARRAY_BUFFER,
+            std::mem::size_of_val(&UNIT_QUAD) as GLsizeiptr,
+            UNIT_QUAD.as_ptr().cast(),
+            gl::STATIC_DRAW,
         );
+        gl::VertexAttribPointer(0, 2, gl::FLOAT, gl::FALSE, 8, std::ptr::null());
         gl::EnableVertexAttribArray(0);
+
+        // Attribute 1: one height per bar. The divisor is what makes it
+        // per-instance rather than per-vertex, and is the whole trick.
+        gl::BindBuffer(gl::ARRAY_BUFFER, height_vbo);
+        gl::BufferData(
+            gl::ARRAY_BUFFER,
+            std::mem::size_of_val(&*heights) as GLsizeiptr,
+            std::ptr::null(),
+            gl::DYNAMIC_DRAW,
+        );
+        gl::VertexAttribPointer(1, 1, gl::FLOAT, gl::FALSE, 4, std::ptr::null());
+        gl::EnableVertexAttribArray(1);
+        gl::VertexAttribDivisor(1, 1);
 
         // Render state that never changes, set once instead of per frame.
         // draw() re-issued all four every frame and unbound the vertex array
@@ -579,6 +570,16 @@ fn main() {
         // reload_colors() touches only SHADER_STORAGE_BUFFER and resets it.
         // ARRAY_BUFFER is left to draw(), where it is load-bearing.
         gl::UseProgram(shader_program);
+        // Bar geometry is a pair of constants now, not a buffer full of
+        // coordinates. Set once; neither can change without a re-exec.
+        gl::Uniform1f(
+            gl::GetUniformLocation(shader_program, c"BarWidth".as_ptr()),
+            bar_width,
+        );
+        gl::Uniform1f(
+            gl::GetUniformLocation(shader_program, c"Stride".as_ptr()),
+            bar_stride,
+        );
         gl::Enable(gl::BLEND);
         gl::BlendFunc(gl::SRC_ALPHA, gl::ONE_MINUS_SRC_ALPHA);
         gl::ClearColor(
@@ -619,7 +620,7 @@ fn main() {
         egl_config,
         egl_context,
         egl_display,
-        vbo,
+        height_vbo,
         gradient_scale_location,
         gradient_stops,
         bar_count,
@@ -627,7 +628,7 @@ fn main() {
         gradient_colors_ssbo,
         color_stops,
         watch,
-        vertices,
+        heights,
         cava_buffer,
         max_height: config.bars.max_height.unwrap_or(1.0),
         silent_frames: 0,
@@ -672,10 +673,10 @@ struct AppState {
     egl_config: egl::Config,
     egl_context: egl::Context,
     egl_display: egl::Display,
-    /// The vertex buffer draw() streams into. The program, vertex array and
-    /// index buffer need no handle: bound once at startup, never rebound. The
-    /// SSBO below is the exception - the palette is re-uploaded in place.
-    vbo: u32,
+    /// The per-instance height buffer draw() streams into. The program, vertex
+    /// array and static quad need no handle: bound once at startup, never
+    /// rebound. The SSBO is the other exception - the palette is re-uploaded.
+    height_vbo: u32,
     gradient_scale_location: i32,
     /// Stops in the SSBO, which is 2 even when one colour is configured.
     gradient_stops: u32,
@@ -690,9 +691,9 @@ struct AppState {
     watch: Option<scheme::Watch>,
     /// The cava child, kept so a re-exec can kill and reap it.
     cava_pid: u32,
-    /// Vertex buffer, reused. All but the two top corners of each bar is
-    /// filled in at startup; see static_vertices.
-    vertices: Box<[f32]>,
+    /// One NDC height per bar, reused. The entire per-frame vertex payload:
+    /// everything else about a bar's geometry is a uniform or gl_InstanceID.
+    heights: Box<[f32]>,
     /// One raw cava frame, reused. Both were `vec![..]` locals in draw(), so an
     /// idle machine still did three allocations and three frees per frame.
     cava_buffer: Box<[u8]>,
@@ -1228,40 +1229,29 @@ impl AppState {
             return;
         }
 
-        // Only the two top corners move. NDC: -1.0 bottom, +1.0 top.
-        // max_height is NOT applied here - the surface is already sized to
-        // that fraction of the screen, so a full-volume bar fills it exactly.
-        // Applying it twice made the bars max_height^2 tall, visibly short.
-        //
-        // `as_chunks` hands back fixed-size arrays, so the stores carry no
-        // bounds checks and the unpack from cava's bytes folds into one pass.
-        let (quads, _) = self.vertices.as_chunks_mut::<8>();
+        // One float per bar, and that is the whole per-frame vertex payload.
+        // NDC: -1.0 bottom, +1.0 top. max_height is NOT applied here - the
+        // surface is already sized to that fraction of the screen, so a
+        // full-volume bar fills it exactly. Applying it twice made the bars
+        // max_height^2 tall, visibly short.
         let (samples, _) = self.cava_buffer.as_chunks::<2>();
-        for (quad, sample) in quads.iter_mut().zip(samples) {
-            let top = f32::from(u16::from_le_bytes(*sample)) * BAR_NDC_SCALE - 1.0;
-            quad[1] = top;
-            quad[3] = top;
+        for (height, sample) in self.heights.iter_mut().zip(samples) {
+            *height = f32::from(u16::from_le_bytes(*sample)) * BAR_NDC_SCALE - 1.0;
         }
         unsafe {
             // The only binding draw() still makes: BufferData writes through
             // it. Everything else is set once at startup - see the note there.
-            gl::BindBuffer(gl::ARRAY_BUFFER, self.vbo);
+            gl::BindBuffer(gl::ARRAY_BUFFER, self.height_vbo);
             gl::BufferData(
                 gl::ARRAY_BUFFER,
-                std::mem::size_of_val(&*self.vertices) as GLsizeiptr,
-                self.vertices.as_ptr().cast(),
+                std::mem::size_of_val(&*self.heights) as GLsizeiptr,
+                self.heights.as_ptr().cast(),
                 gl::DYNAMIC_DRAW,
             );
             gl::Clear(gl::COLOR_BUFFER_BIT);
-            gl::DrawElements(
-                gl::TRIANGLES,
-                // Six indices per bar. The old spelling reached the same
-                // number only via a stray `size_of::<u16>()`; this argument is
-                // an index count, so "fixing" that would have halved the draw.
-                (self.bar_count * 6) as GLsizei,
-                gl::UNSIGNED_SHORT,
-                ptr::null(),
-            );
+            // Four vertices, once per bar. No index buffer: each instance is
+            // its own strip, so there are no shared vertices to index.
+            gl::DrawArraysInstanced(gl::TRIANGLE_STRIP, 0, 4, self.bar_count as GLsizei);
         }
         // Ask for the next callback BEFORE the swap, never after.
         //
@@ -1491,45 +1481,57 @@ impl LayerShellHandler for AppState {
 mod tests {
     use super::*;
 
-    /// The quad layout `static_vertices` writes and the index buffer `main`
-    /// uploads have to describe the same four vertices per bar, in the same
-    /// order. They are built hundreds of lines apart and nothing but this
-    /// connects them; getting it wrong renders as silent garbage.
+    /// The vertex shader's own placement, replicated: it is the only consumer
+    /// of `bar_geometry`, and nothing else checks that the two agree.
+    fn bar_edges(bar_count: u32, gap: f32) -> Vec<(f32, f32)> {
+        let (width, stride) = bar_geometry(bar_count, gap);
+        (0..bar_count)
+            .map(|i| {
+                let left = stride * i as f32 - 1.0;
+                (left, left + width)
+            })
+            .collect()
+    }
+
     #[test]
-    fn quads_run_left_to_right_and_sit_on_the_bottom_edge() {
-        let v = static_vertices(4, 0.0);
-        let quads = v.as_chunks::<8>().0;
-        assert_eq!(quads.len(), 4);
-        // With no gap the four bars tile NDC -1..1 exactly, edge to edge.
-        assert!((quads[0][0] - -1.0).abs() < 1e-6, "first bar starts at -1");
-        assert!((quads[3][6] - 1.0).abs() < 1e-6, "last bar ends at +1");
-        for q in quads {
-            assert!(q[2] > q[0], "top edge runs left to right");
-            assert_eq!(q[4], q[0], "left column shares one x");
-            assert_eq!(q[6], q[2], "right column shares one x");
-            assert_eq!((q[5], q[7]), (-1.0, -1.0), "bars are anchored to the bottom");
-        }
-        for pair in quads.windows(2) {
-            assert!((pair[0][6] - pair[1][0]).abs() < 1e-6, "no gap means touching");
+    fn bars_tile_ndc_left_to_right() {
+        let e = bar_edges(4, 0.0);
+        assert!((e[0].0 - -1.0).abs() < 1e-6, "first bar starts at -1");
+        assert!((e[3].1 - 1.0).abs() < 1e-6, "last bar ends at +1");
+        for pair in e.windows(2) {
+            assert!((pair[0].1 - pair[1].0).abs() < 1e-6, "no gap means touching");
         }
     }
 
     #[test]
     fn gap_is_a_fraction_of_bar_width() {
-        let v = static_vertices(2, 0.5);
-        let q = v.as_chunks::<8>().0;
-        let bar = q[0][2] - q[0][0];
-        let gap = q[1][0] - q[0][2];
+        let e = bar_edges(2, 0.5);
+        let (bar, gap) = (e[0].1 - e[0].0, e[1].0 - e[0].1);
         assert!((gap - bar * 0.5).abs() < 1e-6, "bar {bar}, gap {gap}");
     }
 
-    /// A single bar has to fill the surface, not divide by zero on the
-    /// `bars - 1` gaps it does not have.
+    /// A single bar fills the surface rather than dividing by the zero gaps.
     #[test]
     fn one_bar_spans_the_whole_surface() {
-        let v = static_vertices(1, 0.1);
-        let q = v.as_chunks::<8>().0;
-        assert_eq!((q[0][0], q[0][2]), (-1.0, 1.0));
+        let e = bar_edges(1, 0.1);
+        assert!((e[0].0 - -1.0).abs() < 1e-6 && (e[0].1 - 1.0).abs() < 1e-6, "{e:?}");
+    }
+
+    /// The quad must be a strip in the order the shader assumes: corner.x
+    /// selects the left or right edge, corner.y the bottom or the top. These
+    /// are the same two triangles the index buffer used to spell out.
+    #[test]
+    fn unit_quad_is_a_bottom_anchored_strip() {
+        let corners = UNIT_QUAD.as_chunks::<2>().0;
+        assert_eq!(
+            corners,
+            &[[0.0, 1.0], [1.0, 1.0], [0.0, 0.0], [1.0, 0.0]],
+            "top-left, top-right, bottom-left, bottom-right"
+        );
+        for c in corners {
+            assert!(c[0] == 0.0 || c[0] == 1.0, "corner.x is an edge selector");
+            assert!(c[1] == 0.0 || c[1] == 1.0, "corner.y is a bottom/top selector");
+        }
     }
 
     /// draw() and poll_resume() must not be able to disagree about what silence
