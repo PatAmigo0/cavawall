@@ -1,0 +1,21 @@
+pkgbase = cavawall-git
+	pkgdesc = Wayland audio visualiser that draws cava over your wallpaper
+	pkgver = r1.0000000
+	pkgrel = 1
+	url = https://github.com/PatAmigo0/cavawall
+	arch = x86_64
+	license = MIT
+	makedepends = git
+	makedepends = cargo
+	depends = cava
+	depends = wayland
+	depends = libglvnd
+	depends = libffi
+	depends = gcc-libs
+	depends = glibc
+	provides = cavawall
+	conflicts = cavawall
+	source = cavawall-git::git+https://github.com/PatAmigo0/cavawall.git
+	sha256sums = SKIP
+
+pkgname = cavawall-git
