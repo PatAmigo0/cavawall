@@ -3,9 +3,9 @@
 # If alpha is not specified, it is considered 1.0.
 [general]
 framerate = 60
-# "bars" (default) or "circle". Startup-only, like the bar count and for the
-# same reasons: the two are separate GL programs with different uniforms, and
-# they ask the compositor for different surface geometry.
+# "bars" (default), "circle" or "curve". Startup-only, like the bar count and
+# for the same reasons: each is a separate GL program with its own uniforms,
+# and each asks the compositor for different surface geometry.
 # mode = "bars"
 background_color = { hex = "#000000", alpha = 0.0 }
 # autosens = true
@@ -60,6 +60,43 @@ gap = 0.1
 # offset_x = 0
 # offset_y = 0
 
+# Only read when mode = "curve". Bars stand along a path you draw over the
+# wallpaper, which is why each block is keyed by the wallpaper's CONTENT hash:
+# a path authored for one image means nothing on another, and a rename or a
+# re-download must not silently point it at the wrong picture. A wallpaper
+# with no block here falls back to bars.
+#
+# Author these with `cavawall-curve` rather than by hand - it opens an editor
+# on the current wallpaper and writes the block itself.
+#
+# [curves.07cfa6d114ed3a98]
+# # Bars for this curve, shared by its paths. Omit it and paths that each name
+# # a count add up to the total instead.
+# bars = 20
+# # The silhouette to hide behind: [[x, y], ...] normalised, origin top left.
+# # Anything BELOW it is discarded, so bars rise from behind a ridge rather
+# # than being positioned to look as though they do. One per curve, since it
+# # is the wallpaper's skyline and every path on it hides behind the same one.
+# occlude = [[0.43, 0.44], [0.62, 0.33], [0.99, 0.41]]
+#
+# # One block per stretch of path. Two ridges at different distances want
+# # different bars, so all of this is per path.
+# [[curves.07cfa6d114ed3a98.path]]
+# # Exactly this many bars on this path, instead of its share by length.
+# bars = 10
+# # How far a full-volume bar reaches along the path's normal, as a fraction
+# # of the output height, and how wide it is as a fraction of the width.
+# height = 0.17
+# width = 0.006
+# # Keep bars vertical instead of turning them onto the path's normal.
+# upright = true
+# # Grow toward the other side of the path.
+# flip = false
+# # Control points: [x, y] normalised, optionally a third value scaling the
+# # bars there - which is what makes a distant stretch carry shorter, thinner
+# # ones - and a fourth overriding the angle in degrees clockwise from up.
+# points = [[0.53, 0.41, 1.0], [0.62, 0.33, 0.8], [0.99, 0.41, 0.6]]
+
 [colors]
 # The stops form a gradient from the TOP of the surface down, and their ORDER
 # matters - the shader mixes each stop into the next one.
@@ -89,24 +126,7 @@ gradient_color_8 = '#f38ba8'
 # nothing, and everything above applies as written.
 #
 # [scheme]
-# # Resolve each # Only read when mode = "circle". Every key is optional.
-# [circle]
-# # Surface edge in logical pixels. The surface is SQUARE on purpose - that is
-# # what keeps NDC square and the circle round without an aspect correction.
-# # Clamped to the output if it does not fit.
-# diameter = 520
-# # Where a bar starts, as a fraction of the radius: the hole in the middle.
-# inner_radius = 0.35
-# # Alpha multiplier at the inner edge and at a full-volume bar's tip, blended
-# # across the bar. Multiplies whatever alpha the gradient stop already carries,
-# # so 1.0/1.0 leaves the palette exactly as written.
-# inner_alpha = 1.0
-# outer_alpha = 0.4
-# # Logical pixels from the centre of the output, positive right and down.
-# offset_x = 0
-# offset_y = 0
-
-[colors] stop through a `role` key against Caelestia's palette,
+# # Resolve each [colors] stop through a `role` key against Caelestia's palette,
 # # and re-resolve whenever the wallpaper changes. Applied in place, with no
 # # restart. Give the stop both a role and a hex; the hex stays the fallback:
 # #   c1 = { hex = "#ffcc80", alpha = 0.65, role = "yellow" }
