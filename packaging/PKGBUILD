@@ -1,0 +1,55 @@
+# Maintainer: PatAmigo0 <arseni.kuskou@innowise.com>
+pkgname=cavawall-git
+pkgver=r1.0000000
+pkgrel=1
+pkgdesc="Wayland audio visualiser that draws cava over your wallpaper"
+arch=('x86_64')
+url="https://github.com/PatAmigo0/cavawall"
+license=('MIT')
+depends=('cava' 'wayland' 'libglvnd' 'libffi' 'gcc-libs' 'glibc')
+makedepends=('git' 'cargo')
+provides=('cavawall')
+conflicts=('cavawall')
+source=("$pkgname::git+$url.git")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd "$pkgname"
+  printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)"
+}
+
+prepare() {
+  cd "$pkgname"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "$pkgname"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  # The checkout's .cargo/config.toml asks for target-cpu=native, which a
+  # package must not do: it would run on the build machine and crash on
+  # anyone else's. RUSTFLAGS in the environment takes precedence over that
+  # file, and a later -C target-cpu wins over an earlier one.
+  export RUSTFLAGS="${RUSTFLAGS:-} -C target-cpu=x86-64"
+  cargo build --frozen --release --all-features
+}
+
+check() {
+  cd "$pkgname"
+  export RUSTUP_TOOLCHAIN=stable
+  export RUSTFLAGS="${RUSTFLAGS:-} -C target-cpu=x86-64"
+  cargo test --frozen --release
+}
+
+package() {
+  cd "$pkgname"
+  install -Dm755 target/release/cavawall "$pkgdir/usr/bin/cavawall"
+  install -Dm755 target/release/cavawall-curve "$pkgdir/usr/bin/cavawall-curve"
+  # Not into /etc: cavawall reads ~/.config/cavawall/config.toml and this is
+  # the annotated example to copy from, not a system default it would load.
+  install -Dm644 config.toml "$pkgdir/usr/share/cavawall/config.toml"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+  install -Dm644 LICENSE.md "$pkgdir/usr/share/licenses/$pkgname/LICENSE.md"
+}
