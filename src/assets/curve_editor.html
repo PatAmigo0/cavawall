@@ -38,6 +38,7 @@ input[type=range]{width:130px}
   <span class=pill id=count>0 points</span>
   <span class=spacer></span>
   <span class=hint>click add &middot; drag move &middot; right-click delete &middot; shift+drag angle &middot; wheel zoom &middot; middle-drag pan</span>
+  <button id=occbtn>occluder: off</button>
   <button id=reset>reset view</button>
   <button id=undo>undo</button>
   <button id=clear>clear</button>
@@ -48,6 +49,7 @@ input[type=range]{width:130px}
   <label>bars <input type=range id=bars min=8 max=200 step=1 value=64><span class=val id=barsv>64</span></label>
   <label>height <input type=range id=height min=1 max=40 step=1 value=10><span class=val id=heightv>0.10</span></label>
   <label>width <input type=range id=width min=1 max=30 step=1 value=4><span class=val id=widthv>0.004</span></label>
+  <label>curve <input type=range id=opacity min=5 max=100 step=5 value=100><span class=val id=opacityv>1.00</span></label>
   <label><input type=checkbox id=upright> upright</label>
   <label><input type=checkbox id=flip> flip</label>
   <span class=spacer></span>
@@ -85,10 +87,15 @@ function clampPan(){
   panx=Math.min(0,Math.max(w.width-sw+ (sw/zoom)*0 , panx));
   pany=Math.min(0,Math.max(w.height-sh, pany));
 }
-const img=new Image(); let pts=[], sel=-1, drag=-1, shift=false, hist=[];
+const img=new Image(); let pts=[], occ=[], sel=-1, drag=-1, shift=false, hist=[];
+// The occluder is a second, independent polyline: the mountain silhouette
+// that bars have to hide behind. It is edited with the same handles, so the
+// mode flag decides which list a click lands in.
+let occmode=false;
+const list=()=>occmode?occ:pts;
 const $=i=>document.getElementById(i);
 // Capped so a long session cannot grow it without bound.
-function pushHist(){hist.push(JSON.stringify(pts));if(hist.length>200)hist.shift();}
+function pushHist(){hist.push(JSON.stringify({p:pts,o:occ}));if(hist.length>200)hist.shift();}
 img.onload=()=>{c.width=img.naturalWidth;c.height=img.naturalHeight;loadExisting();};
 img.src='/wallpaper';
 
@@ -98,6 +105,11 @@ function loadExisting(){
     if(m) for(const row of m[1].matchAll(/\[([^\]]+)\]/g)){
       const v=row[1].split(',').map(s=>parseFloat(s.trim()));
       if(v.length>=2) pts.push({x:v[0],y:v[1],s:v[2]??1,a:v.length>3?v[3]:null});
+    }
+    const o=t.match(/occlude\s*=\s*\[([\s\S]*?)\n\]/);
+    if(o) for(const row of o[1].matchAll(/\[([^\]]+)\]/g)){
+      const v=row[1].split(',').map(s=>parseFloat(s.trim()));
+      if(v.length>=2) occ.push({x:v[0],y:v[1],s:1,a:null});
     }
     const g=(k,d)=>{const r=t.match(new RegExp(k+'\\s*=\\s*([0-9.]+)'));return r?parseFloat(r[1]):d;};
     $('bars').value=g('bars',64); $('height').value=Math.round(g('height',0.10)*100);
@@ -122,12 +134,38 @@ function dense(){
   o.push({p:[pts[n-1].x*c.width,pts[n-1].y*c.height],s:pts[n-1].s,a:pts[n-1].a});
   return o;
 }
+// Height of the silhouette at a given x, in pixels, flat past both ends -
+// this is the same rule curve.rs applies when it samples the horizon.
+function horizonAt(px){
+  if(occ.length<2)return null;
+  const q=occ;
+  if(px<=q[0].x*c.width)return q[0].y*c.height;
+  if(px>=q[q.length-1].x*c.width)return q[q.length-1].y*c.height;
+  for(let i=1;i<q.length;i++){
+    const a=q[i-1],b=q[i];
+    if(px<=b.x*c.width){
+      const span=Math.max((b.x-a.x)*c.width,1e-6);
+      return (a.y+(b.y-a.y)*((px-a.x*c.width)/span))*c.height;
+    }
+  }
+  return q[q.length-1].y*c.height;
+}
+function clipAboveHorizon(){
+  if(occ.length<2)return false;
+  x.save();x.beginPath();x.moveTo(0,0);
+  for(let px=0;px<=c.width;px+=4)x.lineTo(px,horizonAt(px));
+  x.lineTo(c.width,0);x.closePath();x.clip();
+  return true;
+}
 function draw(){
   x.drawImage(img,0,0);
+  const alpha=+$('opacity').value/100;
   const d=dense();
   if(d.length>1){
+    x.globalAlpha=alpha;
     x.strokeStyle='#ff3b30';x.lineWidth=Math.max(2,c.width/700);x.beginPath();
     d.forEach((q,i)=>i?x.lineTo(q.p[0],q.p[1]):x.moveTo(q.p[0],q.p[1]));x.stroke();
+    x.globalAlpha=1;
     // Bar preview at the real sample positions, arc-length spaced.
     const N=+$('bars').value, reach=(+$('height').value/100)*c.height;
     let acc=[0],tot=0;
@@ -136,6 +174,9 @@ function draw(){
     // renderer multiplies it by each bar's scale, so a batched stroke would
     // make the width slider look like it does nothing - which it did.
     x.strokeStyle='rgba(255,255,255,.85)';
+    // Bars are clipped exactly where the shader discards them, so the preview
+    // shows what the silhouette actually hides.
+    const clipped=clipAboveHorizon();
     const wpx=(+$('width').value/1000)*c.width;
     let cur=0;
     for(let i=0;i<N;i++){
@@ -153,37 +194,53 @@ function draw(){
       x.lineWidth=Math.max(1,wpx*d[cur].s);
       x.beginPath();x.moveTo(px,py);x.lineTo(px+nx*s,py+ny*s);x.stroke();
     }
+    if(clipped)x.restore();
   }
-  pts.forEach((p,i)=>{
+  if(occ.length>1){
+    x.beginPath();x.moveTo(0,horizonAt(0));
+    for(let px=0;px<=c.width;px+=4)x.lineTo(px,horizonAt(px));
+    x.lineTo(c.width,c.height);x.lineTo(0,c.height);x.closePath();
+    x.fillStyle='rgba(48,213,200,.18)';x.fill();
+    x.strokeStyle='#30d5c8';x.lineWidth=Math.max(2,c.width/900);
+    x.beginPath();x.moveTo(0,horizonAt(0));
+    for(let px=0;px<=c.width;px+=4)x.lineTo(px,horizonAt(px));x.stroke();
+  }
+  // Handles fade with the curve so they never sit on top of the landing spot
+  // you are trying to judge.
+  x.globalAlpha=alpha;
+  const dot=(p,fill)=>{
     const r=Math.max(5,c.width/260);
     x.beginPath();x.arc(p.x*c.width,p.y*c.height,r,0,7);
-    x.fillStyle=i===sel?'#ffd60a':'#ff3b30';x.fill();
+    x.fillStyle=fill;x.fill();
     x.strokeStyle='#101014';x.lineWidth=2;x.stroke();
-  });
-  $('count').textContent=pts.length+' points';
+  };
+  pts.forEach((p,i)=>dot(p,!occmode&&i===sel?'#ffd60a':'#ff3b30'));
+  occ.forEach((p,i)=>dot(p,occmode&&i===sel?'#ffd60a':'#30d5c8'));
+  x.globalAlpha=1;
+  $('count').textContent=pts.length+' points'+(occ.length?' / '+occ.length+' occluder':'');
   emit();
 }
 function pos(e){const b=c.getBoundingClientRect();return{x:(e.clientX-b.left)/b.width,y:(e.clientY-b.top)/b.height};}
-function near(p){let bi=-1,bd=1e9;pts.forEach((q,i)=>{const d=Math.hypot((q.x-p.x)*c.width,(q.y-p.y)*c.height);if(d<bd){bd=d;bi=i;}});return bd<Math.max(12,c.width/150)?bi:-1;}
+function near(p){let bi=-1,bd=1e9;list().forEach((q,i)=>{const d=Math.hypot((q.x-p.x)*c.width,(q.y-p.y)*c.height);if(d<bd){bd=d;bi=i;}});return bd<Math.max(12,c.width/150)?bi:-1;}
 c.addEventListener('pointerdown',e=>{
   // Left button only. Middle pans and right deletes, and both used to fall
   // through to "add a point" here.
   if(e.button!==0)return;
-  const p=pos(e),i=near(p);shift=e.shiftKey;
+  const p=pos(e),i=near(p);shift=e.shiftKey;const L=list();
   if(i>=0){pushHist();sel=drag=i;showSel();}
   else{pushHist();
        // Keep the list ordered along x so the spline never doubles back.
-       pts.push({x:p.x,y:p.y,s:1,a:null});pts.sort((a,b)=>a.x-b.x);
-       sel=pts.findIndex(q=>q.x===p.x&&q.y===p.y);drag=sel;showSel();}
+       L.push({x:p.x,y:p.y,s:1,a:null});L.sort((a,b)=>a.x-b.x);
+       sel=L.findIndex(q=>q.x===p.x&&q.y===p.y);drag=sel;showSel();}
   c.setPointerCapture(e.pointerId);draw();
 });
 c.addEventListener('pointermove',e=>{
-  if(drag<0)return;const p=pos(e);
-  if(shift){const q=pts[drag];const dx=p.x-q.x,dy=p.y-q.y;
+  if(drag<0)return;const p=pos(e);const L=list();
+  if(shift&&!occmode){const q=L[drag];const dx=p.x-q.x,dy=p.y-q.y;
     q.a=Math.round(Math.atan2(dx*c.width,-dy*c.height)*180/Math.PI);
     $('useangle').checked=true;$('angle').value=q.a;$('anglev').textContent=q.a;}
-  else{pts[drag].x=Math.min(1,Math.max(0,p.x));pts[drag].y=Math.min(1,Math.max(0,p.y));
-       pts.sort((a,b)=>a.x-b.x);drag=pts.findIndex(q=>q===pts[drag])>=0?drag:drag;}
+  else{L[drag].x=Math.min(1,Math.max(0,p.x));L[drag].y=Math.min(1,Math.max(0,p.y));
+       const held=L[drag];L.sort((a,b)=>a.x-b.x);drag=L.indexOf(held);sel=drag;}
   draw();
 });
 c.addEventListener('pointerup',()=>{drag=-1;shift=false;});
@@ -203,10 +260,10 @@ c.addEventListener('pointermove',e=>{
 c.addEventListener('pointerup',e=>{if(e.button===1)panning=null;});
 $('reset').onclick=()=>{zoom=1;panx=pany=0;applyView();};
 c.addEventListener('contextmenu',e=>{e.preventDefault();const i=near(pos(e));
-  if(i>=0){pushHist();pts.splice(i,1);sel=-1;showSel();draw();}});
+  if(i>=0){pushHist();list().splice(i,1);sel=-1;showSel();draw();}});
 function showSel(){
   const b=$('selbox');
-  if(sel<0){b.style.display='none';return;}
+  if(sel<0||occmode){b.style.display='none';return;}
   b.style.display='flex';$('selidx').textContent=sel;
   $('scale').value=Math.round(pts[sel].s*100);$('scalev').textContent=pts[sel].s.toFixed(2);
   $('useangle').checked=pts[sel].a!=null;
@@ -215,12 +272,13 @@ function showSel(){
 $('scale').oninput=e=>{if(sel<0)return;pts[sel].s=+e.target.value/100;$('scalev').textContent=pts[sel].s.toFixed(2);draw();};
 $('angle').oninput=e=>{if(sel<0||!$('useangle').checked)return;pts[sel].a=+e.target.value;$('anglev').textContent=e.target.value;draw();};
 $('useangle').onchange=e=>{if(sel<0)return;pts[sel].a=e.target.checked?+$('angle').value:null;draw();};
+$('opacity').oninput=()=>{$('opacityv').textContent=(+$('opacity').value/100).toFixed(2);draw();};
 for(const id of ['bars','height','width']) $(id).oninput=()=>{
   $('barsv').textContent=$('bars').value;
   $('heightv').textContent=(+$('height').value/100).toFixed(2);
   $('widthv').textContent=(+$('width').value/1000).toFixed(3);draw();};
 for(const id of ['upright','flip']) $(id).onchange=draw;
-function undo(){const h=hist.pop();if(h){pts=JSON.parse(h);sel=-1;showSel();draw();}}
+function undo(){const h=hist.pop();if(h){const st=JSON.parse(h);pts=st.p;occ=st.o;sel=-1;showSel();draw();}}
 $('undo').onclick=undo;
 // Ctrl+Z anywhere on the page, not just with the canvas focused - the canvas
 // takes no keyboard focus of its own.
@@ -230,7 +288,10 @@ addEventListener('keydown',e=>{
   }
 });
 // Every mutation pushes history first, so undo has something to pop.
-$('clear').onclick=()=>{pushHist();pts=[];sel=-1;showSel();draw();};
+$('clear').onclick=()=>{pushHist();if(occmode)occ=[];else pts=[];sel=-1;showSel();draw();};
+$('occbtn').onclick=()=>{occmode=!occmode;sel=-1;
+  $('occbtn').textContent='occluder: '+(occmode?'ON':'off');
+  $('occbtn').classList.toggle('primary',occmode);showSel();draw();};
 function emit(){
   const rows=pts.map(p=>{
     const v=[p.x.toFixed(4),p.y.toFixed(4),p.s.toFixed(2)];
@@ -243,6 +304,7 @@ function emit(){
     'width = '+(+$('width').value/1000).toFixed(3)+'\n'+
     ($('upright').checked?'upright = true\n':'')+
     ($('flip').checked?'flip = true\n':'')+
+    (occ.length>1?'occlude = [\n'+occ.map(p=>'  ['+p.x.toFixed(4)+', '+p.y.toFixed(4)+'],').join('\n')+'\n]\n':'')+
     'points = [\n'+rows+'\n]';
 }
 $('save').onclick=()=>{

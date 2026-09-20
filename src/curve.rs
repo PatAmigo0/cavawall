@@ -169,6 +169,44 @@ pub fn resample(
     out
 }
 
+/// Resolution of the sampled horizon. 512 buckets across an output is about
+/// four pixels each at 1920, which is finer than a hand-drawn silhouette is.
+pub const HORIZON_BUCKETS: usize = 512;
+
+/// A polyline in normalised coordinates, resampled into a height-above-bottom
+/// per x bucket.
+///
+/// Points need not be sorted or span the full width: the ends extend flat, so
+/// a silhouette drawn across the middle still occludes correctly at the edges.
+#[must_use]
+pub fn horizon(points: &[Control]) -> Vec<f32> {
+    if points.len() < 2 {
+        return Vec::new();
+    }
+    let mut pts: Vec<(f32, f32)> = points
+        .iter()
+        // Stored counting UP from the bottom, which is the direction
+        // gl_FragCoord.y runs, so the shader flips neither.
+        .map(|c| (c.x.clamp(0.0, 1.0), 1.0 - c.y.clamp(0.0, 1.0)))
+        .collect();
+    pts.sort_by(|a, b| a.0.total_cmp(&b.0));
+
+    (0..HORIZON_BUCKETS)
+        .map(|i| {
+            let x = i as f32 / (HORIZON_BUCKETS - 1) as f32;
+            match pts.iter().position(|p| p.0 >= x) {
+                None => pts[pts.len() - 1].1,
+                Some(0) => pts[0].1,
+                Some(k) => {
+                    let (a, b) = (pts[k - 1], pts[k]);
+                    let span = (b.0 - a.0).max(f32::EPSILON);
+                    a.1 + (b.1 - a.1) * ((x - a.0) / span)
+                }
+            }
+        })
+        .collect()
+}
+
 /// FNV-1a over a file's bytes, hex.
 ///
 /// Content, not path: this wallpaper collection gets renamed and moved between
@@ -312,6 +350,32 @@ mod tests {
             Control { x: 1.0, y: 0.2, scale: 1.0, angle: None },
         ];
         assert!(resample(&plain, 8, false, false, 1.0).iter().all(|(s, _)| s.normal[0] < 0.95));
+    }
+
+    /// A flat silhouette occludes at a constant height, and one drawn across
+    /// only part of the width extends flat to both edges rather than dropping
+    /// to zero and letting bars show through at the sides.
+    #[test]
+    fn horizon_samples_and_extends_flat() {
+        let pts = vec![
+            Control { x: 0.3, y: 0.6, scale: 1.0, angle: None },
+            Control { x: 0.7, y: 0.6, scale: 1.0, angle: None },
+        ];
+        let h = horizon(&pts);
+        assert_eq!(h.len(), HORIZON_BUCKETS);
+        // y 0.6 from the top is 0.4 from the bottom, everywhere.
+        for v in &h {
+            assert!((v - 0.4).abs() < 1e-3, "got {v}");
+        }
+        assert!(horizon(&pts[..1]).is_empty(), "one point cannot be a horizon");
+        // A slope interpolates rather than stepping.
+        let slope = vec![
+            Control { x: 0.0, y: 1.0, scale: 1.0, angle: None },
+            Control { x: 1.0, y: 0.0, scale: 1.0, angle: None },
+        ];
+        let h = horizon(&slope);
+        assert!(h[0] < 0.01 && h[HORIZON_BUCKETS - 1] > 0.99);
+        assert!((h[HORIZON_BUCKETS / 2] - 0.5).abs() < 0.01);
     }
 
     /// A normal has to be perpendicular ON SCREEN, not in NDC. NDC is square

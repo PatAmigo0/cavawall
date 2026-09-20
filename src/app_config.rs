@@ -57,6 +57,11 @@ pub struct CurveConfig {
     /// suits a bottom row and leaves gaping holes along a ridge - and changing
     /// `[bars] amount` would move the other modes with it.
     pub bars: Option<u32>,
+    /// Optional silhouette to hide behind: `[[x, y], ...]` in the same
+    /// normalised coordinates as `points`. Anything BELOW it is discarded, so
+    /// bars rise from behind a ridge instead of being positioned to look as
+    /// though they do.
+    pub occlude: Option<Vec<Vec<f32>>>,
     /// Keep bars vertical instead of turning them onto the path's normal.
     /// Straight rectangles rising from the ridge rather than leaning with it.
     pub upright: Option<bool>,
