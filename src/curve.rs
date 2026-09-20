@@ -193,6 +193,8 @@ fn sample_arc(a: &Arc, count: usize, flip: bool, upright: bool, aspect: f32) -> 
 #[derive(Clone, Debug, Default)]
 pub struct PathSpec {
     pub controls: Box<[Control]>,
+    /// Exactly this many bars, rather than a share of the total by length.
+    pub bars: Option<u32>,
     /// Reach of a full-volume bar and its width, both NDC, before the
     /// per-point scale.
     pub reach: f32,
@@ -214,17 +216,49 @@ pub struct Bar {
     pub width: f32,
 }
 
-/// Split `count` bars between paths in proportion to their length.
+/// Split `count` bars between paths: whatever `fixed` asks for, and the rest
+/// in proportion to length.
 ///
 /// Largest remainder, so the total is exactly `count` and never one off: the
 /// instance count, the SSBO and cava's channel count all have to agree, and a
 /// rounding error in any direction desynchronises them. A path short enough to
 /// round to nothing gets nothing rather than stealing a bar from a long one.
+///
+/// Fixed counts that ask for more than there is are scaled back rather than
+/// borrowed against: the total is fixed by what cava produces, so the only
+/// question is who goes short.
 #[must_use]
-pub fn allocate(lengths: &[f32], count: u32) -> Vec<u32> {
+pub fn allocate(lengths: &[f32], fixed: &[Option<u32>], count: u32) -> Vec<u32> {
     let n = lengths.len();
     if n == 0 {
         return Vec::new();
+    }
+    if fixed.iter().any(Option::is_some) {
+        let asked: u32 = fixed.iter().flatten().sum();
+        let mut out = vec![0u32; n];
+        if asked >= count {
+            // Everything goes to the paths that named a number, in their
+            // proportion; the rest get nothing, which is what asking for more
+            // than exists means.
+            let weights: Vec<f32> = fixed.iter().map(|f| f.unwrap_or(0) as f32).collect();
+            return allocate(&weights, &vec![None; n], count);
+        }
+        for (slot, f) in out.iter_mut().zip(fixed) {
+            *slot = f.unwrap_or(0);
+        }
+        // The rest share what is left, by length.
+        let rest: Vec<f32> =
+            lengths.iter().zip(fixed).map(|(l, f)| if f.is_some() { 0.0 } else { *l }).collect();
+        if rest.iter().any(|l| *l > 0.0) {
+            for (slot, share) in
+                out.iter_mut().zip(allocate(&rest, &vec![None; n], count - asked))
+            {
+                if *slot == 0 {
+                    *slot = share;
+                }
+            }
+        }
+        return out;
     }
     let total: f32 = lengths.iter().sum();
     // NaN included: a path whose length is not a positive number cannot be
@@ -267,7 +301,11 @@ pub fn build(paths: &[PathSpec], count: u32, aspect: f32) -> Vec<Bar> {
     // Densified once and kept: measuring a path and sampling it are the same
     // walk, and build runs on every configure.
     let arcs: Vec<Arc> = usable.iter().map(|p| arc(&p.controls, aspect)).collect();
-    let counts = allocate(&arcs.iter().map(|a| a.total).collect::<Vec<_>>(), count);
+    let counts = allocate(
+        &arcs.iter().map(|a| a.total).collect::<Vec<_>>(),
+        &usable.iter().map(|p| p.bars).collect::<Vec<_>>(),
+        count,
+    );
     let mut out = Vec::with_capacity(count as usize);
     for ((spec, a), n) in usable.iter().zip(&arcs).zip(counts) {
         for (s, scale) in sample_arc(a, n as usize, spec.flip, spec.upright, aspect) {
@@ -515,20 +553,37 @@ mod tests {
     /// an allocation that is one off is a desync, not a rounding detail.
     #[test]
     fn allocation_is_proportional_and_exact() {
-        assert_eq!(allocate(&[3.0, 1.0], 40), vec![30, 10]);
+        let free = |n| vec![None; n];
+        assert_eq!(allocate(&[3.0, 1.0], &free(2), 40), vec![30, 10]);
         // 10 bars over thirds: 3.33 each, and the remainder goes to the
         // largest fraction first.
-        let split = allocate(&[1.0, 1.0, 1.0], 10);
+        let split = allocate(&[1.0, 1.0, 1.0], &free(3), 10);
         assert_eq!(split.iter().sum::<u32>(), 10);
         assert_eq!(split, vec![4, 3, 3]);
         // A path too short to earn a bar gets none rather than stealing one.
-        assert_eq!(allocate(&[100.0, 0.001], 8), vec![8, 0]);
+        assert_eq!(allocate(&[100.0, 0.001], &free(2), 8), vec![8, 0]);
         // Degenerate input still totals exactly.
-        assert_eq!(allocate(&[0.0, 0.0], 5).iter().sum::<u32>(), 5);
-        assert!(allocate(&[], 5).is_empty());
+        assert_eq!(allocate(&[0.0, 0.0], &free(2), 5).iter().sum::<u32>(), 5);
+        assert!(allocate(&[], &free(0), 5).is_empty());
         for n in [1u32, 7, 27, 64, 200] {
-            assert_eq!(allocate(&[2.0, 5.0, 0.3], n).iter().sum::<u32>(), n, "total for {n}");
+            assert_eq!(allocate(&[2.0, 5.0, 0.3], &free(3), n).iter().sum::<u32>(), n, "for {n}");
         }
+    }
+
+    /// A path that names a count gets it; the others share what is left, and
+    /// the total still lands exactly on what cava produces.
+    #[test]
+    fn a_fixed_count_is_taken_off_the_top() {
+        assert_eq!(allocate(&[1.0, 1.0], &[Some(6), None], 20), vec![6, 14]);
+        // Length still decides between the paths that did not name one.
+        assert_eq!(allocate(&[1.0, 3.0, 1.0], &[Some(10), None, None], 30), vec![10, 15, 5]);
+        // Asking for more than exists shares out what exists, in proportion
+        // to what was asked - nobody gets their number, and the total holds.
+        let over = allocate(&[1.0, 1.0], &[Some(30), Some(10)], 20);
+        assert_eq!(over, vec![15, 5]);
+        assert_eq!(over.iter().sum::<u32>(), 20);
+        // Every bar named, exactly: no remainder to share.
+        assert_eq!(allocate(&[1.0, 1.0], &[Some(7), Some(13)], 20), vec![7, 13]);
     }
 
     /// Two paths share one buffer and one draw call, and each carries its own
