@@ -675,7 +675,9 @@ fn main() {
     let mut path_ssbo: u32 = 0;
     let mut width_ssbo: u32 = 0;
     let mut occ_ssbo: u32 = 0;
-    let mut curve_horizon: Vec<f32> = Vec::new();
+    let mut curve_occlude: Vec<curve::Control> = Vec::new();
+    let mut curve_fit = FitMode::default();
+    let mut curve_image: Option<(u32, u32)> = None;
     // A curve is authored against ONE wallpaper. If the current one has no
     // entry, fall back to bars rather than draw a ridge traced from a
     // different image - which is the whole point of keying them.
@@ -821,32 +823,36 @@ fn main() {
                     .collect();
                 gl::GenBuffers(1, &mut path_ssbo);
                 gl::GenBuffers(1, &mut width_ssbo);
-                // Seeded with a square aspect; configure() rebuilds with the
-                // real one as soon as a surface exists.
-                upload_bars(&curve::build(&curve_paths, bar_count, 1.0), path_ssbo, width_ssbo);
-                curve_horizon = cfg.occlude.as_ref().map_or_else(Vec::new, |pts| {
-                    let controls: Vec<curve::Control> = pts
-                        .iter()
-                        .filter(|p| p.len() >= 2)
-                        .map(|p| curve::Control { x: p[0], y: p[1], scale: 1.0, angle: None })
-                        .collect();
-                    curve::horizon(&controls)
-                });
+                // Seeded with a square aspect and no crop; configure() rebuilds
+                // with the real ones as soon as a surface exists.
+                upload_bars(
+                    &curve::build(&curve_paths, bar_count, 1.0, curve::Fit::STRETCH),
+                    path_ssbo,
+                    width_ssbo,
+                );
+                curve_fit = cfg.fit.unwrap_or_default();
+                curve_image = curve::current_wallpaper().and_then(|w| curve::image_size(&w));
+                if curve_image.is_none() && debug_enabled() {
+                    eprintln!("cavawall: wallpaper size unreadable, treating it as output-shaped");
+                }
+                curve_occlude = cfg.occlude.as_deref().unwrap_or(&[])
+                    .iter()
+                    .filter(|p| p.len() >= 2)
+                    .map(|p| curve::Control { x: p[0], y: p[1], scale: 1.0, angle: None })
+                    .collect();
                 // Always created and bound, even when empty: an unbound SSBO
                 // read is undefined, and the shader guards on the length.
                 gl::GenBuffers(1, &mut occ_ssbo);
                 gl::BindBuffer(gl::SHADER_STORAGE_BUFFER, occ_ssbo);
                 // std430 aligns a float array to 4 bytes, not 16, so the
                 // horizon starts immediately after the length - no padding.
-                let mut blob: Vec<u8> = Vec::with_capacity(4 + curve_horizon.len() * 4);
-                blob.extend_from_slice(&(curve_horizon.len() as i32).to_ne_bytes());
-                for h in &curve_horizon {
-                    blob.extend_from_slice(&h.to_ne_bytes());
-                }
+                // Length zero until an output exists: the shader guards on it,
+                // so an unplaced instance draws no occlusion rather than
+                // reading an empty buffer.
                 gl::BufferData(
                     gl::SHADER_STORAGE_BUFFER,
-                    blob.len() as GLsizeiptr,
-                    blob.as_ptr().cast(),
+                    4,
+                    [0i32].as_ptr().cast(),
                     gl::STATIC_DRAW,
                 );
                 gl::BindBufferBase(gl::SHADER_STORAGE_BUFFER, 2, occ_ssbo);
@@ -900,6 +906,20 @@ fn main() {
         );
     }
 
+    // The finish is the same in all three modes, so these three are looked up
+    // and set the same way whichever program is bound.
+    let matte_color_location =
+        unsafe { gl::GetUniformLocation(shader_program, c"MatteColor".as_ptr()) };
+    let matte_location = unsafe { gl::GetUniformLocation(shader_program, c"Matte".as_ptr()) };
+    unsafe {
+        let mean = palette_mean(&initial_rgba);
+        gl::Uniform3f(matte_color_location, mean[0], mean[1], mean[2]);
+        gl::Uniform1f(matte_location, config.bars.matte.unwrap_or(0.0).clamp(0.0, 1.0));
+        gl::Uniform1f(
+            gl::GetUniformLocation(shader_program, c"Opacity".as_ptr()),
+            config.bars.opacity.unwrap_or(1.0).clamp(0.0, 1.0),
+        );
+    }
     let resolution_location =
         unsafe { gl::GetUniformLocation(shader_program, c"Resolution".as_ptr()) };
     let path_scale_location =
@@ -960,10 +980,15 @@ fn main() {
         curve_paths: curve_paths.into_boxed_slice(),
         path_ssbo,
         width_ssbo,
-        curve_horizon: curve_horizon.into_boxed_slice(),
+        curve_occlude: curve_occlude.into_boxed_slice(),
+        curve_horizon: Box::new([]),
+        curve_fit,
+        occ_ssbo,
+        curve_image,
         curve_box: None,
         curve_output: (1, 1),
         resolution_location,
+        matte_color_location,
         path_scale_location,
         path_offset_location,
         occ_map_location,
@@ -1062,9 +1087,19 @@ struct AppState {
     curve_paths: Box<[curve::PathSpec]>,
     path_ssbo: u32,
     width_ssbo: u32,
-    /// The sampled silhouette, kept so the bounding box can be cut down to
-    /// what is actually visible above it. Empty when the curve declares none.
+    /// The silhouette as authored, in IMAGE coordinates. Sampled into a
+    /// horizon only once an output is known, since where it lands depends on
+    /// how the wallpaper is cropped onto that output.
+    curve_occlude: Box<[curve::Control]>,
+    /// The sampled silhouette, in output coordinates. Kept so the bounding box
+    /// can be cut down to what is visible above it. Empty when there is none.
     curve_horizon: Box<[f32]>,
+    curve_fit: FitMode,
+    /// Rewritten on every configure, since the crop it is sampled through
+    /// depends on the output.
+    occ_ssbo: u32,
+    /// The wallpaper's pixel size, when its format could be read.
+    curve_image: Option<(u32, u32)>,
     /// Where the curve surface sits on the output, in output pixels:
     /// (left, top, width, height). None means the whole output.
     curve_box: Option<(u32, u32, u32, u32)>,
@@ -1072,6 +1107,9 @@ struct AppState {
     /// is smaller than the output it is on.
     curve_output: (u32, u32),
     resolution_location: gl::types::GLint,
+    /// Kept because the matte tone follows the palette, which a live scheme
+    /// can change under us.
+    matte_color_location: gl::types::GLint,
     path_scale_location: gl::types::GLint,
     path_offset_location: gl::types::GLint,
     occ_map_location: gl::types::GLint,
@@ -1297,7 +1335,11 @@ impl AppState {
         // that moved and leave the rest in the old palette on screen.
         self.force_full_damage = true;
         let buf = gradient_buffer(&rgba);
+        let mean = palette_mean(&rgba);
         unsafe {
+            // The matte tone is the palette's mean, so a new palette means a
+            // new tone; leaving it would flatten toward the old scheme.
+            gl::Uniform3f(self.matte_color_location, mean[0], mean[1], mean[2]);
             gl::BindBuffer(gl::SHADER_STORAGE_BUFFER, self.gradient_colors_ssbo);
             gl::BufferData(
                 gl::SHADER_STORAGE_BUFFER,
@@ -1450,7 +1492,12 @@ impl AppState {
             return None;
         }
         let (ow, oh) = (self.width as f32, self.height as f32);
-        let bars = curve::build(&self.curve_paths, self.bar_count, ow / oh.max(1.0));
+        let bars = curve::build(
+            &self.curve_paths,
+            self.bar_count,
+            ow / oh.max(1.0),
+            self.fit_for((self.width, self.height)),
+        );
         let (x0, y0, x1, y1) = curve::bounds(&bars);
         // NDC -> pixels, y flipped: NDC counts up, a margin counts down.
         let pad = 2.0;
@@ -1471,6 +1518,18 @@ impl AppState {
             return None;
         }
         Some((left as u32, top as u32, w as u32, h as u32))
+    }
+
+    /// How this wallpaper's coordinates land on an output of this size.
+    ///
+    /// Without a readable image size there is nothing to crop against, so the
+    /// image is taken as already output-shaped - which is exactly what every
+    /// curve authored before this assumed, so nothing moves under anyone.
+    fn fit_for(&self, out: (u32, u32)) -> curve::Fit {
+        match (self.curve_fit, self.curve_image) {
+            (FitMode::Cover, Some(image)) => curve::Fit::cover(image, out),
+            _ => curve::Fit::STRETCH,
+        }
     }
 
     /// The lowest the silhouette drops across `x0..x1`, as a height above the
@@ -1568,6 +1627,13 @@ impl AppState {
             // is 2.1M, and Hyprland recomposites by geometry.
             Mode::Curve => {
                 self.curve_output = (self.width, self.height);
+                // Both of these depend on the output's shape, because the
+                // crop does: a move to a differently proportioned monitor
+                // re-lands the whole curve rather than leaving it beside the
+                // ridge it was drawn on.
+                self.curve_horizon =
+                    curve::horizon(&self.curve_occlude, self.fit_for(self.curve_output))
+                        .into_boxed_slice();
                 self.curve_box = self.curve_bbox();
                 match self.curve_box {
                     Some((left, top, w, h)) => {
@@ -2110,10 +2176,27 @@ impl LayerShellHandler for AppState {
         // the bars rather than skewing them.
         if self.mode == Mode::Curve && !self.curve_paths.is_empty() {
             let aspect = self.curve_output.0 as f32 / self.curve_output.1.max(1) as f32;
-            let bars = curve::build(&self.curve_paths, self.bar_count, aspect);
-            // SAFETY: a context is current here, and both buffers were created
+            let bars =
+                curve::build(&self.curve_paths, self.bar_count, aspect, self.fit_for(self.curve_output));
+            let mut blob: Vec<u8> = Vec::with_capacity(4 + self.curve_horizon.len() * 4);
+            blob.extend_from_slice(&(self.curve_horizon.len() as i32).to_ne_bytes());
+            for h in &self.curve_horizon {
+                blob.extend_from_slice(&h.to_ne_bytes());
+            }
+            // SAFETY: a context is current here, and every buffer was created
             // at startup.
-            unsafe { upload_bars(&bars, self.path_ssbo, self.width_ssbo) };
+            unsafe {
+                upload_bars(&bars, self.path_ssbo, self.width_ssbo);
+                gl::BindBuffer(gl::SHADER_STORAGE_BUFFER, self.occ_ssbo);
+                gl::BufferData(
+                    gl::SHADER_STORAGE_BUFFER,
+                    blob.len() as GLsizeiptr,
+                    blob.as_ptr().cast(),
+                    gl::STATIC_DRAW,
+                );
+                gl::BindBufferBase(gl::SHADER_STORAGE_BUFFER, 2, self.occ_ssbo);
+                gl::BindBuffer(gl::SHADER_STORAGE_BUFFER, 0);
+            }
         }
         // The only moment the bar-to-pixel mapping can change.
         self.damage_map =
