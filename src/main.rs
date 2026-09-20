@@ -186,6 +186,7 @@ const FRAGMENT_SHADER_SRC: &str = include_str!("shaders/fragment_shader.glsl");
 const CIRCLE_VERTEX_SHADER_SRC: &str = include_str!("shaders/circle_vertex_shader.glsl");
 const CIRCLE_FRAGMENT_SHADER_SRC: &str = include_str!("shaders/circle_fragment_shader.glsl");
 const CURVE_VERTEX_SHADER_SRC: &str = include_str!("shaders/curve_vertex_shader.glsl");
+const CURVE_FRAGMENT_SHADER_SRC: &str = include_str!("shaders/curve_fragment_shader.glsl");
 
 /// Bar width and stride in NDC, both fixed until a re-exec.
 ///
@@ -288,7 +289,7 @@ fn build_program(mode: Mode) -> u32 {
         // Curve reuses the circle's fragment stage: "gradient along the bar
         // with an alpha ramp from base to tip" is the same job, and both feed
         // it the same vRadial.
-        Mode::Curve => (CURVE_VERTEX_SHADER_SRC, CIRCLE_FRAGMENT_SHADER_SRC),
+        Mode::Curve => (CURVE_VERTEX_SHADER_SRC, CURVE_FRAGMENT_SHADER_SRC),
     };
     let vert = compile_shader(gl::VERTEX_SHADER, vert_src, "vertex");
     let frag = compile_shader(gl::FRAGMENT_SHADER, frag_src, "fragment");
@@ -663,6 +664,7 @@ fn main() {
     let mut curve_flip = false;
     let mut curve_upright = false;
     let mut path_ssbo: u32 = 0;
+    let mut occ_ssbo: u32 = 0;
     // A curve is authored against ONE wallpaper. If the current one has no
     // entry, fall back to bars rather than draw a ridge traced from a
     // different image - which is the whole point of keying them.
@@ -824,6 +826,33 @@ fn main() {
                 );
                 gl::BindBufferBase(gl::SHADER_STORAGE_BUFFER, 1, path_ssbo);
                 gl::BindBuffer(gl::SHADER_STORAGE_BUFFER, 0);
+                let curve_horizon = cfg.occlude.as_ref().map_or_else(Vec::new, |pts| {
+                    let controls: Vec<curve::Control> = pts
+                        .iter()
+                        .filter(|p| p.len() >= 2)
+                        .map(|p| curve::Control { x: p[0], y: p[1], scale: 1.0, angle: None })
+                        .collect();
+                    curve::horizon(&controls)
+                });
+                // Always created and bound, even when empty: an unbound SSBO
+                // read is undefined, and the shader guards on the length.
+                gl::GenBuffers(1, &mut occ_ssbo);
+                gl::BindBuffer(gl::SHADER_STORAGE_BUFFER, occ_ssbo);
+                // std430 aligns a float array to 4 bytes, not 16, so the
+                // horizon starts immediately after the length - no padding.
+                let mut blob: Vec<u8> = Vec::with_capacity(4 + curve_horizon.len() * 4);
+                blob.extend_from_slice(&(curve_horizon.len() as i32).to_ne_bytes());
+                for h in &curve_horizon {
+                    blob.extend_from_slice(&h.to_ne_bytes());
+                }
+                gl::BufferData(
+                    gl::SHADER_STORAGE_BUFFER,
+                    blob.len() as GLsizeiptr,
+                    blob.as_ptr().cast(),
+                    gl::STATIC_DRAW,
+                );
+                gl::BindBufferBase(gl::SHADER_STORAGE_BUFFER, 2, occ_ssbo);
+                gl::BindBuffer(gl::SHADER_STORAGE_BUFFER, 0);
                 // NDC spans 2.0, so a fraction of the output is twice that.
                 gl::Uniform1f(
                     gl::GetUniformLocation(shader_program, c"Reach".as_ptr()),
@@ -882,6 +911,8 @@ fn main() {
         );
     }
 
+    let resolution_location =
+        unsafe { gl::GetUniformLocation(shader_program, c"Resolution".as_ptr()) };
     let gradient_scale_location =
         unsafe { gl::GetUniformLocation(shader_program, gradient_scale_name.as_ptr()) };
 
@@ -936,6 +967,7 @@ fn main() {
         curve_flip,
         curve_upright,
         path_ssbo,
+        resolution_location,
         silent_frames: 0,
         background_color,
         pinned_output,
@@ -1032,6 +1064,7 @@ struct AppState {
     curve_flip: bool,
     curve_upright: bool,
     path_ssbo: u32,
+    resolution_location: gl::types::GLint,
     silent_frames: u32,
     /// Only read to restore the clear colour if a re-exec fails; it is set once
     /// at startup now rather than per frame.
@@ -1998,6 +2031,13 @@ impl LayerShellHandler for AppState {
             // Bars only. The circle shader indexes the gradient by radius,
             // which the vertex stage already normalises, so it has no such
             // uniform and GetUniformLocation returned -1 for it.
+            if self.mode == Mode::Curve {
+                gl::Uniform2f(
+                    self.resolution_location,
+                    self.width as f32,
+                    self.height as f32,
+                );
+            }
             if self.mode == Mode::Bars {
                 gl::Uniform1f(
                     self.gradient_scale_location,
