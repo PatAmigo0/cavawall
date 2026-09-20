@@ -139,21 +139,24 @@ pub fn resample(
         // segments fall back to straight up rather than producing NaN.
         let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
         let len = (dx * dx + dy * dy).sqrt();
-        let normal = if let Some(deg) = aa {
+        // Direction first, THEN flip - applied uniformly, including to an
+        // angle override. Returning early from the override branch left one
+        // bar pointing the other way from every neighbour, which reads as a
+        // glitch rather than as a setting.
+        let mut normal = if let Some(deg) = aa {
             // Degrees clockwise from up, so 0 is [0,1] and 90 is [1,0].
             let r = deg.to_radians();
             [r.sin(), r.cos()]
-        } else if upright {
+        } else if upright || len <= f32::EPSILON {
             // Straight rectangles rising from the path rather than leaning
-            // with it; flip still points them down.
-            if flip { [0.0, -1.0] } else { [0.0, 1.0] }
-        } else if len <= f32::EPSILON {
+            // with it.
             [0.0, 1.0]
-        } else if flip {
-            [dy / len, -dx / len]
         } else {
             [-dy / len, dx / len]
         };
+        if flip {
+            normal = [-normal[0], -normal[1]];
+        }
         out.push((Sample { pos, normal }, sa + (sb - sa) * t));
     }
     out
@@ -302,6 +305,28 @@ mod tests {
             Control { x: 1.0, y: 0.2, scale: 1.0, angle: None },
         ];
         assert!(resample(&plain, 8, false, false).iter().all(|(s, _)| s.normal[0] < 0.95));
+    }
+
+    /// flip must reach EVERY bar, including one carrying an angle override.
+    /// It did not, and the result was a single bar pointing the opposite way
+    /// from all its neighbours.
+    #[test]
+    fn flip_applies_to_angle_overrides_too() {
+        let controls = vec![
+            Control { x: 0.0, y: 0.5, scale: 1.0, angle: Some(0.0) },
+            Control { x: 1.0, y: 0.5, scale: 1.0, angle: Some(0.0) },
+        ];
+        for (s, _) in resample(&controls, 6, true, false) {
+            assert!((s.normal[1] + 1.0).abs() < 1e-3, "override ignored flip: {:?}", s.normal);
+        }
+        // And upright flips as well.
+        let plain = vec![
+            Control { x: 0.0, y: 0.4, scale: 1.0, angle: None },
+            Control { x: 1.0, y: 0.7, scale: 1.0, angle: None },
+        ];
+        for (s, _) in resample(&plain, 6, true, true) {
+            assert_eq!(s.normal, [0.0, -1.0]);
+        }
     }
 
     /// Fewer than two controls is a config mistake, not a crash.

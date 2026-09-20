@@ -3,8 +3,13 @@
 <style>
 :root{color-scheme:dark}
 *{box-sizing:border-box}
-body{margin:0;background:#101014;color:#e6e6ea;font:13px/1.5 ui-sans-serif,system-ui,sans-serif}
-header{display:flex;gap:16px;align-items:center;padding:10px 14px;border-bottom:1px solid #26262e;flex-wrap:wrap}
+/* The page fills the viewport and never scrolls: a scrollbar appears exactly
+   at the right edge, which is where the last control point is, and grabbing it
+   instead of the point is the whole problem. */
+html,body{height:100%;overflow:hidden;overscroll-behavior:none}
+body{margin:0;background:#101014;color:#e6e6ea;font:13px/1.5 ui-sans-serif,system-ui,sans-serif;
+     display:flex;flex-direction:column}
+header{flex:none;display:flex;gap:16px;align-items:center;padding:10px 14px;border-bottom:1px solid #26262e;flex-wrap:wrap}
 h1{font-size:13px;margin:0;font-weight:600;letter-spacing:.02em}
 .key{font-family:ui-monospace,monospace;color:#8a8a99;font-size:12px}
 .spacer{flex:1}
@@ -12,13 +17,17 @@ button{background:#1e1e26;color:#e6e6ea;border:1px solid #33333f;border-radius:6
 button:hover{background:#26262f}
 button.primary{background:#3b6ea5;border-color:#4a82bd}
 button.primary:hover{background:#4880bd}
-#wrap{position:relative;line-height:0}
-canvas{max-width:100%;cursor:crosshair;touch-action:none}
-#panel{display:flex;gap:18px;align-items:center;padding:10px 14px;border-top:1px solid #26262e;flex-wrap:wrap}
+/* The canvas takes whatever is left and is letterboxed inside it, so the
+   image never forces the page to grow in either direction. */
+#wrap{position:relative;flex:1;min-height:0;display:flex;align-items:center;justify-content:center;
+      line-height:0;overflow:hidden}
+canvas{max-width:100%;max-height:100%;object-fit:contain;cursor:crosshair;touch-action:none;
+       transform-origin:0 0;will-change:transform}
+#panel{flex:none;display:flex;gap:18px;align-items:center;padding:10px 14px;border-top:1px solid #26262e;flex-wrap:wrap}
 label{display:flex;gap:7px;align-items:center;white-space:nowrap;color:#b9b9c6}
 input[type=range]{width:130px}
 .val{font-family:ui-monospace,monospace;color:#e6e6ea;min-width:42px;display:inline-block}
-#out{width:100%;height:150px;background:#0b0b0e;color:#c8c8d4;border:0;border-top:1px solid #26262e;
+#out{width:100%;height:132px;flex:none;background:#0b0b0e;color:#c8c8d4;border:0;border-top:1px solid #26262e;
      font-family:ui-monospace,monospace;font-size:12px;padding:10px 14px;resize:vertical}
 .hint{color:#71717f;font-size:12px}
 .pill{background:#1a1a22;border:1px solid #2c2c36;border-radius:999px;padding:2px 9px;font-size:12px}
@@ -28,7 +37,8 @@ input[type=range]{width:130px}
   <span class=key>__KEY__</span>
   <span class=pill id=count>0 points</span>
   <span class=spacer></span>
-  <span class=hint>click add &middot; drag move &middot; right-click delete &middot; shift+drag angle</span>
+  <span class=hint>click add &middot; drag move &middot; right-click delete &middot; shift+drag angle &middot; wheel zoom &middot; middle-drag pan</span>
+  <button id=reset>reset view</button>
   <button id=undo>undo</button>
   <button id=clear>clear</button>
   <button class=primary id=save>save to config</button>
@@ -51,6 +61,30 @@ input[type=range]{width:130px}
 <textarea id=out readonly spellcheck=false></textarea>
 <script>
 const c=document.getElementById('c'),x=c.getContext('2d');
+// Zoom lives in a CSS transform, not in the drawing: getBoundingClientRect
+// already reports the transformed box, so pos() keeps returning correct
+// normalised coordinates with no maths of its own.
+let zoom=1,panx=0,pany=0;
+function applyView(){c.style.transform=`translate(${panx}px,${pany}px) scale(${zoom})`;}
+function atCursor(e,f){
+  // Keep the point under the cursor fixed while the scale changes.
+  const w=document.getElementById('wrap').getBoundingClientRect();
+  const cx=e.clientX-w.left, cy=e.clientY-w.top;
+  const before=zoom; zoom=Math.min(12,Math.max(1,f(zoom)));
+  const k=zoom/before;
+  panx=cx-(cx-panx)*k; pany=cy-(cy-pany)*k;
+  clampPan(); applyView();
+}
+function clampPan(){
+  // At zoom 1 the canvas is letterboxed and must not drift; beyond that, do
+  // not let the image be dragged entirely off its own frame.
+  if(zoom<=1){panx=pany=0;return;}
+  const w=document.getElementById('wrap').getBoundingClientRect();
+  const r=c.getBoundingClientRect();
+  const sw=r.width, sh=r.height;
+  panx=Math.min(0,Math.max(w.width-sw+ (sw/zoom)*0 , panx));
+  pany=Math.min(0,Math.max(w.height-sh, pany));
+}
 const img=new Image(); let pts=[], sel=-1, drag=-1, shift=false, hist=[];
 const $=i=>document.getElementById(i);
 img.onload=()=>{c.width=img.naturalWidth;c.height=img.naturalHeight;loadExisting();};
@@ -96,7 +130,11 @@ function draw(){
     const N=+$('bars').value, reach=(+$('height').value/100)*c.height;
     let acc=[0],tot=0;
     for(let i=1;i<d.length;i++){tot+=Math.hypot(d[i].p[0]-d[i-1].p[0],d[i].p[1]-d[i-1].p[1]);acc.push(tot);}
-    x.strokeStyle='rgba(255,255,255,.85)';x.lineWidth=Math.max(1.5,c.width/1100);x.beginPath();
+    // Bar WIDTH has to be per bar, not one lineWidth for the batch: the
+    // renderer multiplies it by each bar's scale, so a batched stroke would
+    // make the width slider look like it does nothing - which it did.
+    x.strokeStyle='rgba(255,255,255,.85)';
+    const wpx=(+$('width').value/1000)*c.width;
     let cur=0;
     for(let i=0;i<N;i++){
       const target=tot*(i+0.5)/N;
@@ -110,9 +148,9 @@ function draw(){
       else{const dx=b[0]-a[0],dy=b[1]-a[1],L=Math.hypot(dx,dy)||1;nx=dy/L;ny=-dx/L;}
       if($('flip').checked){nx=-nx;ny=-ny;}
       const s=d[cur].s*reach;
-      x.moveTo(px,py);x.lineTo(px+nx*s,py+ny*s);
+      x.lineWidth=Math.max(1,wpx*d[cur].s);
+      x.beginPath();x.moveTo(px,py);x.lineTo(px+nx*s,py+ny*s);x.stroke();
     }
-    x.stroke();
   }
   pts.forEach((p,i)=>{
     const r=Math.max(5,c.width/260);
@@ -145,6 +183,21 @@ c.addEventListener('pointermove',e=>{
   draw();
 });
 c.addEventListener('pointerup',()=>{drag=-1;shift=false;});
+// Wheel zooms about the cursor; middle button pans.
+document.getElementById('wrap').addEventListener('wheel',e=>{
+  e.preventDefault(); atCursor(e,z=>e.deltaY<0?z*1.15:z/1.15);
+},{passive:false});
+let panning=null;
+c.addEventListener('pointerdown',e=>{
+  if(e.button!==1)return; e.preventDefault();
+  panning={x:e.clientX-panx,y:e.clientY-pany}; c.setPointerCapture(e.pointerId);
+});
+c.addEventListener('pointermove',e=>{
+  if(!panning)return;
+  panx=e.clientX-panning.x; pany=e.clientY-panning.y; clampPan(); applyView();
+});
+c.addEventListener('pointerup',e=>{if(e.button===1)panning=null;});
+$('reset').onclick=()=>{zoom=1;panx=pany=0;applyView();};
 c.addEventListener('contextmenu',e=>{e.preventDefault();const i=near(pos(e));
   if(i>=0){hist.push(JSON.stringify(pts));pts.splice(i,1);sel=-1;showSel();draw();}});
 function showSel(){
@@ -181,8 +234,16 @@ function emit(){
 }
 $('save').onclick=()=>{
   if(pts.length<2){alert('need at least two points');return;}
+  const btn=$('save'); btn.textContent='saving...';
   fetch('/save',{method:'POST',body:$('out').value})
-    .then(r=>r.text()).then(t=>{$('save').textContent=t==='saved'?'saved - you can close this':'error: '+t;})
-    .catch(()=>{$('save').textContent='saved - you can close this';});
+    .then(r=>r.text().then(t=>({ok:r.ok,t})))
+    .then(({ok,t})=>{
+      // Never report success on a failure: the previous version swallowed
+      // every error into "saved", so a save that never happened looked
+      // identical to one that did.
+      btn.textContent = ok&&t==='saved' ? 'saved - cavawall restarted' : 'FAILED: '+t;
+      if(ok) setTimeout(()=>btn.textContent='save to config',2500);
+    })
+    .catch(e=>{btn.textContent='FAILED: '+e.message;});
 };
 </script>

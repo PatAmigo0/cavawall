@@ -44,12 +44,12 @@ fn main() {
     // Best effort. A headless run still prints the URL above.
     let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
 
+    println!("cavawall-curve: ctrl-c when finished");
     for stream in listener.incoming().flatten() {
         if handle(stream, &wallpaper, &key).is_break() {
             break;
         }
     }
-    println!("cavawall-curve: done");
 }
 
 /// Serve one request. Breaking ends the process, which is what Save does.
@@ -110,8 +110,21 @@ fn handle(mut s: TcpStream, wallpaper: &PathBuf, key: &str) -> std::ops::Control
             match write_block(key, &toml) {
                 Ok(p) => {
                     println!("cavawall-curve: wrote {} bytes to {}", toml.len(), p.display());
+                    // The path is sampled into an SSBO at startup and never
+                    // re-read, so a saved curve does nothing until cavawall
+                    // restarts. Through the launcher, never the binary: it
+                    // holds the flock and reaps the stale instance, and
+                    // starting the binary directly stacks a second layer.
+                    match std::process::Command::new("cavawall-launch").spawn() {
+                        Ok(_) => println!("cavawall-curve: restarted cavawall"),
+                        Err(e) => eprintln!("cavawall-curve: run cavawall-launch yourself: {e}"),
+                    }
                     reply(&mut s, "200 OK", "text/plain", b"saved");
-                    return std::ops::ControlFlow::Break(());
+                    // Deliberately NOT breaking. Quitting after one save made
+                    // the connection close under the client, which made fetch
+                    // reject on a save that had succeeded - and the page then
+                    // could not tell that apart from a real failure. Staying
+                    // up also makes save/look/adjust/save the normal loop.
                 }
                 Err(e) => {
                     eprintln!("cavawall-curve: save failed: {e}");
