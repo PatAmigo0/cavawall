@@ -13,19 +13,24 @@ layout(std430, binding = 2) readonly buffer Occluder {
     float horizon[];
 };
 uniform vec2 Resolution;
+// Where this surface sits on the output: xy = origin, zw = size, both
+// normalised, y counted from the bottom. The horizon is authored against the
+// output, so a fragment has to be put back there before it is sampled.
+uniform vec4 OccMap;
 in float vRadial;
 uniform float InnerAlpha;
 uniform float OuterAlpha;
 out vec4 fragColor;
 void main() {
     if (occ_len > 1) {
-        float fx = clamp(gl_FragCoord.x / Resolution.x, 0.0, 1.0);
+        float fx = clamp(OccMap.x + (gl_FragCoord.x / Resolution.x) * OccMap.z, 0.0, 1.0);
         float f = fx * float(occ_len - 1);
         int i = min(int(f), occ_len - 2);
         float h = mix(horizon[i], horizon[i + 1], f - float(i));
         // gl_FragCoord.y counts up from the bottom, which is the direction the
         // horizon is stored in, so neither needs flipping.
-        if (gl_FragCoord.y < h * Resolution.y) {
+        float fy = OccMap.y + (gl_FragCoord.y / Resolution.y) * OccMap.w;
+        if (fy < h) {
             discard;
         }
     }
