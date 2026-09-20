@@ -801,15 +801,12 @@ fn main() {
                         upright: path.upright.or(cfg.upright).unwrap_or(false),
                     })
                     .collect();
+                // Created empty and bound. Bars cannot be built until a surface
+                // exists - their normals and their crop both depend on the
+                // output's shape - and configure() fills these before any draw
                 gl::GenBuffers(1, &mut path_ssbo);
                 gl::GenBuffers(1, &mut width_ssbo);
-                // Seeded with a square aspect and no crop; configure() rebuilds
-                // with the real ones as soon as a surface exists
-                upload_bars(
-                    &curve::build(&curve_paths, bar_count, 1.0, curve::Fit::STRETCH),
-                    path_ssbo,
-                    width_ssbo,
-                );
+                upload_bars(&[], path_ssbo, width_ssbo);
                 curve_fit = cfg.fit.unwrap_or_default();
                 curve_image = curve::current_wallpaper().and_then(|w| curve::image_size(&w));
                 if curve_image.is_none() && debug_enabled() {
