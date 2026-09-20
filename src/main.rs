@@ -636,6 +636,14 @@ fn main() {
         Some(egl_context),
     )
     .unwrap();
+    // The compositor paces this surface with frame callbacks, which is the
+    // only pacing a layer surface should have. The default interval of 1 adds
+    // the driver's own wait for vsync on top of that, inside every swap.
+    // Applies to the surface bound to the current context, so it goes after
+    // make_current
+    if egl.swap_interval(egl_display, 0).is_err() && debug_enabled() {
+        eprintln!("cavawall: swap interval unchanged, frames pace on vsync too");
+    }
     gl::load_with(|name| egl.get_proc_address(name).unwrap() as *const std::ffi::c_void);
     // CStr, not CString::from_raw: glGetString returns a pointer into the
     // driver's static string table and from_raw claims ownership, which would
