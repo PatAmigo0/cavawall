@@ -84,6 +84,7 @@ input[type=range]{width:130px}
       <hr>
       <label>snap radius <input type=range id=snapr min=3 max=40 step=1 value=12></label>
       <label>snap smoothness <input type=range id=snaplam min=1 max=24 step=1 value=6></label>
+      <label>snap detail <input type=range id=snapeps min=1 max=60 step=1 value=15></label>
       <button id=trace>snap active list to the edge</button>
       <hr>
       <button id=clear>clear active list</button>
@@ -528,16 +529,35 @@ function snapToEdge(q){
   for(let j=1;j<span;j++) if(cost[(cols-1)*span+j]<cost[(cols-1)*span+k]) k=j;
   const ys=new Array(cols);
   for(let i=cols-1;i>=0;i--){ys[i]=top[i]+k;k=back[i*span+k];}
-  return ys.map((y,i)=>({x:(lo+i)/(W-1),y:(y+1.5)/H,s:1,a:null}));
+  // The backtrack lands on a whole row, and a line made of whole rows is a
+  // staircase however smooth the path through them was. A parabola through
+  // the edge strength on either side puts it back between rows.
+  const sub=ys.map((y,i)=>{
+    if(y<1||y>=H-1)return y;
+    const a=edge(lo+i,y-1),b=edge(lo+i,y),cc=edge(lo+i,y+1);
+    const den=a-2*b+cc;
+    return Math.abs(den)<1e-6?y:y+Math.max(-1,Math.min(1,0.5*(a-cc)/den));
+  });
+  // Five columns of averaging: enough to take the last of the jitter out,
+  // short enough to leave a summit pointed.
+  const sm=sub.map((_,i)=>{
+    let t=0,n=0;
+    for(let j=Math.max(0,i-2);j<=Math.min(sub.length-1,i+2);j++){t+=sub[j];n++;}
+    return t/n;
+  });
+  return sm.map((y,i)=>({x:(lo+i)/(W-1),y:(y+1.5)/H,s:1,a:null}));
 }
 $('trace').onclick=()=>{
   const q=occmode?occ:pts;
   const found=snapToEdge(q);
   if(!found){alert('draw a rough line across the edge first, then snap');return;}
   pushHist();
-  // Simplified with the same epsilon as thinning: a point per column is a
-  // horizon, not something anyone can then edit by hand.
-  const traced=rdp(found,+$('thineps').value);
+  // Simplified far more finely than a hand-edited path: the horizon between
+  // two points is a straight chord, so a coarse epsilon cuts the corner and
+  // the line leaves the ridge exactly where the ridge is interesting. Points
+  // cost nothing at runtime - the renderer resamples to a fixed 512 buckets
+  // whether there are 12 of them or 300.
+  const traced=rdp(found,+$('snapeps').value/10);
   // Per-point scale and angle overrides are worth keeping: the snap moves
   // where a bar stands, not how it is drawn. Nearest old point wins.
   if(!occmode&&q.length){
