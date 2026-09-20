@@ -77,6 +77,25 @@ pub struct CurveConfig {
     /// One per curve, not one per path: it is the wallpaper's skyline, and
     /// every path on that wallpaper hides behind the same one.
     pub occlude: Option<Vec<Vec<f32>>>,
+    /// How the wallpaper covers the output. Points are authored on the IMAGE,
+    /// so on a screen of a different shape they have to be cropped onto it the
+    /// same way the image itself is, or the curve sits beside the ridge it was
+    /// drawn on rather than along it.
+    pub fit: Option<FitMode>,
+}
+
+/// How the wallpaper is laid onto the output, which decides where a point
+/// drawn on the image ends up on the screen.
+#[derive(Serialize, Deserialize, Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum FitMode {
+    /// Scaled to cover the output and centre-cropped, which is what a
+    /// wallpaper daemon does by default.
+    #[default]
+    Cover,
+    /// The image is treated as already output-shaped. Correct for a daemon
+    /// told to stretch, and what every curve authored before this assumed.
+    Stretch,
 }
 
 /// One stretch of path. Everything about a bar's geometry lives here, so two
@@ -251,6 +270,33 @@ pub struct BarConfig {
     pub amount: u32,
     pub gap: f32,
     pub max_height: Option<f32>,
+    /// One multiplier over the final alpha, in every mode, on top of whatever
+    /// alpha the colour stops already carry. Absent means 1.0.
+    pub opacity: Option<f32>,
+    /// How far each bar is mixed toward one flat tone, 0 for the gradient as
+    /// written and 1 for the palette flattened to its own mean. A matte
+    /// finish: the ramp stops reading as something lit.
+    pub matte: Option<f32>,
+}
+
+/// The mean of a palette, which is the tone a matte finish flattens toward.
+///
+/// Its own mean rather than a fixed grey, so flattening a warm palette gives a
+/// warm flat and the setting cannot introduce a colour that is not already in
+/// the scheme. Weighted by nothing: the stops are the palette, evenly.
+#[must_use]
+pub fn palette_mean(rgba: &[[f32; 4]]) -> [f32; 3] {
+    if rgba.is_empty() {
+        return [0.0; 3];
+    }
+    let n = rgba.len() as f32;
+    let mut mean = [0.0f32; 3];
+    for c in rgba {
+        for (m, v) in mean.iter_mut().zip(&c[..3]) {
+            *m += v / n;
+        }
+    }
+    mean
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -546,6 +592,18 @@ mod tests {
         assert_eq!(&buf[16..32], &buf[32..48], "both stops identical");
         assert_eq!(uploaded_stops(1), 2);
         assert_eq!(uploaded_stops(8), 8);
+    }
+
+    /// Flattening toward the palette's own mean keeps a warm palette warm.
+    /// A fixed grey would introduce a colour the scheme never had.
+    #[test]
+    fn the_matte_tone_is_the_palette_itself() {
+        let mean = palette_mean(&[[1.0, 0.0, 0.0, 1.0], [0.0, 0.0, 1.0, 0.5]]);
+        assert!((mean[0] - 0.5).abs() < 1e-6 && (mean[2] - 0.5).abs() < 1e-6);
+        assert!(mean[1].abs() < 1e-6, "no green went in, none comes out");
+        // Alpha is not a colour and takes no part in it.
+        assert_eq!(palette_mean(&[[0.2, 0.4, 0.6, 0.1]]), [0.2, 0.4, 0.6]);
+        assert_eq!(palette_mean(&[]), [0.0; 3]);
     }
 
     #[test]

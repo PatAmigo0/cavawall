@@ -23,15 +23,14 @@ cd cavawall
 cargo install --path . --root ~/.local
 ```
 
+Every build from this checkout targets the CPU it is built on: `.cargo/config.toml`
+sets `-C target-cpu=native`, since cavawall runs on the machine that compiled it
+and there is no reason to emit a 2003 baseline and hope. Packagers who need a
+portable binary set `RUSTFLAGS` in the environment, which takes precedence.
+
 That installs two binaries into `~/.local/bin`: `cavawall` itself and
 `cavawall-curve`, the curve editor. Make sure that directory is on your
 `PATH`.
-
-For a build tuned to the machine it will run on:
-
-```bash
-RUSTFLAGS="-C target-cpu=native" cargo install --path . --root ~/.local
-```
 
 Then copy the annotated defaults and start it:
 
@@ -69,6 +68,8 @@ See [`config.toml`](config.toml) for the annotated defaults.
 | `bars.amount` | number of bars |
 | `bars.gap` | gap width as a fraction of bar width |
 | `bars.max_height` | **fork addition**: bar height cap, fraction of screen |
+| `bars.opacity` | **fork addition**: alpha multiplier, every mode |
+| `bars.matte` | **fork addition**: flatten the gradient toward its own mean |
 | `colors.*` | gradient stops, bottom to top; order matters, names do not |
 | `smoothing.*` | passed straight through to cava |
 | `circle.*` | **fork addition**: circle mode geometry |
@@ -152,6 +153,12 @@ Bars stand along a path drawn over the wallpaper, leaning onto its normal, so
 they can follow a mountain ridge or a skyline. Per control point they carry a
 scale, which is what makes a distant stretch of ridge hold shorter and thinner
 bars, and an optional angle override.
+
+Points are authored on the **image**, and cavawall maps them onto the output
+the same way the wallpaper itself is laid down: scaled to cover, centre-cropped.
+So a curve drawn on one monitor lands on the same ridge on a monitor of a
+different shape, rather than beside it. Set `fit = "stretch"` for a daemon that
+stretches instead.
 
 A curve is keyed by the wallpaper's **content hash**, not its filename: a path
 authored for one image means nothing on another, a rename cannot break it, and

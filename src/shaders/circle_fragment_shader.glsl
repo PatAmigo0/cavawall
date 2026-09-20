@@ -9,6 +9,13 @@ layout(std430, binding = 0) readonly buffer GradientColors {
 in float vRadial;
 uniform float InnerAlpha;
 uniform float OuterAlpha;
+// A matte finish: every bar mixed toward one flat tone, so the gradient stops
+// reading as a lit ramp. The tone is the palette's own mean, computed on the
+// CPU, so matte = 1 is the palette flattened rather than an arbitrary grey.
+uniform vec3 MatteColor;
+uniform float Matte;
+// One multiplier over whatever alpha the stops already carry.
+uniform float Opacity;
 out vec4 fragColor;
 void main() {
     float t = clamp(vRadial, 0.0, 1.0);
@@ -20,5 +27,7 @@ void main() {
     vec4 c = mix(gradient_colors[index], gradient_colors[index + 1], findex - float(index));
     // Radial alpha ramp, applied on top of whatever alpha the stop carries.
     c.a *= mix(InnerAlpha, OuterAlpha, t);
+    c.rgb = mix(c.rgb, MatteColor, Matte);
+    c.a *= Opacity;
     fragColor = c;
 }
