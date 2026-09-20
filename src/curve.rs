@@ -4,6 +4,8 @@
 //! vertex shader indexes by `gl_InstanceID`, so a curve costs what a straight
 //! row costs - one float per bar per frame, and no path maths in `draw()`
 
+use crate::math::fma;
+
 /// One bar's place on the path, as uploaded
 ///
 /// `std140`-friendly by construction: four floats, no padding to reason about
@@ -39,25 +41,8 @@ impl Control {
 /// Catmull-Rom through `p1`..`p2`, with `p0`/`p3` as the neighbouring tangent
 /// controls. Chosen over Bezier because it passes THROUGH its control points:
 /// a point clicked on a ridge is on the ridge, with no handles to tune
-/// `a * b + c`, as one instruction where the target has FMA
 ///
-/// `mul_add` is a single `vfmaddss` with FMA available and a call into libm
-/// without it, which is far slower than the two instructions it replaces. The
-/// package build targets baseline x86-64 deliberately, so the choice has to be
-/// made at compile time rather than assumed
-#[inline(always)]
-fn fma(a: f32, b: f32, c: f32) -> f32 {
-    #[cfg(target_feature = "fma")]
-    {
-        a.mul_add(b, c)
-    }
-    #[cfg(not(target_feature = "fma"))]
-    {
-        a * b + c
-    }
-}
-
-/// One Catmull-Rom segment, evaluated by Horner's method
+/// Evaluated by Horner's method
 ///
 /// Horner is 3 multiplies and 3 adds per axis against 6 and 5 for the expanded
 /// polynomial, needs no `t2`/`t3`, and rounds once per step instead of twice.
@@ -402,20 +387,31 @@ pub fn horizon(points: &[Control], fit: Fit) -> Vec<f32> {
         .collect();
     pts.sort_by(|a, b| a.0.total_cmp(&b.0));
 
-    (0..HORIZON_BUCKETS)
-        .map(|i| {
-            let x = i as f32 / (HORIZON_BUCKETS - 1) as f32;
-            match pts.iter().position(|p| p.0 >= x) {
-                None => pts[pts.len() - 1].1,
-                Some(0) => pts[0].1,
-                Some(k) => {
-                    let (a, b) = (pts[k - 1], pts[k]);
-                    let span = (b.0 - a.0).max(f32::EPSILON);
-                    a.1 + (b.1 - a.1) * ((x - a.0) / span)
-                }
-            }
-        })
-        .collect()
+    // One walk, not a search per bucket: both sequences are sorted by x, so
+    // the segment for bucket i+1 is at or after the segment for bucket i.
+    // Searching from the start each time is O(buckets * points) - 268k
+    // comparisons for a 131-point silhouette - against O(buckets + points)
+    let mut out = Vec::with_capacity(HORIZON_BUCKETS);
+    let last = pts.len() - 1;
+    let mut k = 0usize;
+    for i in 0..HORIZON_BUCKETS {
+        let x = i as f32 / (HORIZON_BUCKETS - 1) as f32;
+        while k < last && pts[k].0 < x {
+            k += 1;
+        }
+        out.push(if pts[k].0 < x {
+            // Past the last point: the horizon holds flat
+            pts[last].1
+        } else if k == 0 {
+            // Before the first: flat the other way
+            pts[0].1
+        } else {
+            let (a, b) = (pts[k - 1], pts[k]);
+            let span = (b.0 - a.0).max(f32::EPSILON);
+            fma(b.1 - a.1, (x - a.0) / span, a.1)
+        });
+    }
+    out
 }
 
 /// FNV-1a over a file's bytes, hex
@@ -430,8 +426,17 @@ pub fn horizon(points: &[Control], fit: Fit) -> Vec<f32> {
 /// invalidate every key in the config
 #[must_use]
 pub fn content_key(path: &std::path::Path) -> Option<String> {
+    Some(describe(path)?.0)
+}
+
+/// A wallpaper's key and its pixel size, from one read of the file
+///
+/// Both answers come out of the same bytes, and the file is a few megabytes:
+/// asking for them separately reads it twice
+#[must_use]
+pub fn describe(path: &std::path::Path) -> Option<(String, Option<(u32, u32)>)> {
     let bytes = std::fs::read(path).ok()?;
-    Some(format!("{:016x}", fnv1a(&bytes)))
+    Some((format!("{:016x}", fnv1a(&bytes)), size_of_image(&bytes)))
 }
 
 /// A wallpaper's pixel dimensions, read from the file's header
@@ -443,7 +448,12 @@ pub fn content_key(path: &std::path::Path) -> Option<String> {
 /// which is what every curve authored before this assumed
 #[must_use]
 pub fn image_size(path: &std::path::Path) -> Option<(u32, u32)> {
-    let b = std::fs::read(path).ok()?;
+    size_of_image(&std::fs::read(path).ok()?)
+}
+
+/// As `image_size`, for bytes already in hand
+#[must_use]
+pub fn size_of_image(b: &[u8]) -> Option<(u32, u32)> {
     if b.starts_with(b"\x89PNG\r\n\x1a\n") && b.len() >= 24 {
         // IHDR is always the first chunk: width and height as big-endian u32
         let n = |at: usize| u32::from_be_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]]);
@@ -777,6 +787,65 @@ mod tests {
         assert!((d.sx / d.sy - 3.0).abs() < 1e-4 || (d.sy - 1.0).abs() < 1e-5);
         // Nonsense in, identity out, rather than a NaN that draws nothing
         assert_eq!(Fit::cover((0, 0), (1920, 1080)), Fit::STRETCH);
+    }
+
+    /// The single walk has to agree with the obvious search-from-the-start
+    /// version at every bucket, for silhouettes of every shape: sorted or not,
+    /// duplicated x, spanning the width or a sliver of it
+    #[test]
+    fn the_horizon_walk_matches_a_brute_force_search() {
+        fn brute(points: &[Control]) -> Vec<f32> {
+            let mut pts: Vec<(f32, f32)> = points
+                .iter()
+                .map(|c| (c.x.clamp(0.0, 1.0), 1.0 - c.y.clamp(0.0, 1.0)))
+                .collect();
+            pts.sort_by(|a, b| a.0.total_cmp(&b.0));
+            (0..HORIZON_BUCKETS)
+                .map(|i| {
+                    let x = i as f32 / (HORIZON_BUCKETS - 1) as f32;
+                    match pts.iter().position(|p| p.0 >= x) {
+                        None => pts[pts.len() - 1].1,
+                        Some(0) => pts[0].1,
+                        Some(k) => {
+                            let (a, b) = (pts[k - 1], pts[k]);
+                            let span = (b.0 - a.0).max(f32::EPSILON);
+                            a.1 + (b.1 - a.1) * ((x - a.0) / span)
+                        }
+                    }
+                })
+                .collect()
+        }
+        // A deterministic spread of shapes, including ones that break naive
+        // indexing: reversed input, repeated x, a sliver, the full width
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut rand = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 40) as f32 / 16_777_216.0
+        };
+        for case in 0..40 {
+            let n = 2 + case % 17;
+            let (lo, hi) = match case % 4 {
+                0 => (0.0, 1.0),
+                1 => (0.4, 0.45),
+                2 => (0.0, 0.3),
+                _ => (0.7, 1.0),
+            };
+            let pts: Vec<Control> = (0..n)
+                .map(|i| Control {
+                    x: lo + (hi - lo) * (i as f32 / (n - 1) as f32),
+                    y: rand(),
+                    scale: 1.0,
+                    angle: None,
+                })
+                .collect();
+            let (walk, slow) = (horizon(&pts, Fit::STRETCH), brute(&pts));
+            assert_eq!(walk.len(), slow.len(), "case {case}");
+            for (i, (w, b)) in walk.iter().zip(&slow).enumerate() {
+                assert!((w - b).abs() < 1e-5, "case {case} bucket {i}: {w} vs {b}");
+            }
+        }
     }
 
     /// A flat silhouette occludes at a constant height, and one drawn across
