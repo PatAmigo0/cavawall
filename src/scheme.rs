@@ -54,6 +54,7 @@ pub fn shell_dir() -> &'static Path {
 }
 
 /// Role name -> bare `rrggbb`, as the scheme file writes it (no leading `#`)
+#[must_use]
 pub fn colours() -> Option<HashMap<String, String>> {
     let raw = std::fs::read_to_string(scheme_dir().join(SCHEME_FILE)).ok()?;
     let parsed: serde_json::Value = serde_json::from_str(&raw).ok()?;
@@ -79,6 +80,7 @@ pub fn colours() -> Option<HashMap<String, String>> {
 ///
 /// Clamped: the value sizes an index buffer, and zero divides by zero in the
 /// bar-width maths
+#[must_use]
 pub fn bar_count() -> Option<u32> {
     /// Absent `services` means nothing to follow, not a failure
     #[derive(serde::Deserialize)]
@@ -149,6 +151,7 @@ impl Watch {
     ///
     /// Directories are watched rather than the files themselves, so a name
     /// check is still needed on each event; see `take`.
+    #[must_use]
     pub fn new(scheme: bool, shell: bool, wallpaper: bool) -> Option<Self> {
         if !scheme && !shell && !wallpaper {
             return None;
