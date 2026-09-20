@@ -174,6 +174,7 @@ use std::{
 };
 
 pub mod app_config;
+mod curve;
 use app_config::*;
 pub mod scheme;
 pub mod cli_help;
@@ -185,6 +186,7 @@ const VERTEX_SHADER_SRC: &str = include_str!("shaders/vertex_shader.glsl");
 const FRAGMENT_SHADER_SRC: &str = include_str!("shaders/fragment_shader.glsl");
 const CIRCLE_VERTEX_SHADER_SRC: &str = include_str!("shaders/circle_vertex_shader.glsl");
 const CIRCLE_FRAGMENT_SHADER_SRC: &str = include_str!("shaders/circle_fragment_shader.glsl");
+const CURVE_VERTEX_SHADER_SRC: &str = include_str!("shaders/curve_vertex_shader.glsl");
 
 /// Bar width and stride in NDC, both fixed until a re-exec.
 ///
@@ -284,6 +286,10 @@ fn build_program(mode: Mode) -> u32 {
     let (vert_src, frag_src) = match mode {
         Mode::Bars => (VERTEX_SHADER_SRC, FRAGMENT_SHADER_SRC),
         Mode::Circle => (CIRCLE_VERTEX_SHADER_SRC, CIRCLE_FRAGMENT_SHADER_SRC),
+        // Curve reuses the circle's fragment stage: "gradient along the bar
+        // with an alpha ramp from base to tip" is the same job, and both feed
+        // it the same vRadial.
+        Mode::Curve => (CURVE_VERTEX_SHADER_SRC, CIRCLE_FRAGMENT_SHADER_SRC),
     };
     let vert = compile_shader(gl::VERTEX_SHADER, vert_src, "vertex");
     let frag = compile_shader(gl::FRAGMENT_SHADER, frag_src, "fragment");
@@ -640,7 +646,23 @@ fn main() {
             }
         );
     }
-    let mode = config.general.mode.unwrap_or_default();
+    let mut mode = config.general.mode.unwrap_or_default();
+    // A curve is authored against ONE wallpaper. If the current one has no
+    // entry, fall back to bars rather than draw a ridge traced from a
+    // different image - which is the whole point of keying them.
+    let active_curve = (mode == Mode::Curve)
+        .then(|| {
+            let key = curve::current_wallpaper().and_then(|w| curve::content_key(&w))?;
+            let found = config.curves.as_ref()?.get(&key);
+            if found.is_none() && debug_enabled() {
+                eprintln!("cavawall: no curve for wallpaper {key}, falling back to bars");
+            }
+            found
+        })
+        .flatten();
+    if mode == Mode::Curve && active_curve.is_none() {
+        mode = Mode::Bars;
+    }
     let circle = CircleGeom::from_config(config.circle.as_ref());
     let shader_program = build_program(mode);
     let mut quad_vbo = 0;
@@ -742,6 +764,59 @@ fn main() {
                 gl::Uniform1f(
                     gl::GetUniformLocation(shader_program, c"Stride".as_ptr()),
                     bar_stride,
+                );
+            }
+            Mode::Curve => {
+                // Safe: mode was demoted to Bars above when no curve matched.
+                let cfg = active_curve.expect("curve mode implies a matching curve");
+                // [x, y] or [x, y, scale]; a short or empty entry is a config
+                // typo, and skipping it beats rendering a bar at the origin.
+                let controls: Vec<curve::Control> = cfg
+                    .points
+                    .iter()
+                    .filter(|p| p.len() >= 2)
+                    .map(|p| curve::Control {
+                        x: p[0],
+                        y: p[1],
+                        scale: p.get(2).copied().unwrap_or(1.0).max(0.0),
+                    })
+                    .collect();
+                let samples = curve::resample(&controls, bar_count, cfg.flip.unwrap_or(false));
+                // One vec4 per bar: xy base, z the normal's angle, w the
+                // scale. Angle keeps a bar to a single vec4.
+                let packed: Vec<[f32; 4]> = samples
+                    .iter()
+                    .map(|(s, scale)| {
+                        [s.pos[0], s.pos[1], s.normal[1].atan2(s.normal[0]), *scale]
+                    })
+                    .collect();
+                let mut path_ssbo = 0;
+                gl::GenBuffers(1, &mut path_ssbo);
+                gl::BindBuffer(gl::SHADER_STORAGE_BUFFER, path_ssbo);
+                gl::BufferData(
+                    gl::SHADER_STORAGE_BUFFER,
+                    std::mem::size_of_val(packed.as_slice()) as GLsizeiptr,
+                    packed.as_ptr().cast(),
+                    gl::STATIC_DRAW,
+                );
+                gl::BindBufferBase(gl::SHADER_STORAGE_BUFFER, 1, path_ssbo);
+                gl::BindBuffer(gl::SHADER_STORAGE_BUFFER, 0);
+                // NDC spans 2.0, so a fraction of the output is twice that.
+                gl::Uniform1f(
+                    gl::GetUniformLocation(shader_program, c"Reach".as_ptr()),
+                    cfg.height.unwrap_or(0.18).clamp(0.0, 1.0) * 2.0,
+                );
+                gl::Uniform1f(
+                    gl::GetUniformLocation(shader_program, c"BarWidth".as_ptr()),
+                    cfg.width.unwrap_or(0.006).clamp(0.0, 1.0) * 2.0,
+                );
+                gl::Uniform1f(
+                    gl::GetUniformLocation(shader_program, c"InnerAlpha".as_ptr()),
+                    circle.inner_alpha,
+                );
+                gl::Uniform1f(
+                    gl::GetUniformLocation(shader_program, c"OuterAlpha".as_ptr()),
+                    circle.outer_alpha,
                 );
             }
             Mode::Circle => {
@@ -1356,6 +1431,16 @@ impl AppState {
             // times max_height - on a 1920x1080 output a 520px circle is 270k
             // pixels against 1.3M, so the same damage argument that shrank the
             // band favours this even more strongly.
+            // The path is authored in output-normalised coordinates, so its
+            // NDC is the OUTPUT's NDC and the surface has to be the whole
+            // output for the two to agree. That gives up the damage win the
+            // band buys - shrinking to the path's bounding box means rescaling
+            // every sample into the smaller surface, which is worth doing once
+            // curve mode has earned it.
+            Mode::Curve => {
+                self.layer_surface.set_size(self.width, self.height);
+                self.layer_surface.set_anchor(Anchor::TOP | Anchor::LEFT);
+            }
             Mode::Circle => {
                 let d = self.circle.diameter.min(self.width).min(self.height).max(1);
                 let (top, left) = self.circle.margins_for(d, self.width, self.height);
