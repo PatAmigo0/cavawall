@@ -209,6 +209,7 @@ function place(m){
 addEventListener('click',()=>document.querySelectorAll('.menu').forEach(m=>m.classList.remove('open')));
 addEventListener('resize',()=>document.querySelectorAll('.menu.open').forEach(place));
 // Capped so a long session cannot grow it without bound.
+function invalidateHz(){hzCache=null;hzKey='';}
 function pushHist(){hist.push(JSON.stringify({p:paths,o:occ,c:cur}));if(hist.length>200)hist.shift();}
 img.onload=()=>{c.width=img.naturalWidth;c.height=img.naturalHeight;loadExisting();};
 img.src='/wallpaper';
@@ -277,26 +278,50 @@ function dense(pts){
   o.push({p:[pts[n-1].x*c.width,pts[n-1].y*c.height],s:pts[n-1].s,a:pts[n-1].a});
   return o;
 }
-// Height of the silhouette at a given x, in pixels, flat past both ends -
-// this is the same rule curve.rs applies when it samples the horizon.
-function horizonAt(px){
+// The silhouette as the SHADER sees it: sampled into the same fixed number
+// of buckets, by the same rule, and read back with the same interpolation.
+//
+// Clipping against the polyline directly is what made the editor disagree
+// with the render on steep stretches - the preview cut a clean diagonal where
+// the shader, reading a coarse bucket, left the corner of a bar showing. The
+// resampling is the renderer's; the preview has no business being better at
+// it than the thing it previews.
+const HZ=2048;
+let hzCache=null, hzKey='';
+function horizonArr(){
   if(occ.length<2)return null;
-  const q=occ;
-  if(px<=q[0].x*c.width)return q[0].y*c.height;
-  if(px>=q[q.length-1].x*c.width)return q[q.length-1].y*c.height;
-  for(let i=1;i<q.length;i++){
-    const a=q[i-1],b=q[i];
-    if(px<=b.x*c.width){
-      const span=Math.max((b.x-a.x)*c.width,1e-6);
-      return (a.y+(b.y-a.y)*((px-a.x*c.width)/span))*c.height;
+  const key=occ.length+':'+occ[0].x+','+occ[0].y+':'+occ[occ.length-1].x;
+  if(hzCache&&hzKey===key)return hzCache;
+  const q=occ.slice().sort((a,b)=>a.x-b.x);
+  const out=new Float32Array(HZ);
+  for(let i=0;i<HZ;i++){
+    const x=i/(HZ-1);
+    let y;
+    if(x<=q[0].x)y=q[0].y;
+    else if(x>=q[q.length-1].x)y=q[q.length-1].y;
+    else{
+      let k=1;
+      while(k<q.length-1&&q[k].x<x)k++;
+      const a=q[k-1],b=q[k],span=Math.max(b.x-a.x,1e-6);
+      y=a.y+(b.y-a.y)*((x-a.x)/span);
     }
+    // Stored counting UP from the bottom, exactly as curve::horizon does.
+    out[i]=1-y;
   }
-  return q[q.length-1].y*c.height;
+  hzCache=out;hzKey=key;
+  return out;
+}
+function horizonAt(px){
+  const h=horizonArr();
+  if(!h)return null;
+  const f=Math.min(1,Math.max(0,px/c.width))*(HZ-1);
+  const i=Math.min(Math.floor(f),HZ-2);
+  return (1-(h[i]+(h[i+1]-h[i])*(f-i)))*c.height;
 }
 function clipAboveHorizon(){
   if(occ.length<2)return false;
   x.save();x.beginPath();x.moveTo(0,0);
-  for(let px=0;px<=c.width;px+=4)x.lineTo(px,horizonAt(px));
+  for(let px=0;px<=c.width;px+=hzStep())x.lineTo(px,horizonAt(px));
   x.lineTo(c.width,0);x.closePath();x.clip();
   return true;
 }
@@ -335,8 +360,11 @@ function alloc(lens,fixed,total){
 }
 // One place decides how thick a guide line is: at macro zoom a 3px line is
 // wider than the ridge you are tracing.
+const hzStep=()=>Math.max(1,c.width/HZ);
 const lw=()=>+$('linew').value*c.width/1600;
 function draw(){
+  // Points move in place, so a cached sample cannot be trusted across a draw.
+  invalidateHz();
   x.drawImage(img,0,0);
   const alpha=+$('opacity').value/100;
   const d0=+$('dim').value/100;
@@ -394,14 +422,14 @@ function draw(){
   if(occ.length>1&&$('showocc').checked){
     x.globalAlpha=alpha;
     x.beginPath();x.moveTo(0,horizonAt(0));
-    for(let px=0;px<=c.width;px+=4)x.lineTo(px,horizonAt(px));
+    for(let px=0;px<=c.width;px+=hzStep())x.lineTo(px,horizonAt(px));
     x.lineTo(c.width,c.height);x.lineTo(0,c.height);x.closePath();
     x.fillStyle='rgba(48,213,200,.18)';x.fill();
     x.strokeStyle='#30d5c8';x.lineWidth=lw();
     const a=occ[0].x*c.width, b=occ[occ.length-1].x*c.width;
     // Drawn part: what you actually traced.
     x.beginPath();x.moveTo(a,horizonAt(a));
-    for(let px=a;px<=b;px+=4)x.lineTo(px,horizonAt(px));
+    for(let px=a;px<=b;px+=hzStep())x.lineTo(px,horizonAt(px));
     x.lineTo(b,horizonAt(b));x.stroke();
     // Past either end the horizon holds flat, which is what the shader does
     // too - dashed and dimmed so it reads as an implication, not as a line
