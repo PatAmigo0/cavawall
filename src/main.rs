@@ -42,7 +42,9 @@ const SILENCE_THRESHOLD: f32 = 0.005;
 const SILENCE_RAW: u16 = (SILENCE_THRESHOLD * 65530.0) as u16;
 
 /// `2.0 * (n / 65530.0) - 1.0` folded into one multiply-add per bar
-const BAR_NDC_SCALE: f32 = 2.0 / 65530.0;
+/// One raw cava sample to NDC. The vertex fetch normalises a u16 by 65535, so
+/// this divisor has to be the same one or damage stops covering the bars
+const BAR_NDC_SCALE: f32 = 2.0 / 65535.0;
 
 /// Damage rectangles emitted per frame
 ///
@@ -717,9 +719,11 @@ fn main() {
 
     // Sized from the bar count, which cannot change without a re-exec, so both
     // are allocated once here rather than on every frame
-    let heights = vec![0.0f32; bar_count as usize].into_boxed_slice();
-    let heights_bytes = std::mem::size_of_val(&*heights) as GLsizeiptr;
+    // cava's frame IS the vertex buffer: two bytes a bar, straight from the
+    // pipe to the GPU with nothing in between
     let cava_buffer = vec![0u8; bar_count as usize * 2].into_boxed_slice();
+    let prev_frame = cava_buffer.clone();
+    let frame_bytes = std::mem::size_of_val(&*cava_buffer) as GLsizeiptr;
     let (bar_width, bar_stride) = bar_geometry(bar_count, config.bars.gap);
     let background_color = array_from_config_color(&config.general.background_color);
 
@@ -755,11 +759,11 @@ fn main() {
         gl::BindBuffer(gl::ARRAY_BUFFER, height_vbo);
         gl::BufferData(
             gl::ARRAY_BUFFER,
-            std::mem::size_of_val(&*heights) as GLsizeiptr,
+            frame_bytes,
             std::ptr::null(),
             gl::DYNAMIC_DRAW,
         );
-        gl::VertexAttribPointer(1, 1, gl::FLOAT, gl::FALSE, 4, std::ptr::null());
+        gl::VertexAttribPointer(1, 1, gl::UNSIGNED_SHORT, gl::TRUE, 2, std::ptr::null());
         gl::EnableVertexAttribArray(1);
         gl::VertexAttribDivisor(1, 1);
 
@@ -969,13 +973,12 @@ fn main() {
         gradient_colors_ssbo,
         color_stops,
         watch,
-        prev_heights: vec![0.0f32; bar_count as usize].into_boxed_slice(),
-        heights,
+        prev_frame,
         cava_buffer,
         bar_width,
         bar_stride,
         damage_map: DamageMap::new(bar_count, bar_width, bar_stride, 256, 256),
-        heights_bytes,
+        frame_bytes,
         swap_damage,
         force_full_damage: true,
         max_height: config.bars.max_height.unwrap_or(1.0),
@@ -1060,13 +1063,14 @@ struct AppState {
     cava_pid: u32,
     /// One NDC height per bar, reused. The entire per-frame vertex payload:
     /// everything else about a bar's geometry is a uniform or gl_InstanceID
-    heights: Box<[f32]>,
+
     /// One raw cava frame, reused. Both were `vec![..]` locals in draw(), so an
     /// idle machine still did three allocations and three frees per frame
     cava_buffer: Box<[u8]>,
     /// Last frame's heights, so damage can be the span each bar actually moved
     /// through rather than the whole band
-    prev_heights: Box<[f32]>,
+    /// The frame behind the one on screen, for the damage comparison
+    prev_frame: Box<[u8]>,
     /// Bar geometry in NDC, kept so the damage map can be rebuilt on a resize
     bar_width: f32,
     bar_stride: f32,
@@ -1074,7 +1078,7 @@ struct AppState {
     damage_map: DamageMap,
     /// Byte size of `heights`, for the per-frame upload. Constant, so it is not
     /// re-derived from the slice every frame
-    heights_bytes: GLsizeiptr,
+    frame_bytes: GLsizeiptr,
     /// None when the driver has no swap-with-damage extension; then every frame
     /// declares the whole surface, exactly as before
     swap_damage: Option<SwapDamageFn>,
@@ -1792,10 +1796,14 @@ impl DamageMap {
 /// outside these rects are bit-identical to what the compositor already holds,
 /// so telling it to keep them is true. An app rendering incrementally into an
 /// aged back buffer would need EGL_BUFFER_AGE_EXT here; this one does not
-fn damage_rects(heights: &[f32], prev: &[f32], map: &DamageMap, out: &mut [egl::Int]) -> usize {
-    let mut lo = [f32::MAX; DAMAGE_BUCKETS];
-    let mut hi = [f32::MIN; DAMAGE_BUCKETS];
-    for ((&new, &old), &b) in heights.iter().zip(prev).zip(map.bucket_of.iter()) {
+fn damage_rects(frame: &[u8], prev: &[u8], map: &DamageMap, out: &mut [egl::Int]) -> usize {
+    // Raw samples, not NDC: the comparison and the running extremes are all
+    // integer, and only the eight survivors are ever converted
+    let mut lo = [u16::MAX; DAMAGE_BUCKETS];
+    let mut hi = [u16::MIN; DAMAGE_BUCKETS];
+    let (new_s, old_s) = (frame.as_chunks::<2>().0, prev.as_chunks::<2>().0);
+    for ((n, o), &b) in new_s.iter().zip(old_s).zip(map.bucket_of.iter()) {
+        let (new, old) = (u16::from_le_bytes(*n), u16::from_le_bytes(*o));
         if new == old {
             continue;
         }
@@ -1808,10 +1816,14 @@ fn damage_rects(heights: &[f32], prev: &[f32], map: &DamageMap, out: &mut [egl::
     }
 
     let mut n = 0;
-    for (b, (&l, &h)) in lo.iter().zip(hi.iter()).enumerate() {
-        if l > h {
+    for (b, (&lr, &hr)) in lo.iter().zip(hi.iter()).enumerate() {
+        if lr > hr {
             continue; // nothing in this bucket moved
         }
+        let (l, h) = (
+            fma(f32::from(lr), BAR_NDC_SCALE, -1.0),
+            fma(f32::from(hr), BAR_NDC_SCALE, -1.0),
+        );
         let (x0, x1) = map.bucket_x[b];
         let y0 = (((l + 1.0) * map.half_h).floor() as i32 - 1).clamp(0, map.height);
         let y1 = (((h + 1.0) * map.half_h).ceil() as i32 + 1).clamp(0, map.height);
@@ -1834,7 +1846,7 @@ impl AppState {
             // diameter^2 rather than a full-width band - so declare all of it
             // and keep the per-bar arithmetic out of the frame entirely
             Some(_) if !self.force_full_damage && self.mode == Mode::Bars => {
-                damage_rects(&self.heights, &self.prev_heights, &self.damage_map, &mut rects)
+                damage_rects(&self.cava_buffer, &self.prev_frame, &self.damage_map, &mut rects)
             }
             // Whole surface. Not the same as passing zero rects, which means
             // "nothing changed" and would present a frame nobody redraws
@@ -1844,10 +1856,10 @@ impl AppState {
             }
         };
         self.force_full_damage = false;
-        // Swapped, not copied: draw() overwrites every element of `heights`
-        // before the next present, so the buffer that just became stale is
-        // exactly the one it can write into. Two pointers instead of a memcpy
-        std::mem::swap(&mut self.heights, &mut self.prev_heights);
+        // Swapped, not copied: the next read fills a whole frame, so the
+        // buffer that just became stale is exactly the one to read into.
+        // Two pointers instead of a memcpy
+        std::mem::swap(&mut self.cava_buffer, &mut self.prev_frame);
 
         match self.swap_damage {
             // SAFETY: display and surface are current and live, and `rects`
@@ -1977,13 +1989,6 @@ impl AppState {
         // surface is already sized to that fraction of the screen, so a
         // full-volume bar fills it exactly. Applying it twice made the bars
         // max_height^2 tall, visibly short
-        let (samples, _) = self.cava_buffer.as_chunks::<2>();
-        for (height, sample) in self.heights.iter_mut().zip(samples) {
-            // fma, not `x * s - 1.0`: this loop vectorises to 8 floats per
-            // register, and the fused form is one vfmadd213ps where the plain
-            // one is a vmulps and a vaddps
-            *height = fma(f32::from(u16::from_le_bytes(*sample)), BAR_NDC_SCALE, -1.0);
-        }
         unsafe {
             // Respecifying the store orphans it, so the driver hands back a
             // fresh region and never waits for the GPU to finish reading the
@@ -1992,16 +1997,16 @@ impl AppState {
             if self.dsa {
                 gl::NamedBufferData(
                     self.height_vbo,
-                    self.heights_bytes,
-                    self.heights.as_ptr().cast(),
+                    self.frame_bytes,
+                    self.cava_buffer.as_ptr().cast(),
                     gl::DYNAMIC_DRAW,
                 );
             } else {
                 gl::BindBuffer(gl::ARRAY_BUFFER, self.height_vbo);
                 gl::BufferData(
                     gl::ARRAY_BUFFER,
-                    self.heights_bytes,
-                    self.heights.as_ptr().cast(),
+                    self.frame_bytes,
+                    self.cava_buffer.as_ptr().cast(),
                     gl::DYNAMIC_DRAW,
                 );
             }
@@ -2465,11 +2470,20 @@ mod tests {
     /// stale strip of the old bar on screen, which is invisible to any test
     /// that only checks the rects look reasonable - so these check containment
     /// against the span each bar actually moved through
+    /// Cases are written in NDC because that is what a bar's height means on
+    /// screen. A frame carries cava's raw samples, so they go back into that
+    /// domain here
+    fn raw(hs: &[f32]) -> Vec<u8> {
+        hs.iter()
+            .flat_map(|ndc| (((ndc + 1.0) / BAR_NDC_SCALE) as u16).to_le_bytes())
+            .collect()
+    }
+
     fn rects_of(heights: &[f32], prev: &[f32], w: u32, h: u32) -> Vec<[i32; 4]> {
         let (bw, stride) = bar_geometry(heights.len() as u32, 0.0);
         let map = DamageMap::new(heights.len() as u32, bw, stride, w, h);
         let mut out = [0i32; DAMAGE_BUCKETS * 4];
-        let n = damage_rects(heights, prev, &map, &mut out);
+        let n = damage_rects(&raw(heights), &raw(prev), &map, &mut out);
         out[..n].as_chunks::<4>().0.to_vec()
     }
 
@@ -2555,7 +2569,7 @@ mod tests {
             let h = (full_h as f32 * frac).ceil() as u32;
             let map = DamageMap::new(bars as u32, bw, stride, w, h);
             let mut out = [0i32; DAMAGE_BUCKETS * 4];
-            let n = damage_rects(&new, &prev, &map, &mut out);
+            let n = damage_rects(&raw(&new), &raw(&prev), &map, &mut out);
             let rects: Vec<&[i32]> = out[..n].as_chunks::<4>().0.iter().map(|r| &r[..]).collect();
             assert!(!rects.is_empty(), "{w}x{h}: nothing damaged");
             for r in &rects {
@@ -2616,16 +2630,22 @@ mod tests {
         assert!(is_silent(&[0u8; 8]));
     }
 
-    /// Full scale maps to the top of the surface and zero to the bottom, with
-    /// the folded constant matching the divide-then-scale it replaced
+    /// Full scale maps to the top of the surface and zero to the bottom, by
+    /// the same divisor the vertex fetch uses when it normalises a u16
+    ///
+    /// The two have to agree exactly. The GPU places the bar and the CPU
+    /// decides which pixels to declare damaged; a different divisor on either
+    /// side leaves a strip of the old bar on screen
     #[test]
     fn bar_height_spans_ndc() {
-        let ndc = |n: u16| f32::from(n) * BAR_NDC_SCALE - 1.0;
+        let ndc = |n: u16| fma(f32::from(n), BAR_NDC_SCALE, -1.0);
         assert!((ndc(0) - -1.0).abs() < 1e-6);
-        assert!((ndc(65530) - 1.0).abs() < 1e-6);
+        assert!((ndc(u16::MAX) - 1.0).abs() < 1e-6);
         for n in [1u16, 327, 1000, 32768, 65000] {
-            let was = 2.0 * (f32::from(n) / 65530.0) - 1.0;
-            assert!((ndc(n) - was).abs() < 1e-6, "{n}: {} vs {was}", ndc(n));
+            // What the vertex fetch does: value / 65535, then the shader's
+            // own `height * 2.0 - 1.0`
+            let fetched = f32::from(n) / f32::from(u16::MAX) * 2.0 - 1.0;
+            assert!((ndc(n) - fetched).abs() < 1e-6, "{n}: {} vs {fetched}", ndc(n));
         }
     }
 }
