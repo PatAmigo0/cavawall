@@ -349,9 +349,15 @@ pub fn bounds(bars: &[Bar]) -> (f32, f32, f32, f32) {
     if x0 > x1 { (-1.0, -1.0, 1.0, 1.0) } else { (x0, y0, x1, y1) }
 }
 
-/// Resolution of the sampled horizon. 512 buckets across an output is about
-/// four pixels each at 1920, which is finer than a hand-drawn silhouette is.
-pub const HORIZON_BUCKETS: usize = 512;
+/// Resolution of the sampled horizon.
+///
+/// 512 was chosen as "finer than a hand-drawn silhouette", which was wrong:
+/// four output pixels per bucket flattens a steep stretch of ridge, and the
+/// editor - which clips against the polyline itself - then disagreed with
+/// what the shader actually cut. At 2048 a bucket is about one pixel at 1920
+/// and the two agree to the pixel. The buffer is 8KB and the fragment still
+/// does exactly one lookup.
+pub const HORIZON_BUCKETS: usize = 2048;
 
 /// A polyline in normalised coordinates, resampled into a height-above-bottom
 /// per x bucket.
