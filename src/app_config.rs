@@ -53,6 +53,13 @@ pub struct CurveConfig {
     pub width: Option<f32>,
     /// Flip which side of the path the bars grow toward.
     pub flip: Option<bool>,
+    /// Bar count for this mode only. A path wants its own density - 12 bars
+    /// suits a bottom row and leaves gaping holes along a ridge - and changing
+    /// `[bars] amount` would move the other modes with it.
+    pub bars: Option<u32>,
+    /// Keep bars vertical instead of turning them onto the path's normal.
+    /// Straight rectangles rising from the ridge rather than leaning with it.
+    pub upright: Option<bool>,
 }
 
 /// Where a circle sits on the output.
@@ -92,6 +99,8 @@ pub struct CircleConfig {
     pub outer_alpha: Option<f32>,
     /// Which point of the output the circle is pinned to.
     pub anchor: Option<CircleAnchor>,
+    /// Bar count for this mode only; see the note on `CurveConfig::bars`.
+    pub bars: Option<u32>,
     /// Distance from the anchored edges, logical pixels. Ignored on an axis
     /// the anchor centres - "top" centres horizontally, so margin_x does
     /// nothing there.

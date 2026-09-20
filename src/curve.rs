@@ -25,6 +25,11 @@ pub struct Control {
     pub x: f32,
     pub y: f32,
     pub scale: f32,
+    /// Degrees, clockwise from straight up, overriding the tangent-derived
+    /// normal at this point. `None` means follow the path, which is what you
+    /// want almost everywhere - an override is for the handful of places where
+    /// the curve is right but the lean is not.
+    pub angle: Option<f32>,
 }
 
 impl Control {
@@ -54,7 +59,7 @@ fn catmull_rom(p0: [f32; 2], p1: [f32; 2], p2: [f32; 2], p3: [f32; 2], t: f32) -
 ///
 /// Endpoints are duplicated rather than wrapped: a ridge is an open curve, and
 /// wrapping would bend its ends toward each other across the screen.
-fn densify(controls: &[Control], per_segment: usize) -> Vec<([f32; 2], f32)> {
+fn densify(controls: &[Control], per_segment: usize) -> Vec<([f32; 2], f32, Option<f32>)> {
     let n = controls.len();
     let mut out = Vec::with_capacity((n - 1) * per_segment + 1);
     for i in 0..n - 1 {
@@ -63,13 +68,23 @@ fn densify(controls: &[Control], per_segment: usize) -> Vec<([f32; 2], f32)> {
         let p2 = controls[i + 1].to_ndc();
         let p3 = controls[(i + 2).min(n - 1)].to_ndc();
         let (s1, s2) = (controls[i].scale, controls[i + 1].scale);
+        let (a1, a2) = (controls[i].angle, controls[i + 1].angle);
         for step in 0..per_segment {
             let t = step as f32 / per_segment as f32;
-            out.push((catmull_rom(p0, p1, p2, p3, t), s1 + (s2 - s1) * t));
+            // An override on either end wins over the tangent for this whole
+            // segment, blending toward the other end. A segment with neither
+            // carries None and is left to the path.
+            let angle = match (a1, a2) {
+                (None, None) => None,
+                (Some(a), None) => Some(a),
+                (None, Some(b)) => Some(b),
+                (Some(a), Some(b)) => Some(a + (b - a) * t),
+            };
+            out.push((catmull_rom(p0, p1, p2, p3, t), s1 + (s2 - s1) * t, angle));
         }
     }
     let last = controls[n - 1];
-    out.push((last.to_ndc(), last.scale));
+    out.push((last.to_ndc(), last.scale, last.angle));
     out
 }
 
@@ -81,7 +96,12 @@ fn densify(controls: &[Control], per_segment: usize) -> Vec<([f32; 2], f32)> {
 ///
 /// Returns each bar's base, its unit normal, and the scale interpolated there.
 #[must_use]
-pub fn resample(controls: &[Control], count: u32, flip: bool) -> Vec<(Sample, f32)> {
+pub fn resample(
+    controls: &[Control],
+    count: u32,
+    flip: bool,
+    upright: bool,
+) -> Vec<(Sample, f32)> {
     let count = count.max(1) as usize;
     if controls.len() < 2 {
         let p = controls.first().map_or([0.0, 0.0], |c| c.to_ndc());
@@ -111,15 +131,23 @@ pub fn resample(controls: &[Control], count: u32, flip: bool) -> Vec<(Sample, f3
         }
         let seg = (acc[cursor + 1] - acc[cursor]).max(f32::EPSILON);
         let t = ((target - acc[cursor]) / seg).clamp(0.0, 1.0);
-        let (a, sa) = dense[cursor];
-        let (b, sb) = dense[cursor + 1];
+        let (a, sa, aa) = dense[cursor];
+        let (b, sb, _) = dense[cursor + 1];
         let pos = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
 
         // Tangent from the segment, normal perpendicular to it. Degenerate
         // segments fall back to straight up rather than producing NaN.
         let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
         let len = (dx * dx + dy * dy).sqrt();
-        let normal = if len <= f32::EPSILON {
+        let normal = if let Some(deg) = aa {
+            // Degrees clockwise from up, so 0 is [0,1] and 90 is [1,0].
+            let r = deg.to_radians();
+            [r.sin(), r.cos()]
+        } else if upright {
+            // Straight rectangles rising from the path rather than leaning
+            // with it; flip still points them down.
+            if flip { [0.0, -1.0] } else { [0.0, 1.0] }
+        } else if len <= f32::EPSILON {
             [0.0, 1.0]
         } else if flip {
             [dy / len, -dx / len]
@@ -177,7 +205,7 @@ mod tests {
 
     fn line(n: usize) -> Vec<Control> {
         (0..n)
-            .map(|i| Control { x: i as f32 / (n - 1) as f32, y: 0.5, scale: 1.0 })
+            .map(|i| Control { x: i as f32 / (n - 1) as f32, y: 0.5, scale: 1.0, angle: None })
             .collect()
     }
 
@@ -186,7 +214,7 @@ mod tests {
     /// generalises.
     #[test]
     fn a_flat_path_reproduces_a_row_of_bars() {
-        let s = resample(&line(4), 8, false);
+        let s = resample(&line(4), 8, false, false);
         assert_eq!(s.len(), 8);
         for (sample, scale) in &s {
             assert!((sample.pos[1] - 0.0).abs() < 1e-3, "y drifted: {:?}", sample.pos);
@@ -207,12 +235,12 @@ mod tests {
     #[test]
     fn normals_are_unit_length_on_a_slope() {
         let controls = vec![
-            Control { x: 0.0, y: 0.9, scale: 1.0 },
-            Control { x: 0.35, y: 0.3, scale: 1.0 },
-            Control { x: 0.7, y: 0.6, scale: 1.0 },
-            Control { x: 1.0, y: 0.35, scale: 1.0 },
+            Control { x: 0.0, y: 0.9, scale: 1.0, angle: None },
+            Control { x: 0.35, y: 0.3, scale: 1.0, angle: None },
+            Control { x: 0.7, y: 0.6, scale: 1.0, angle: None },
+            Control { x: 1.0, y: 0.35, scale: 1.0, angle: None },
         ];
-        for (s, _) in resample(&controls, 32, false) {
+        for (s, _) in resample(&controls, 32, false, false) {
             let len = (s.normal[0].powi(2) + s.normal[1].powi(2)).sqrt();
             assert!((len - 1.0).abs() < 1e-3, "normal length {len}");
         }
@@ -222,7 +250,7 @@ mod tests {
     #[test]
     fn flip_only_reverses_the_normal() {
         let c = line(3);
-        for ((a, _), (b, _)) in resample(&c, 6, false).iter().zip(resample(&c, 6, true).iter()) {
+        for ((a, _), (b, _)) in resample(&c, 6, false, false).iter().zip(resample(&c, 6, true, false).iter()) {
             assert_eq!(a.pos, b.pos);
             assert!((a.normal[0] + b.normal[0]).abs() < 1e-6);
             assert!((a.normal[1] + b.normal[1]).abs() < 1e-6);
@@ -234,10 +262,10 @@ mod tests {
     #[test]
     fn scale_interpolates_between_control_points() {
         let controls = vec![
-            Control { x: 0.0, y: 0.5, scale: 1.0 },
-            Control { x: 1.0, y: 0.5, scale: 0.2 },
+            Control { x: 0.0, y: 0.5, scale: 1.0, angle: None },
+            Control { x: 1.0, y: 0.5, scale: 0.2, angle: None },
         ];
-        let s = resample(&controls, 10, false);
+        let s = resample(&controls, 10, false, false);
         assert!(s[0].1 > s[9].1, "scale should fall along the path");
         assert!(s[0].1 <= 1.0 && s[9].1 >= 0.2);
         // Monotone, not jumping about.
@@ -256,12 +284,32 @@ mod tests {
         assert_eq!(fnv1a(b"foobar"), 0x8594_4171_f739_67e8);
     }
 
+    /// A per-point angle overrides the tangent, and only where it is set.
+    #[test]
+    fn angle_override_beats_the_tangent() {
+        let controls = vec![
+            Control { x: 0.0, y: 0.9, scale: 1.0, angle: Some(90.0) },
+            Control { x: 1.0, y: 0.2, scale: 1.0, angle: Some(90.0) },
+        ];
+        for (s, _) in resample(&controls, 8, false, false) {
+            // 90 degrees clockwise from up is straight right.
+            assert!((s.normal[0] - 1.0).abs() < 1e-3, "normal {:?}", s.normal);
+            assert!(s.normal[1].abs() < 1e-3);
+        }
+        // Without it the same slope leans.
+        let plain = vec![
+            Control { x: 0.0, y: 0.9, scale: 1.0, angle: None },
+            Control { x: 1.0, y: 0.2, scale: 1.0, angle: None },
+        ];
+        assert!(resample(&plain, 8, false, false).iter().all(|(s, _)| s.normal[0] < 0.95));
+    }
+
     /// Fewer than two controls is a config mistake, not a crash.
     #[test]
     fn degenerate_input_yields_usable_samples() {
-        assert_eq!(resample(&[], 4, false).len(), 4);
-        let one = vec![Control { x: 0.5, y: 0.5, scale: 1.0 }];
-        let s = resample(&one, 3, false);
+        assert_eq!(resample(&[], 4, false, false).len(), 4);
+        let one = vec![Control { x: 0.5, y: 0.5, scale: 1.0, angle: None }];
+        let s = resample(&one, 3, false, false);
         assert_eq!(s.len(), 3);
         assert_eq!(s[0].0.normal, [0.0, 1.0]);
     }
