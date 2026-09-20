@@ -1,0 +1,8 @@
+# Every build from this checkout targets the CPU it is built on. cavawall runs
+# on the machine that compiled it, so there is no reason to emit instructions
+# for a 2003 baseline x86-64 and hope the CPU has more.
+#
+# A packager who needs a portable binary sets RUSTFLAGS in the environment,
+# which takes precedence over this file - makepkg already does.
+[build]
+rustflags = ["-C", "target-cpu=native"]

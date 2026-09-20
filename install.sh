@@ -12,7 +12,13 @@ if [ -f "$SCRIPT_DIR/Cargo.toml" ] && [ "$SCRIPT_DIR" != "$SCRIPT_DIR" ]; then
 fi
 
 cd "$SCRIPT_DIR"
-cargo install --path . --force --root "$INSTALL_DIR"
+# .cargo/config.toml already asks for target-cpu=native; this makes it explicit
+# and lets a packager opt out with CAVAWALL_PORTABLE=1.
+if [ -n "${CAVAWALL_PORTABLE:-}" ]; then
+  RUSTFLAGS="${RUSTFLAGS:-}" cargo install --path . --force --root "$INSTALL_DIR"
+else
+  RUSTFLAGS="${RUSTFLAGS:--C target-cpu=native}" cargo install --path . --force --root "$INSTALL_DIR"
+fi
 
 # Config
 mkdir -p "$CONFIG_DIR"

@@ -293,14 +293,26 @@ pub fn allocate(lengths: &[f32], fixed: &[Option<u32>], count: u32) -> Vec<u32> 
 /// One draw call covers the lot: the shader indexes per instance and has no
 /// idea paths exist, so a second curve costs nothing but its own bars.
 #[must_use]
-pub fn build(paths: &[PathSpec], count: u32, aspect: f32) -> Vec<Bar> {
+pub fn build(paths: &[PathSpec], count: u32, aspect: f32, fit: Fit) -> Vec<Bar> {
     let usable: Vec<&PathSpec> = paths.iter().filter(|p| p.controls.len() >= 2).collect();
     if usable.is_empty() {
         return Vec::new();
     }
     // Densified once and kept: measuring a path and sampling it are the same
     // walk, and build runs on every configure.
-    let arcs: Vec<Arc> = usable.iter().map(|p| arc(&p.controls, aspect)).collect();
+    let mapped: Vec<Box<[Control]>> = usable
+        .iter()
+        .map(|p| {
+            p.controls
+                .iter()
+                .map(|c| {
+                    let m = fit.map([c.x, c.y]);
+                    Control { x: m[0], y: m[1], ..*c }
+                })
+                .collect()
+        })
+        .collect();
+    let arcs: Vec<Arc> = mapped.iter().map(|c| arc(c, aspect)).collect();
     let counts = allocate(
         &arcs.iter().map(|a| a.total).collect::<Vec<_>>(),
         &usable.iter().map(|p| p.bars).collect::<Vec<_>>(),
@@ -365,11 +377,17 @@ pub const HORIZON_BUCKETS: usize = 2048;
 /// Points need not be sorted or span the full width: the ends extend flat, so
 /// a silhouette drawn across the middle still occludes correctly at the edges.
 #[must_use]
-pub fn horizon(points: &[Control]) -> Vec<f32> {
+pub fn horizon(points: &[Control], fit: Fit) -> Vec<f32> {
     if points.len() < 2 {
         return Vec::new();
     }
     let mut pts: Vec<(f32, f32)> = points
+        .iter()
+        .map(|c| {
+            let m = fit.map([c.x, c.y]);
+            Control { x: m[0], y: m[1], ..*c }
+        })
+        .collect::<Vec<_>>()
         .iter()
         // Stored counting UP from the bottom, which is the direction
         // gl_FragCoord.y runs, so the shader flips neither.
@@ -407,6 +425,111 @@ pub fn horizon(points: &[Control]) -> Vec<f32> {
 pub fn content_key(path: &std::path::Path) -> Option<String> {
     let bytes = std::fs::read(path).ok()?;
     Some(format!("{:016x}", fnv1a(&bytes)))
+}
+
+/// A wallpaper's pixel dimensions, read from the file's header.
+///
+/// Header only: the size is needed to work out how the image is cropped onto
+/// the output, and decoding a 3-megapixel JPEG to learn two integers would be
+/// absurd. PNG and JPEG cover what wallpaper daemons are fed; anything else
+/// returns None and the caller treats the image as already output-shaped,
+/// which is what every curve authored before this assumed.
+#[must_use]
+pub fn image_size(path: &std::path::Path) -> Option<(u32, u32)> {
+    let b = std::fs::read(path).ok()?;
+    if b.starts_with(b"\x89PNG\r\n\x1a\n") && b.len() >= 24 {
+        // IHDR is always the first chunk: width and height as big-endian u32.
+        let n = |at: usize| u32::from_be_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]]);
+        return Some((n(16), n(20)));
+    }
+    if !b.starts_with(&[0xff, 0xd8]) {
+        return None;
+    }
+    // JPEG: walk the marker segments to the frame header, which is the only
+    // one carrying the dimensions. Markers are 0xFF followed by a type; the
+    // padding between them is any number of further 0xFF bytes.
+    let mut i = 2;
+    while i + 9 < b.len() {
+        if b[i] != 0xff {
+            i += 1;
+            continue;
+        }
+        let marker = b[i + 1];
+        if marker == 0xff {
+            i += 1;
+            continue;
+        }
+        // Standalone markers carry no length: RSTn, SOI, EOI, TEM.
+        if (0xd0..=0xd9).contains(&marker) || marker == 0x01 {
+            i += 2;
+            continue;
+        }
+        let len = usize::from(u16::from_be_bytes([b[i + 2], b[i + 3]]));
+        // Any SOFn except the four that are not frame headers.
+        let sof = (0xc0..=0xcf).contains(&marker)
+            && !matches!(marker, 0xc4 | 0xc8 | 0xcc);
+        if sof {
+            let h = u16::from_be_bytes([b[i + 5], b[i + 6]]);
+            let w = u16::from_be_bytes([b[i + 7], b[i + 8]]);
+            return Some((u32::from(w), u32::from(h)));
+        }
+        if len < 2 {
+            return None;
+        }
+        i += 2 + len;
+    }
+    None
+}
+
+/// How a wallpaper's coordinates land on the output.
+///
+/// A curve is drawn on the IMAGE, but the image is not what the output shows:
+/// a wallpaper daemon covers the screen with it, scaling to the larger of the
+/// two ratios and cropping the overflow. Same aspect, and the two agree and
+/// this is the identity; different aspect, and a point that sits on a ridge in
+/// the file sits somewhere else entirely on the screen.
+///
+/// The map is a uniform scale plus a translation, so it moves bars without
+/// skewing them: an angle on the image is the same angle on the output.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Fit {
+    pub sx: f32,
+    pub sy: f32,
+    pub ox: f32,
+    pub oy: f32,
+}
+
+impl Default for Fit {
+    fn default() -> Self {
+        Self::STRETCH
+    }
+}
+
+impl Fit {
+    /// The image is treated as already output-shaped. What every curve
+    /// authored before `image_size` existed assumed, and what a daemon that
+    /// stretches rather than crops actually does.
+    pub const STRETCH: Fit = Fit { sx: 1.0, sy: 1.0, ox: 0.0, oy: 0.0 };
+
+    /// Scale to cover the output, centre, crop the overflow.
+    #[must_use]
+    pub fn cover(image: (u32, u32), output: (u32, u32)) -> Fit {
+        let (iw, ih) = (image.0 as f32, image.1 as f32);
+        let (ow, oh) = (output.0 as f32, output.1 as f32);
+        if iw <= 0.0 || ih <= 0.0 || ow <= 0.0 || oh <= 0.0 {
+            return Fit::STRETCH;
+        }
+        let scale = (ow / iw).max(oh / ih);
+        let (sx, sy) = (iw * scale / ow, ih * scale / oh);
+        Fit { sx, sy, ox: (1.0 - sx) * 0.5, oy: (1.0 - sy) * 0.5 }
+    }
+
+    /// Image coordinates to output coordinates, both normalised, origin top
+    /// left.
+    #[must_use]
+    pub fn map(&self, p: [f32; 2]) -> [f32; 2] {
+        [p[0] * self.sx + self.ox, p[1] * self.sy + self.oy]
+    }
 }
 
 /// FNV-1a 64. Split out so a known-answer test can reach it: the prime is 11
@@ -608,7 +731,7 @@ mod tests {
             PathSpec { controls: line(0.0, 0.6), reach: 0.4, width: 0.01, ..Default::default() },
             PathSpec { controls: line(0.7, 1.0), reach: 0.1, width: 0.02, ..Default::default() },
         ];
-        let bars = build(&paths, 20, 16.0 / 9.0);
+        let bars = build(&paths, 20, 16.0 / 9.0, Fit::STRETCH);
         assert_eq!(bars.len(), 20);
         // Twice the length, twice the bars.
         let long = bars.iter().filter(|b| (b.reach - 0.4).abs() < 1e-6).count();
@@ -620,8 +743,33 @@ mod tests {
             paths[0].clone(),
             PathSpec { controls: Box::new([]), ..Default::default() },
         ];
-        assert_eq!(build(&broken, 9, 1.0).len(), 9);
-        assert!(build(&[], 9, 1.0).is_empty());
+        assert_eq!(build(&broken, 9, 1.0, Fit::STRETCH).len(), 9);
+        assert!(build(&[], 9, 1.0, Fit::STRETCH).is_empty());
+    }
+
+    /// The same point in the file has to land on the same feature of the
+    /// picture whatever screen it is shown on, and cover-cropping is how a
+    /// wallpaper daemon puts it there.
+    #[test]
+    fn a_cover_fit_crops_the_overflow_and_centres_what_is_left() {
+        // Same shape: nothing to crop, so nothing moves.
+        let same = Fit::cover((2560, 1440), (1920, 1080));
+        assert!((same.sx - 1.0).abs() < 1e-5 && (same.sy - 1.0).abs() < 1e-5);
+        assert!((same.map([0.25, 0.75])[0] - 0.25).abs() < 1e-5);
+
+        // A 16:9 image on a 16:10 screen: height fits, width overflows and is
+        // cropped evenly, so the centre holds and the edges pull inward.
+        let f = Fit::cover((1920, 1080), (1920, 1200));
+        assert!((f.sy - 1.0).abs() < 1e-5, "the limiting axis fits exactly");
+        assert!(f.sx > 1.1, "the other overflows: {}", f.sx);
+        assert!((f.map([0.5, 0.5])[0] - 0.5).abs() < 1e-5, "the centre never moves");
+        assert!(f.map([0.0, 0.0])[0] < 0.0, "the left edge is cropped away");
+        assert!(f.map([1.0, 0.0])[0] > 1.0);
+        // Uniform in both axes, so an angle survives the map.
+        let d = Fit::cover((3000, 1000), (1000, 1000));
+        assert!((d.sx / d.sy - 3.0).abs() < 1e-4 || (d.sy - 1.0).abs() < 1e-5);
+        // Nonsense in, identity out, rather than a NaN that draws nothing.
+        assert_eq!(Fit::cover((0, 0), (1920, 1080)), Fit::STRETCH);
     }
 
     /// A flat silhouette occludes at a constant height, and one drawn across
@@ -633,19 +781,19 @@ mod tests {
             Control { x: 0.3, y: 0.6, scale: 1.0, angle: None },
             Control { x: 0.7, y: 0.6, scale: 1.0, angle: None },
         ];
-        let h = horizon(&pts);
+        let h = horizon(&pts, Fit::STRETCH);
         assert_eq!(h.len(), HORIZON_BUCKETS);
         // y 0.6 from the top is 0.4 from the bottom, everywhere.
         for v in &h {
             assert!((v - 0.4).abs() < 1e-3, "got {v}");
         }
-        assert!(horizon(&pts[..1]).is_empty(), "one point cannot be a horizon");
+        assert!(horizon(&pts[..1], Fit::STRETCH).is_empty(), "one point cannot be a horizon");
         // A slope interpolates rather than stepping.
         let slope = vec![
             Control { x: 0.0, y: 1.0, scale: 1.0, angle: None },
             Control { x: 1.0, y: 0.0, scale: 1.0, angle: None },
         ];
-        let h = horizon(&slope);
+        let h = horizon(&slope, Fit::STRETCH);
         assert!(h[0] < 0.01 && h[HORIZON_BUCKETS - 1] > 0.99);
         assert!((h[HORIZON_BUCKETS / 2] - 0.5).abs() < 0.01);
     }
