@@ -34,6 +34,7 @@ input[type=range]{width:130px}
 /* Fixed width, and the selection controls only hide - they keep their box.
    Either one reflowing its bar resizes the canvas and shifts the view. */
 #count{min-width:132px;text-align:center}
+#pathlabel{min-width:86px;text-align:center}
 #selbox[hidden]{display:flex!important;visibility:hidden}
 /* Menus are absolutely positioned, so opening one never reflows a bar and
    never moves the canvas underneath. */
@@ -49,10 +50,15 @@ input[type=range]{width:130px}
 </style>
 <header>
   <h1>curve editor</h1>
-  <span class=key>__KEY__</span>
+  <span class=key id=wpkey>__KEY__</span>
   <span class=pill id=count>0 points</span>
   <span class=spacer></span>
   <span class=hint>click add &middot; drag move &middot; right-click delete &middot; shift+drag angle &middot; paint: drag to trace &middot; wheel zoom &middot; middle-drag pan</span>
+  <span class=pill id=pathlabel>path 1/1</span>
+  <button id=prevpath title="previous path">&lsaquo;</button>
+  <button id=nextpath title="next path">&rsaquo;</button>
+  <button id=addpath>+ path</button>
+  <button id=delpath title="delete this path">&times;</button>
   <button id=occbtn>occluder: off</button>
   <button id=paintbtn>paint: off</button>
   <div class=menu id=viewmenu>
@@ -125,7 +131,15 @@ function clampPan(){
   panx=Math.min(0,Math.max(w.width-sw+ (sw/zoom)*0 , panx));
   pany=Math.min(0,Math.max(w.height-sh, pany));
 }
-const img=new Image(); let pts=[], occ=[], sel=-1, drag=-1, shift=false, hist=[];
+const img=new Image();
+// A curve is a list of disconnected paths, each with its own bar geometry -
+// two ridges at different distances want different reaches. `pts` is the
+// active path's point array itself, not a copy, so every editing path below
+// keeps working on it unchanged.
+let paths=[{pts:[],h:10,w:4,up:false,fl:false}], cur=0;
+let pts=paths[0].pts, occ=[], sel=-1, drag=-1, shift=false, hist=[];
+const cp=()=>paths[cur];
+const KEY=document.getElementById('wpkey').textContent.trim();
 // The occluder is a second, independent polyline: the mountain silhouette
 // that bars have to hide behind. It is edited with the same handles, so the
 // mode flag decides which list a click lands in.
@@ -143,32 +157,58 @@ for(const m of document.querySelectorAll('.menu')){
 }
 addEventListener('click',()=>document.querySelectorAll('.menu').forEach(m=>m.classList.remove('open')));
 // Capped so a long session cannot grow it without bound.
-function pushHist(){hist.push(JSON.stringify({p:pts,o:occ}));if(hist.length>200)hist.shift();}
+function pushHist(){hist.push(JSON.stringify({p:paths,o:occ,c:cur}));if(hist.length>200)hist.shift();}
 img.onload=()=>{c.width=img.naturalWidth;c.height=img.naturalHeight;loadExisting();};
 img.src='/wallpaper';
 
 function loadExisting(){
   fetch('/existing').then(r=>r.text()).then(t=>{
-    const m=t.match(/points\s*=\s*\[([\s\S]*?)\]\s*$/m);
-    if(m) for(const row of m[1].matchAll(/\[([^\]]+)\]/g)){
-      const v=row[1].split(',').map(s=>parseFloat(s.trim()));
-      if(v.length>=2) pts.push({x:v[0],y:v[1],s:v[2]??1,a:v.length>3?v[3]:null});
-    }
+    const pointsIn=(block,into)=>{
+      const m=block.match(/points\s*=\s*\[([\s\S]*?)\n\]/)||block.match(/points\s*=\s*\[([\s\S]*?)\]\s*$/m);
+      if(!m)return;
+      for(const row of m[1].matchAll(/\[([^\]]+)\]/g)){
+        const v=row[1].split(',').map(s=>parseFloat(s.trim()));
+        if(v.length>=2) into.push({x:v[0],y:v[1],s:v[2]??1,a:v.length>3?v[3]:null});
+      }
+    };
+    const num=(block,k,d)=>{const r=block.match(new RegExp(k+'\\s*=\\s*([0-9.]+)'));return r?parseFloat(r[1]):d;};
+    const blocks=t.split(/\[\[curves\.[^\]]+\.path\]\]/).slice(1);
+    // The shorthand and the path blocks are the same thing written two ways,
+    // so the head of the file is just another block when there are none.
+    const sources=blocks.length?blocks:[t];
+    paths=sources.map(b=>{
+      const p={pts:[],h:Math.round(num(b,'height',num(t,'height',0.10))*100),
+               w:Math.round(num(b,'width',num(t,'width',0.004))*1000),
+               up:/upright\s*=\s*true/.test(b),fl:/flip\s*=\s*true/.test(b)};
+      pointsIn(b,p.pts);
+      return p;
+    }).filter(p=>p.pts.length);
+    if(!paths.length)paths=[{pts:[],h:10,w:4,up:false,fl:false}];
+    cur=0;pts=cp().pts;
     const o=t.match(/occlude\s*=\s*\[([\s\S]*?)\n\]/);
     if(o) for(const row of o[1].matchAll(/\[([^\]]+)\]/g)){
       const v=row[1].split(',').map(s=>parseFloat(s.trim()));
       if(v.length>=2) occ.push({x:v[0],y:v[1],s:1,a:null});
     }
-    const g=(k,d)=>{const r=t.match(new RegExp(k+'\\s*=\\s*([0-9.]+)'));return r?parseFloat(r[1]):d;};
-    $('bars').value=g('bars',64); $('height').value=Math.round(g('height',0.10)*100);
-    $('width').value=Math.round(g('width',0.004)*1000);
-    $('upright').checked=/upright\s*=\s*true/.test(t); $('flip').checked=/flip\s*=\s*true/.test(t);
-    draw();
+    $('bars').value=num(t,'bars',64);
+    showPath();
   }).catch(draw);
+}
+// Everything that has to follow the active path: the sliders edit it, so they
+// have to be reloaded from it whenever it changes.
+function showPath(){
+  pts=cp().pts;
+  $('pathlabel').textContent='path '+(cur+1)+'/'+paths.length;
+  $('height').value=cp().h; $('width').value=cp().w;
+  $('upright').checked=cp().up; $('flip').checked=cp().fl;
+  $('barsv').textContent=$('bars').value;
+  $('heightv').textContent=(cp().h/100).toFixed(2);
+  $('widthv').textContent=(cp().w/1000).toFixed(3);
+  sel=-1;showSel();draw();
 }
 // Catmull-Rom, matching curve.rs so the preview is the real placement.
 function cr(p0,p1,p2,p3,t){const t2=t*t,t3=t2*t;return[0,1].map(i=>0.5*((2*p1[i])+(-p0[i]+p2[i])*t+(2*p0[i]-5*p1[i]+4*p2[i]-p3[i])*t2+(-p0[i]+3*p1[i]-3*p2[i]+p3[i])*t3));}
-function dense(){
+function dense(pts){
   if(pts.length<2)return[];
   const o=[],n=pts.length;
   for(let i=0;i<n-1;i++){
@@ -205,6 +245,20 @@ function clipAboveHorizon(){
   x.lineTo(c.width,0);x.closePath();x.clip();
   return true;
 }
+function pathLen(d){let t=0;for(let i=1;i<d.length;i++)t+=Math.hypot(d[i].p[0]-d[i-1].p[0],d[i].p[1]-d[i-1].p[1]);return t;}
+// Largest remainder, the same rule curve::allocate uses: bars split between
+// paths by length, and the total is exactly the bar count.
+function alloc(lens,total){
+  const n=lens.length; if(!n)return[];
+  const sum=lens.reduce((a,b)=>a+b,0);
+  if(!(sum>0)){const e=Math.floor(total/n),o=new Array(n).fill(e);for(let i=0;i<total%n;i++)o[i]++;return o;}
+  const ideal=lens.map(l=>total*l/sum), out=ideal.map(v=>Math.floor(v));
+  let left=total-out.reduce((a,b)=>a+b,0);
+  const order=ideal.map((_,i)=>i).sort((a,b)=>
+    (ideal[b]-Math.floor(ideal[b]))-(ideal[a]-Math.floor(ideal[a]))||a-b);
+  for(let k=0;left>0;k++,left--)out[order[k%n]]++;
+  return out;
+}
 // One place decides how thick a guide line is: at macro zoom a 3px line is
 // wider than the ridge you are tracing.
 const lw=()=>+$('linew').value*c.width/1600;
@@ -213,43 +267,55 @@ function draw(){
   const alpha=+$('opacity').value/100;
   const d0=+$('dim').value/100;
   if(d0>0){x.fillStyle='rgba(16,16,20,'+d0+')';x.fillRect(0,0,c.width,c.height);}
-  const d=dense();
-  if(d.length>1){
-    x.globalAlpha=alpha;
+  const ds=paths.map(p=>dense(p.pts));
+  // Bars are split between paths by length, so the preview has to allocate
+  // them the same way the renderer does - over the paths that ARE paths,
+  // since curve::build drops a one-point path before it allocates anything.
+  const usable=ds.map((d,i)=>d.length>1?i:-1).filter(i=>i>=0);
+  const share=alloc(usable.map(i=>pathLen(ds[i])),+$('bars').value);
+  const counts=new Array(ds.length).fill(0);
+  usable.forEach((i,k)=>{counts[i]=share[k];});
+  ds.forEach((d,i)=>{
+    if(d.length<2)return;
+    // The path you are not editing is still drawn, just quietly.
+    x.globalAlpha=alpha*(i===cur?1:0.35);
     x.strokeStyle='#ff3b30';x.lineWidth=lw();x.beginPath();
-    d.forEach((q,i)=>i?x.lineTo(q.p[0],q.p[1]):x.moveTo(q.p[0],q.p[1]));x.stroke();
-    x.globalAlpha=1;
-    // Bar preview at the real sample positions, arc-length spaced.
-    if($('showbars').checked){
-    const N=+$('bars').value, reach=(+$('height').value/100)*c.height;
-    let acc=[0],tot=0;
-    for(let i=1;i<d.length;i++){tot+=Math.hypot(d[i].p[0]-d[i-1].p[0],d[i].p[1]-d[i-1].p[1]);acc.push(tot);}
-    // Bar WIDTH has to be per bar, not one lineWidth for the batch: the
-    // renderer multiplies it by each bar's scale, so a batched stroke would
-    // make the width slider look like it does nothing - which it did.
-    x.strokeStyle='rgba(255,255,255,.85)';
+    d.forEach((q,k)=>k?x.lineTo(q.p[0],q.p[1]):x.moveTo(q.p[0],q.p[1]));x.stroke();
+  });
+  x.globalAlpha=1;
+  // Bar preview at the real sample positions, arc-length spaced.
+  if($('showbars').checked){
     // Bars are clipped exactly where the shader discards them, so the preview
     // shows what the silhouette actually hides.
     const clipped=clipAboveHorizon();
-    const wpx=(+$('width').value/1000)*c.width;
-    let cur=0;
-    for(let i=0;i<N;i++){
-      const target=tot*(i+0.5)/N;
-      while(cur+2<d.length&&acc[cur+1]<target)cur++;
-      const seg=Math.max(acc[cur+1]-acc[cur],1e-6),t=Math.min(1,Math.max(0,(target-acc[cur])/seg));
-      const a=d[cur].p,b=d[cur+1].p;
-      const px=a[0]+(b[0]-a[0])*t, py=a[1]+(b[1]-a[1])*t;
-      let nx,ny;
-      if(d[cur].a!=null){const r=d[cur].a*Math.PI/180;nx=Math.sin(r);ny=-Math.cos(r);}
-      else if($('upright').checked){nx=0;ny=-1;}
-      else{const dx=b[0]-a[0],dy=b[1]-a[1],L=Math.hypot(dx,dy)||1;nx=dy/L;ny=-dx/L;}
-      if($('flip').checked){nx=-nx;ny=-ny;}
-      const s=d[cur].s*reach;
-      x.lineWidth=Math.max(1,wpx*d[cur].s);
-      x.beginPath();x.moveTo(px,py);x.lineTo(px+nx*s,py+ny*s);x.stroke();
-    }
+    x.strokeStyle='rgba(255,255,255,.85)';
+    ds.forEach((d,pi)=>{
+      const N=counts[pi];
+      if(d.length<2||!N)return;
+      const P=paths[pi], reach=(P.h/100)*c.height, wpx=(P.w/1000)*c.width;
+      let acc=[0],tot=0;
+      for(let i=1;i<d.length;i++){tot+=Math.hypot(d[i].p[0]-d[i-1].p[0],d[i].p[1]-d[i-1].p[1]);acc.push(tot);}
+      let seg=0;
+      for(let i=0;i<N;i++){
+        const target=tot*(i+0.5)/N;
+        while(seg+2<d.length&&acc[seg+1]<target)seg++;
+        const span=Math.max(acc[seg+1]-acc[seg],1e-6),t=Math.min(1,Math.max(0,(target-acc[seg])/span));
+        const a=d[seg].p,b=d[seg+1].p;
+        const px=a[0]+(b[0]-a[0])*t, py=a[1]+(b[1]-a[1])*t;
+        let nx,ny;
+        if(d[seg].a!=null){const r=d[seg].a*Math.PI/180;nx=Math.sin(r);ny=-Math.cos(r);}
+        else if(P.up){nx=0;ny=-1;}
+        else{const dx=b[0]-a[0],dy=b[1]-a[1],L=Math.hypot(dx,dy)||1;nx=dy/L;ny=-dx/L;}
+        if(P.fl){nx=-nx;ny=-ny;}
+        // Bar WIDTH has to be per bar, not one lineWidth for the batch: the
+        // renderer multiplies it by each bar's scale, so a batched stroke
+        // would make the width slider look like it does nothing - which it did.
+        x.lineWidth=Math.max(1,wpx*d[seg].s);
+        const len=d[seg].s*reach;
+        x.beginPath();x.moveTo(px,py);x.lineTo(px+nx*len,py+ny*len);x.stroke();
+      }
+    });
     if(clipped)x.restore();
-    }
   }
   if(occ.length>1&&$('showocc').checked){
     x.globalAlpha=alpha;
@@ -282,6 +348,12 @@ function draw(){
     x.strokeStyle='#101014';x.lineWidth=2;x.stroke();
   };
   if($('showdots').checked){
+    paths.forEach((P,i)=>{
+      if(i===cur)return;
+      x.globalAlpha=alpha*0.35;
+      P.pts.forEach(q=>dot(q,'#ff3b30'));
+    });
+    x.globalAlpha=alpha;
     pts.forEach((p,i)=>dot(p,!occmode&&i===sel?'#ffd60a':'#ff3b30'));
     occ.forEach((p,i)=>dot(p,occmode&&i===sel?'#ffd60a':'#30d5c8'));
   }
@@ -386,16 +458,40 @@ function rdp(list,eps){
 $('thin').onclick=()=>{
   pushHist();
   const eps=+$('thineps').value;
-  if(occmode)occ=rdp(occ,eps);else pts=rdp(pts,eps);
+  if(occmode)occ=rdp(occ,eps);else{cp().pts=rdp(pts,eps);pts=cp().pts;}
   sel=-1;showSel();draw();
 };
-$('clearall').onclick=()=>{pushHist();pts=[];occ=[];sel=-1;showSel();draw();};
+$('clearall').onclick=()=>{
+  pushHist();paths=[{pts:[],h:cp().h,w:cp().w,up:cp().up,fl:cp().fl}];cur=0;occ=[];showPath();
+};
 for(const id of ['bars','height','width']) $(id).oninput=()=>{
+  cp().h=+$('height').value; cp().w=+$('width').value;
   $('barsv').textContent=$('bars').value;
-  $('heightv').textContent=(+$('height').value/100).toFixed(2);
-  $('widthv').textContent=(+$('width').value/1000).toFixed(3);draw();};
-for(const id of ['upright','flip']) $(id).onchange=draw;
-function undo(){const h=hist.pop();if(h){const st=JSON.parse(h);pts=st.p;occ=st.o;sel=-1;showSel();draw();}}
+  $('heightv').textContent=(cp().h/100).toFixed(2);
+  $('widthv').textContent=(cp().w/1000).toFixed(3);draw();};
+$('upright').onchange=()=>{cp().up=$('upright').checked;draw();};
+$('flip').onchange=()=>{cp().fl=$('flip').checked;draw();};
+$('prevpath').onclick=()=>{cur=(cur+paths.length-1)%paths.length;showPath();};
+$('nextpath').onclick=()=>{cur=(cur+1)%paths.length;showPath();};
+$('addpath').onclick=()=>{
+  pushHist();
+  // A new path inherits the current one's geometry: a second ridge on the
+  // same wallpaper usually wants the same look, not the defaults.
+  paths.push({pts:[],h:cp().h,w:cp().w,up:cp().up,fl:cp().fl});
+  cur=paths.length-1;occmode=false;syncOcc();showPath();
+};
+$('delpath').onclick=()=>{
+  pushHist();
+  paths.splice(cur,1);
+  if(!paths.length)paths=[{pts:[],h:10,w:4,up:false,fl:false}];
+  cur=Math.min(cur,paths.length-1);showPath();
+};
+function undo(){
+  const h=hist.pop();
+  if(!h)return;
+  const st=JSON.parse(h);
+  paths=st.p;occ=st.o;cur=Math.min(st.c,paths.length-1);showPath();
+}
 $('undo').onclick=undo;
 // Ctrl+Z anywhere on the page, not just with the canvas focused - the canvas
 // takes no keyboard focus of its own.
@@ -405,31 +501,43 @@ addEventListener('keydown',e=>{
   }
 });
 // Every mutation pushes history first, so undo has something to pop.
-$('clear').onclick=()=>{pushHist();if(occmode)occ=[];else pts=[];sel=-1;showSel();draw();};
+$('clear').onclick=()=>{
+  pushHist();
+  if(occmode)occ=[];else{cp().pts=[];pts=cp().pts;}
+  sel=-1;showSel();draw();
+};
 $('paintbtn').onclick=()=>{paintmode=!paintmode;
   $('paintbtn').textContent='paint: '+(paintmode?'ON':'off');
   $('paintbtn').classList.toggle('primary',paintmode);
   c.style.cursor=paintmode?'cell':'crosshair';};
-$('occbtn').onclick=()=>{occmode=!occmode;sel=-1;
+function syncOcc(){
   $('occbtn').textContent='occluder: '+(occmode?'ON':'off');
-  $('occbtn').classList.toggle('primary',occmode);showSel();draw();};
+  $('occbtn').classList.toggle('primary',occmode);
+}
+$('occbtn').onclick=()=>{occmode=!occmode;sel=-1;syncOcc();showSel();draw();};
 function emit(){
-  const rows=pts.map(p=>{
+  const rows=q=>q.map(p=>{
     const v=[p.x.toFixed(4),p.y.toFixed(4),p.s.toFixed(2)];
     if(p.a!=null)v.push(p.a.toFixed(0));
     return '  ['+v.join(', ')+'],';
   }).join('\n');
-  $('out').value=
-    'bars = '+$('bars').value+'\n'+
-    'height = '+(+$('height').value/100).toFixed(2)+'\n'+
-    'width = '+(+$('width').value/1000).toFixed(3)+'\n'+
-    ($('upright').checked?'upright = true\n':'')+
-    ($('flip').checked?'flip = true\n':'')+
-    (occ.length>1?'occlude = [\n'+occ.map(p=>'  ['+p.x.toFixed(4)+', '+p.y.toFixed(4)+'],').join('\n')+'\n]\n':'')+
-    'points = [\n'+rows+'\n]';
+  let out='bars = '+$('bars').value+'\n';
+  // One silhouette for the whole curve: it is the wallpaper's skyline, and
+  // every path on it hides behind the same one.
+  if(occ.length>1) out+='occlude = [\n'+occ.map(p=>'  ['+p.x.toFixed(4)+', '+p.y.toFixed(4)+'],').join('\n')+'\n]\n';
+  for(const P of paths){
+    if(P.pts.length<2)continue;
+    out+='\n[[curves.'+KEY+'.path]]\n'
+       +'height = '+(P.h/100).toFixed(2)+'\n'
+       +'width = '+(P.w/1000).toFixed(3)+'\n'
+       +(P.up?'upright = true\n':'')
+       +(P.fl?'flip = true\n':'')
+       +'points = [\n'+rows(P.pts)+'\n]\n';
+  }
+  $('out').value=out;
 }
 $('save').onclick=()=>{
-  if(pts.length<2){alert('need at least two points');return;}
+  if(!paths.some(P=>P.pts.length>=2)){alert('need a path with at least two points');return;}
   const btn=$('save'); btn.textContent='saving...';
   fetch('/save',{method:'POST',body:$('out').value})
     .then(r=>r.text().then(t=>({ok:r.ok,t})))
