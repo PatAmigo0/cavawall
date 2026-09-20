@@ -5,7 +5,7 @@ pkgrel=1
 pkgdesc="Wayland audio visualiser that draws cava over your wallpaper"
 arch=('x86_64')
 url="https://github.com/PatAmigo0/cavawall"
-license=('MIT')
+license=('GPL-3.0-or-later')
 depends=('cava' 'wayland' 'libglvnd' 'libffi' 'gcc-libs' 'glibc')
 makedepends=('git' 'cargo')
 provides=('cavawall')
@@ -51,5 +51,7 @@ package() {
   # the annotated example to copy from, not a system default it would load.
   install -Dm644 config.toml "$pkgdir/usr/share/cavawall/config.toml"
   install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
-  install -Dm644 LICENSE.md "$pkgdir/usr/share/licenses/$pkgname/LICENSE.md"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  # Upstream's notice travels with the code it covers, so it ships too.
+  install -Dm644 LICENSE.MIT "$pkgdir/usr/share/licenses/$pkgname/LICENSE.MIT"
 }

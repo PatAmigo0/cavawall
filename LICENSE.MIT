@@ -1,5 +1,15 @@
 MIT License
 
+This covers the code cavawall inherited from
+https://github.com/rs-pro0/wallpaper-cava, which was published under these
+terms and remains available under them from upstream. It is kept here because
+those terms require it: the notice travels with the code.
+
+cavawall as a whole is distributed under the GNU General Public License
+version 3 or later; see LICENSE. Where the two apply to the same file, the
+GPL governs the combined work, and this notice governs upstream's
+contribution to it.
+
 Copyright (c) 2024 rs-pro0
 Copyright (c) 2026 PatAmigo0
 
