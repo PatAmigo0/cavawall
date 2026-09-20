@@ -438,11 +438,24 @@ fn main() {
     // the spawned cava's config below and baked into the index buffer further
     // down, so there is no honest way to follow it live. See SchemeConfig::bars.
     let follow_bars = config.scheme.as_ref().and_then(|s| s.bars).unwrap_or(false);
-    let bar_count = if follow_bars {
+    // Resolved before bar_count because each mode may override it: a ridge
+    // wants a different density from a bottom row, and `[bars] amount` is
+    // shared by all three.
+    let configured_mode = config.general.mode.unwrap_or_default();
+    let bar_count = match configured_mode {
+        Mode::Circle => config.circle.as_ref().and_then(|c| c.bars),
+        Mode::Curve => config
+            .curves
+            .as_ref()
+            .and_then(|m| m.values().next())
+            .and_then(|c| c.bars),
+        Mode::Bars => None,
+    }
+    .unwrap_or(if follow_bars {
         scheme::bar_count().unwrap_or(config.bars.amount)
     } else {
         config.bars.amount
-    };
+    });
     // Zero divides by zero in the bar-width maths. The ceiling is now only a
     // sanity bound - instancing removed the u16 index buffer that used to
     // impose one - and 4096 bars is already sub-pixel on any real monitor.
@@ -646,7 +659,7 @@ fn main() {
             }
         );
     }
-    let mut mode = config.general.mode.unwrap_or_default();
+    let mut mode = configured_mode;
     // A curve is authored against ONE wallpaper. If the current one has no
     // entry, fall back to bars rather than draw a ridge traced from a
     // different image - which is the whole point of keying them.
@@ -779,9 +792,15 @@ fn main() {
                         x: p[0],
                         y: p[1],
                         scale: p.get(2).copied().unwrap_or(1.0).max(0.0),
+                        angle: p.get(3).copied(),
                     })
                     .collect();
-                let samples = curve::resample(&controls, bar_count, cfg.flip.unwrap_or(false));
+                let samples = curve::resample(
+                    &controls,
+                    bar_count,
+                    cfg.flip.unwrap_or(false),
+                    cfg.upright.unwrap_or(false),
+                );
                 // One vec4 per bar: xy base, z the normal's angle, w the
                 // scale. Angle keeps a bar to a single vec4.
                 let packed: Vec<[f32; 4]> = samples
@@ -1985,6 +2004,7 @@ mod tests {
             inner_radius: Some(2.5),
             inner_alpha: Some(-1.0),
             outer_alpha: Some(9.0),
+            bars: None,
             anchor: None,
             margin_x: None,
             margin_y: None,
@@ -2025,6 +2045,23 @@ mod tests {
         // A margin bigger than the output cannot push it off-screen.
         let far = geom(CircleAnchor::TopLeft, 9999, 9999).margins_for(d, w, h);
         assert_eq!(far, (780, 1620), "clamped to the free space");
+    }
+
+    /// upright keeps every bar vertical whatever the path does - the "plain
+    /// rectangles standing on the ridge" look, as against leaning with it.
+    #[test]
+    fn upright_ignores_the_slope() {
+        let controls = vec![
+            curve::Control { x: 0.0, y: 0.9, scale: 1.0, angle: None },
+            curve::Control { x: 0.5, y: 0.2, scale: 1.0, angle: None },
+            curve::Control { x: 1.0, y: 0.8, scale: 1.0, angle: None },
+        ];
+        for (s, _) in curve::resample(&controls, 16, false, true) {
+            assert_eq!(s.normal, [0.0, 1.0], "upright bar leaned");
+        }
+        // And the slope still moves them when upright is off.
+        let leaned = curve::resample(&controls, 16, false, false);
+        assert!(leaned.iter().any(|(s, _)| s.normal[0].abs() > 0.1), "nothing leaned");
     }
 
     /// The vertex shader's own placement, replicated: it is the only consumer
