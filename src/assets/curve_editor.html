@@ -30,6 +30,9 @@ input[type=range]{width:130px}
 #out{width:100%;height:132px;flex:none;background:#0b0b0e;color:#c8c8d4;border:0;border-top:1px solid #26262e;
      font-family:ui-monospace,monospace;font-size:12px;padding:10px 14px;resize:vertical}
 .hint{color:#71717f;font-size:12px}
+/* The hint is the first thing worth losing when the window cannot hold a
+   row: the controls are not. */
+@media (max-width:1100px){.hint{display:none}}
 .pill{background:#1a1a22;border:1px solid #2c2c36;border-radius:999px;padding:2px 9px;font-size:12px}
 /* Fixed width, and the selection controls only hide - they keep their box.
    Either one reflowing its bar resizes the canvas and shifts the view. */
@@ -39,7 +42,10 @@ input[type=range]{width:130px}
 /* Menus are absolutely positioned, so opening one never reflows a bar and
    never moves the canvas underneath. */
 .menu{position:relative;display:inline-block}
-.pop{position:absolute;top:calc(100% + 6px);right:0;z-index:5;display:none;min-width:210px;
+ /* Fixed, and placed by JS: anchored to the button's right edge it ran off
+    the left of a narrow window, taking half of every label with it. */
+.pop{position:fixed;z-index:5;display:none;min-width:210px;max-width:calc(100vw - 16px);
+     max-height:72vh;overflow-y:auto;
      background:#16161c;border:1px solid #33333f;border-radius:8px;padding:8px;
      box-shadow:0 10px 30px #0008}
 .menu.open .pop{display:flex;flex-direction:column;gap:7px}
@@ -157,10 +163,22 @@ for(const m of document.querySelectorAll('.menu')){
     const was=m.classList.contains('open');
     document.querySelectorAll('.menu').forEach(o=>o.classList.remove('open'));
     m.classList.toggle('open',!was);
+    if(!was)place(m);
   };
   m.querySelector('.pop').onclick=e=>e.stopPropagation();
 }
+// Right-aligned to its button, then pushed back inside the window. Measured
+// after it is shown, because a display:none box measures zero.
+function place(m){
+  const b=m.querySelector('[data-pop]').getBoundingClientRect();
+  const pop=m.querySelector('.pop');
+  pop.style.left='0px';pop.style.top='0px';
+  const w=pop.offsetWidth, h=pop.offsetHeight, pad=8;
+  pop.style.left=Math.max(pad,Math.min(b.right-w,innerWidth-w-pad))+'px';
+  pop.style.top=(b.bottom+6+h>innerHeight-pad?Math.max(pad,b.top-6-h):b.bottom+6)+'px';
+}
 addEventListener('click',()=>document.querySelectorAll('.menu').forEach(m=>m.classList.remove('open')));
+addEventListener('resize',()=>document.querySelectorAll('.menu.open').forEach(place));
 // Capped so a long session cannot grow it without bound.
 function pushHist(){hist.push(JSON.stringify({p:paths,o:occ,c:cur}));if(hist.length>200)hist.shift();}
 img.onload=()=>{c.width=img.naturalWidth;c.height=img.naturalHeight;loadExisting();};
