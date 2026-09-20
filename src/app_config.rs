@@ -610,4 +610,17 @@ mod tests {
         assert_eq!(curve.occlude.as_ref().unwrap().len(), 2);
         assert!(curve.points.is_none(), "path blocks replace the shorthand");
     }
+
+    /// The shipped config is what install.sh copies into ~/.config, so a
+    /// version of it that does not parse is a broken install, not a stale
+    /// comment. It shipped that way once: a circle block had been pasted into
+    /// the middle of a sentence in the [scheme] comment, and the tail of that
+    /// sentence became a second [colors] table header.
+    #[test]
+    fn the_shipped_config_parses() {
+        let text = include_str!("../config.toml");
+        let cfg: Config = toml::from_str(text).expect("config.toml deserialises");
+        assert!(!cfg.colors.is_empty(), "a palette is not optional");
+        assert!(cfg.general.framerate > 0);
+    }
 }
