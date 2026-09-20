@@ -1601,6 +1601,24 @@ impl AppState {
 
 }
 
+/// The affine map from OUTPUT NDC into a surface that covers only
+/// `(left, top, w, h)` of that output, as `(scale, offset, occ_map)`.
+///
+/// Margins count from the top and NDC counts from the bottom, so the vertical
+/// half is the one that is easy to get wrong. Separated out from configure()
+/// to be testable: a wrong sign here puts the bars off screen with nothing to
+/// look at.
+fn surface_map(out: (u32, u32), rect: (u32, u32, u32, u32)) -> ([f32; 2], [f32; 2], [f32; 4]) {
+    let (ow, oh) = (out.0 as f32, out.1 as f32);
+    let (l, t, sw, sh) = (rect.0 as f32, rect.1 as f32, rect.2 as f32, rect.3 as f32);
+    let bottom = oh - t - sh;
+    (
+        [ow / sw, oh / sh],
+        [(ow - sw - 2.0 * l) / sw, (oh - sh - 2.0 * bottom) / sh],
+        [l / ow, bottom / oh, sw / ow, sh / oh],
+    )
+}
+
 /// Everything about damage that depends only on the surface size and the bar
 /// layout, and therefore belongs on a configure rather than in a frame.
 ///
@@ -2106,28 +2124,21 @@ impl LayerShellHandler for AppState {
                 gl::Uniform2f(self.resolution_location, self.width as f32, self.height as f32);
                 let (ow, oh) = (self.curve_output.0 as f32, self.curve_output.1 as f32);
                 let (sw, sh) = (self.width as f32, self.height as f32);
-                match self.curve_box {
-                    // Identity: the surface IS the output, so output NDC needs
-                    // no mapping and the horizon is already in frame.
-                    None => {
-                        gl::Uniform2f(self.path_scale_location, 1.0, 1.0);
-                        gl::Uniform2f(self.path_offset_location, 0.0, 0.0);
-                        gl::Uniform4f(self.occ_map_location, 0.0, 0.0, 1.0, 1.0);
-                    }
-                    Some((left, top, _, _)) => {
-                        let (l, t) = (left as f32, top as f32);
-                        // Margins count from the top; NDC and gl_FragCoord
-                        // both count from the bottom.
-                        let bottom = oh - t - sh;
-                        gl::Uniform2f(self.path_scale_location, ow / sw, oh / sh);
-                        gl::Uniform2f(
-                            self.path_offset_location,
-                            (ow - sw - 2.0 * l) / sw,
-                            (oh - sh - 2.0 * bottom) / sh,
-                        );
-                        gl::Uniform4f(self.occ_map_location, l / ow, bottom / oh, sw / ow, sh / oh);
-                    }
-                }
+                // Identity when the surface IS the output: output NDC needs
+                // no mapping and the horizon is already in frame.
+                let (scale, offset, occ) = match self.curve_box {
+                    None => ([1.0, 1.0], [0.0, 0.0], [0.0, 0.0, 1.0, 1.0]),
+                    // The compositor is free to hand back a size other than
+                    // the one asked for, so the map is built from what this
+                    // configure actually granted.
+                    Some((left, top, _, _)) => surface_map(
+                        (ow as u32, oh as u32),
+                        (left, top, sw as u32, sh as u32),
+                    ),
+                };
+                gl::Uniform2f(self.path_scale_location, scale[0], scale[1]);
+                gl::Uniform2f(self.path_offset_location, offset[0], offset[1]);
+                gl::Uniform4f(self.occ_map_location, occ[0], occ[1], occ[2], occ[3]);
             }
             if self.mode == Mode::Bars {
                 gl::Uniform1f(
@@ -2200,6 +2211,36 @@ mod tests {
 
     /// Placement is the one part a screenshot checks badly: a circle 20px off
     /// still looks fine, and only looks wrong on the other machine.
+    /// The box's own corners have to land on the surface's edges: that is what
+    /// "the surface is the bounding box" means, and it is the whole contract
+    /// the shader relies on. A wrong sign here puts the bars off screen, with
+    /// nothing left to look at to find out why.
+    #[test]
+    fn surface_map_puts_the_box_on_the_edges() {
+        // Hyprland granted exactly this for a ridgeline across the upper third
+        // of a 1920x1080 output.
+        let (out, rect) = ((1920u32, 1080u32), (1031u32, 201u32, 857u32, 244u32));
+        let (scale, offset, occ) = surface_map(out, rect);
+        let map = |p: [f32; 2]| [p[0] * scale[0] + offset[0], p[1] * scale[1] + offset[1]];
+        let (x0, x1) = (2.0 * 1031.0 / 1920.0 - 1.0, 2.0 * (1031.0 + 857.0) / 1920.0 - 1.0);
+        // NDC counts up, the margin counts down, so top and bottom swap.
+        let (y1, y0) = (1.0 - 2.0 * 201.0 / 1080.0, 1.0 - 2.0 * (201.0 + 244.0) / 1080.0);
+        for (p, want) in [([x0, y0], [-1.0, -1.0]), ([x1, y1], [1.0, 1.0])] {
+            let got = map(p);
+            assert!((got[0] - want[0]).abs() < 1e-4, "x: {got:?} want {want:?}");
+            assert!((got[1] - want[1]).abs() < 1e-4, "y: {got:?} want {want:?}");
+        }
+        // A fragment at the surface's bottom-left sits at the box's
+        // bottom-left on the output, both counted from the bottom.
+        assert!((occ[0] - 1031.0 / 1920.0).abs() < 1e-4);
+        assert!((occ[1] - (1080.0 - 201.0 - 244.0) / 1080.0).abs() < 1e-4);
+        // A surface that is the whole output maps to itself.
+        assert_eq!(
+            surface_map(out, (0, 0, 1920, 1080)),
+            ([1.0, 1.0], [0.0, 0.0], [0.0, 0.0, 1.0, 1.0])
+        );
+    }
+
     #[test]
     fn circle_anchors_land_where_they_say() {
         let geom = |a: CircleAnchor, mx, my| CircleGeom {
