@@ -1,0 +1,33 @@
+#version 430 core
+// Same unit quad and same one-float-per-bar payload as the other two modes.
+// The path is a static buffer built once at startup, so a curve costs a lookup
+// per vertex and nothing per frame.
+layout(location = 0) in vec2 corner;
+layout(location = 1) in float height;
+// One vec4 per bar: xy = base in NDC, z = the normal's angle, w = a scale for
+// that stretch of path. Angle rather than a normal vector so a bar is ONE
+// vec4 - two trig calls on four vertices is cheaper than a second buffer.
+layout(std430, binding = 1) readonly buffer PathSamples {
+    vec4 path[];
+};
+// Reach of a full-volume bar and bar width, both NDC, before the per-bar scale.
+uniform float Reach;
+uniform float BarWidth;
+// 0 at the base, 1 at the tip. The fragment stage is the circle's, which
+// indexes the gradient and the alpha ramp by exactly this.
+out float vRadial;
+void main() {
+    vec4 s = path[gl_InstanceID];
+    vec2 n = vec2(cos(s.z), sin(s.z));
+    // Tangent is the normal turned a quarter turn; no second lookup needed.
+    vec2 t = vec2(-n.y, n.x);
+    // draw() hands heights over in NDC because the linear mode uses them as a
+    // y coordinate; here they are an amplitude, so undo that rather than
+    // making draw() mode-aware.
+    float amp = (height + 1.0) * 0.5;
+    vRadial = corner.y * amp;
+    vec2 p = s.xy
+           + t * (corner.x - 0.5) * BarWidth * s.w
+           + n * vRadial * Reach * s.w;
+    gl_Position = vec4(p, 0.0, 1.0);
+}

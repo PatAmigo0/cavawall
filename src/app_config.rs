@@ -10,6 +10,10 @@ pub struct Config {
     pub scheme: Option<SchemeConfig>,
     /// Only read when `general.mode` is `Circle`; absent means every default.
     pub circle: Option<CircleConfig>,
+    /// Only read when `general.mode` is `Curve`. Keyed by wallpaper content
+    /// hash; no entry for the current wallpaper means fall back to bars rather
+    /// than draw a path authored for a different image.
+    pub curves: Option<HashMap<String, CurveConfig>>,
 }
 
 /// Which shape the bars are arranged into.
@@ -25,6 +29,30 @@ pub enum Mode {
     Bars,
     /// Radiating from the centre of a square surface.
     Circle,
+    /// Along an authored path, each bar on the path's normal.
+    Curve,
+}
+
+/// One authored path, tied to the wallpaper it was drawn against.
+///
+/// Keyed by the wallpaper's CONTENT hash, not its filename: this collection
+/// gets renamed and reorganised, and a path key would break on every move
+/// while a hash survives it.
+#[derive(Serialize, Deserialize, Debug, Default)]
+pub struct CurveConfig {
+    /// Control points in normalised output coordinates, x and y both 0..1 with
+    /// the origin top-left, plus an optional third component scaling the bars
+    /// there. That third value is what makes a distant part of a ridge carry
+    /// shorter, thinner bars.
+    pub points: Vec<Vec<f32>>,
+    /// How far a full-volume bar reaches along the normal, as a fraction of
+    /// the output height.
+    pub height: Option<f32>,
+    /// Bar width as a fraction of the output width, before the per-point
+    /// scale is applied.
+    pub width: Option<f32>,
+    /// Flip which side of the path the bars grow toward.
+    pub flip: Option<bool>,
 }
 
 /// Where a circle sits on the output.
