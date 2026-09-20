@@ -35,6 +35,17 @@ input[type=range]{width:130px}
    Either one reflowing its bar resizes the canvas and shifts the view. */
 #count{min-width:132px;text-align:center}
 #selbox[hidden]{display:flex!important;visibility:hidden}
+/* Menus are absolutely positioned, so opening one never reflows a bar and
+   never moves the canvas underneath. */
+.menu{position:relative;display:inline-block}
+.pop{position:absolute;top:calc(100% + 6px);right:0;z-index:5;display:none;min-width:210px;
+     background:#16161c;border:1px solid #33333f;border-radius:8px;padding:8px;
+     box-shadow:0 10px 30px #0008}
+.menu.open .pop{display:flex;flex-direction:column;gap:7px}
+.pop label{justify-content:space-between;gap:10px}
+.pop button{width:100%;text-align:left}
+.pop hr{border:0;border-top:1px solid #26262e;margin:2px 0;width:100%}
+.pop input[type=range]{width:96px}
 </style>
 <header>
   <h1>curve editor</h1>
@@ -44,9 +55,30 @@ input[type=range]{width:130px}
   <span class=hint>click add &middot; drag move &middot; right-click delete &middot; shift+drag angle &middot; paint: drag to trace &middot; wheel zoom &middot; middle-drag pan</span>
   <button id=occbtn>occluder: off</button>
   <button id=paintbtn>paint: off</button>
-  <button id=reset>reset view</button>
-  <button id=undo>undo</button>
-  <button id=clear>clear</button>
+  <div class=menu id=viewmenu>
+    <button data-pop>view &#9662;</button>
+    <div class=pop>
+      <label><input type=checkbox id=showdots checked> handles</label>
+      <label>handle size <input type=range id=dotsize min=2 max=14 step=1 value=5></label>
+      <label><input type=checkbox id=showbars checked> bar preview</label>
+      <label><input type=checkbox id=showocc checked> occluder</label>
+      <label>dim image <input type=range id=dim min=0 max=90 step=5 value=0></label>
+      <hr>
+      <button id=reset>reset view</button>
+    </div>
+  </div>
+  <div class=menu id=editmenu>
+    <button data-pop>edit &#9662;</button>
+    <div class=pop>
+      <button id=undo>undo &nbsp;<span class=key>ctrl+z</span></button>
+      <hr>
+      <label>thin &#949; <input type=range id=thineps min=1 max=30 step=1 value=6></label>
+      <button id=thin>thin points in active list</button>
+      <hr>
+      <button id=clear>clear active list</button>
+      <button id=clearall>clear everything</button>
+    </div>
+  </div>
   <button class=primary id=save>save to config</button>
 </header>
 <div id=wrap><canvas id=c></canvas></div>
@@ -99,6 +131,16 @@ const img=new Image(); let pts=[], occ=[], sel=-1, drag=-1, shift=false, hist=[]
 let occmode=false, paintmode=false, painting=false;
 const list=()=>occmode?occ:pts;
 const $=i=>document.getElementById(i);
+for(const m of document.querySelectorAll('.menu')){
+  m.querySelector('[data-pop]').onclick=e=>{
+    e.stopPropagation();
+    const was=m.classList.contains('open');
+    document.querySelectorAll('.menu').forEach(o=>o.classList.remove('open'));
+    m.classList.toggle('open',!was);
+  };
+  m.querySelector('.pop').onclick=e=>e.stopPropagation();
+}
+addEventListener('click',()=>document.querySelectorAll('.menu').forEach(m=>m.classList.remove('open')));
 // Capped so a long session cannot grow it without bound.
 function pushHist(){hist.push(JSON.stringify({p:pts,o:occ}));if(hist.length>200)hist.shift();}
 img.onload=()=>{c.width=img.naturalWidth;c.height=img.naturalHeight;loadExisting();};
@@ -165,6 +207,8 @@ function clipAboveHorizon(){
 function draw(){
   x.drawImage(img,0,0);
   const alpha=+$('opacity').value/100;
+  const d0=+$('dim').value/100;
+  if(d0>0){x.fillStyle='rgba(16,16,20,'+d0+')';x.fillRect(0,0,c.width,c.height);}
   const d=dense();
   if(d.length>1){
     x.globalAlpha=alpha;
@@ -172,6 +216,7 @@ function draw(){
     d.forEach((q,i)=>i?x.lineTo(q.p[0],q.p[1]):x.moveTo(q.p[0],q.p[1]));x.stroke();
     x.globalAlpha=1;
     // Bar preview at the real sample positions, arc-length spaced.
+    if($('showbars').checked){
     const N=+$('bars').value, reach=(+$('height').value/100)*c.height;
     let acc=[0],tot=0;
     for(let i=1;i<d.length;i++){tot+=Math.hypot(d[i].p[0]-d[i-1].p[0],d[i].p[1]-d[i-1].p[1]);acc.push(tot);}
@@ -200,8 +245,9 @@ function draw(){
       x.beginPath();x.moveTo(px,py);x.lineTo(px+nx*s,py+ny*s);x.stroke();
     }
     if(clipped)x.restore();
+    }
   }
-  if(occ.length>1){
+  if(occ.length>1&&$('showocc').checked){
     x.globalAlpha=alpha;
     x.beginPath();x.moveTo(0,horizonAt(0));
     for(let px=0;px<=c.width;px+=4)x.lineTo(px,horizonAt(px));
@@ -216,13 +262,15 @@ function draw(){
   // you are trying to judge.
   x.globalAlpha=alpha;
   const dot=(p,fill)=>{
-    const r=Math.max(5,c.width/260);
+    const r=+$('dotsize').value*c.width/1600;
     x.beginPath();x.arc(p.x*c.width,p.y*c.height,r,0,7);
     x.fillStyle=fill;x.fill();
     x.strokeStyle='#101014';x.lineWidth=2;x.stroke();
   };
-  pts.forEach((p,i)=>dot(p,!occmode&&i===sel?'#ffd60a':'#ff3b30'));
-  occ.forEach((p,i)=>dot(p,occmode&&i===sel?'#ffd60a':'#30d5c8'));
+  if($('showdots').checked){
+    pts.forEach((p,i)=>dot(p,!occmode&&i===sel?'#ffd60a':'#ff3b30'));
+    occ.forEach((p,i)=>dot(p,occmode&&i===sel?'#ffd60a':'#30d5c8'));
+  }
   x.globalAlpha=1;
   $('count').textContent=pts.length+' pts'+(occ.length?' / '+occ.length+' occ':'');
   emit();
@@ -296,6 +344,38 @@ $('scale').oninput=e=>{if(sel<0)return;pts[sel].s=+e.target.value/100;$('scalev'
 $('angle').oninput=e=>{if(sel<0||!$('useangle').checked)return;pts[sel].a=+e.target.value;$('anglev').textContent=e.target.value;draw();};
 $('useangle').onchange=e=>{if(sel<0)return;pts[sel].a=e.target.checked?+$('angle').value:null;draw();};
 $('opacity').oninput=()=>{$('opacityv').textContent=(+$('opacity').value/100).toFixed(2);draw();};
+for(const id of ['showdots','showbars','showocc']) $(id).onchange=draw;
+for(const id of ['dotsize','dim']) $(id).oninput=draw;
+// Ramer-Douglas-Peucker: a painted stroke lands hundreds of points where a
+// dozen describe the same line, and every one of them is a handle in the way.
+function rdp(list,eps){
+  if(list.length<3)return list;
+  const P=q=>[q.x*c.width,q.y*c.height];
+  const keep=new Array(list.length).fill(false);
+  keep[0]=keep[list.length-1]=true;
+  const stack=[[0,list.length-1]];
+  while(stack.length){
+    const [a,b]=stack.pop();
+    if(b-a<2)continue;
+    const A=P(list[a]),B=P(list[b]);
+    const dx=B[0]-A[0],dy=B[1]-A[1],L=Math.hypot(dx,dy)||1;
+    let worst=-1,wd=0;
+    for(let i=a+1;i<b;i++){
+      const C=P(list[i]);
+      const d=Math.abs(dy*C[0]-dx*C[1]+B[0]*A[1]-B[1]*A[0])/L;
+      if(d>wd){wd=d;worst=i;}
+    }
+    if(wd>eps&&worst>0){keep[worst]=true;stack.push([a,worst],[worst,b]);}
+  }
+  return list.filter((_,i)=>keep[i]);
+}
+$('thin').onclick=()=>{
+  pushHist();
+  const eps=+$('thineps').value;
+  if(occmode)occ=rdp(occ,eps);else pts=rdp(pts,eps);
+  sel=-1;showSel();draw();
+};
+$('clearall').onclick=()=>{pushHist();pts=[];occ=[];sel=-1;showSel();draw();};
 for(const id of ['bars','height','width']) $(id).oninput=()=>{
   $('barsv').textContent=$('bars').value;
   $('heightv').textContent=(+$('height').value/100).toFixed(2);
