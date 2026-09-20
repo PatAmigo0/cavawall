@@ -55,7 +55,7 @@ dependencies = [
 
 [[package]]
 name = "cavawall"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "gl",
  "khronos-egl",

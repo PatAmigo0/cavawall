@@ -21,7 +21,7 @@ terms.
 ## Requirements
 
 - A Wayland compositor with `wlr-layer-shell` (Hyprland, Sway, river, niri)
-- OpenGL 4.3, for compute-era SSBOs
+- OpenGL 4.3 for SSBOs; 4.5 and newer also gets direct state access
 - [cava](https://github.com/karlstav/cava) on `PATH`, at runtime
 
 ## Install

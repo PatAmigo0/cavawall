@@ -596,19 +596,26 @@ fn main() {
         .choose_first_config(egl_display, &ATTRIBUTES)
         .unwrap()
         .unwrap();
-    const CONTEXT_ATTRIBUTES: [i32; 7] = [
-        egl::CONTEXT_MAJOR_VERSION,
-        4,
-        egl::CONTEXT_MINOR_VERSION,
-        6,
-        egl::CONTEXT_OPENGL_PROFILE_MASK,
-        egl::CONTEXT_OPENGL_CORE_PROFILE_BIT,
-        egl::NONE,
-    ];
-
-    let egl_context = egl
-        .create_context(egl_display, egl_config, None, &CONTEXT_ATTRIBUTES)
-        .unwrap();
+    // 4.3 is the floor: the shaders are `#version 430 core` and index SSBOs.
+    // 4.5 adds direct state access, which draw() uses when it is there, so the
+    // higher version is asked for first and 4.3 answers everything else
+    const fn context_attributes(minor: i32) -> [i32; 7] {
+        [
+            egl::CONTEXT_MAJOR_VERSION,
+            4,
+            egl::CONTEXT_MINOR_VERSION,
+            minor,
+            egl::CONTEXT_OPENGL_PROFILE_MASK,
+            egl::CONTEXT_OPENGL_CORE_PROFILE_BIT,
+            egl::NONE,
+        ]
+    }
+    let egl_context = [6, 5, 4, 3]
+        .into_iter()
+        .find_map(|minor| {
+            egl.create_context(egl_display, egl_config, None, &context_attributes(minor)).ok()
+        })
+        .expect("no OpenGL 4.3 core context: cavawall needs SSBOs");
 
     let wl_egl_surface = WlEglSurface::new(surface.id(), 256, 256).unwrap();
     let egl_surface = unsafe {
@@ -906,6 +913,18 @@ fn main() {
             config.bars.opacity.unwrap_or(1.0).clamp(0.0, 1.0),
         );
     }
+    // Direct state access is core from 4.5. The driver decides that, not the
+    // build, so it is read back from the context that was granted
+    let dsa = unsafe {
+        let (mut major, mut minor) = (0, 0);
+        gl::GetIntegerv(gl::MAJOR_VERSION, &raw mut major);
+        gl::GetIntegerv(gl::MINOR_VERSION, &raw mut minor);
+        if debug_enabled() {
+            eprintln!("cavawall: GL {major}.{minor}, direct state access {}",
+                if major > 4 || (major == 4 && minor >= 5) { "on" } else { "off" });
+        }
+        major > 4 || (major == 4 && minor >= 5)
+    };
     let resolution_location =
         unsafe { gl::GetUniformLocation(shader_program, c"Resolution".as_ptr()) };
     let path_scale_location =
@@ -976,6 +995,7 @@ fn main() {
         curve_box: None,
         curve_output: (1, 1),
         resolution_location,
+        dsa,
         matte_color_location,
         path_scale_location,
         path_offset_location,
@@ -1103,6 +1123,8 @@ struct AppState {
     /// is smaller than the output it is on
     curve_output: (u32, u32),
     resolution_location: gl::types::GLint,
+    /// The context is 4.5 or newer, so a buffer can be named in the call
+    dsa: bool,
     /// Kept because the matte tone follows the palette, which a live scheme
     /// can change under us
     matte_color_location: gl::types::GLint,
@@ -1963,15 +1985,26 @@ impl AppState {
             *height = fma(f32::from(u16::from_le_bytes(*sample)), BAR_NDC_SCALE, -1.0);
         }
         unsafe {
-            // The only binding draw() still makes: BufferData writes through
-            // it. Everything else is set once at startup - see the note there
-            gl::BindBuffer(gl::ARRAY_BUFFER, self.height_vbo);
-            gl::BufferData(
-                gl::ARRAY_BUFFER,
-                self.heights_bytes,
-                self.heights.as_ptr().cast(),
-                gl::DYNAMIC_DRAW,
-            );
+            // Respecifying the store orphans it, so the driver hands back a
+            // fresh region and never waits for the GPU to finish reading the
+            // old one. Naming the buffer in the call leaves the frame with no
+            // binding to make; without direct state access it takes one
+            if self.dsa {
+                gl::NamedBufferData(
+                    self.height_vbo,
+                    self.heights_bytes,
+                    self.heights.as_ptr().cast(),
+                    gl::DYNAMIC_DRAW,
+                );
+            } else {
+                gl::BindBuffer(gl::ARRAY_BUFFER, self.height_vbo);
+                gl::BufferData(
+                    gl::ARRAY_BUFFER,
+                    self.heights_bytes,
+                    self.heights.as_ptr().cast(),
+                    gl::DYNAMIC_DRAW,
+                );
+            }
             gl::Clear(gl::COLOR_BUFFER_BIT);
             // Four vertices, once per bar. No index buffer: each instance is
             // its own strip, so there are no shared vertices to index
