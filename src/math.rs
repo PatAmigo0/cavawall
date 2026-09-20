@@ -2,10 +2,9 @@
 
 /// `a * b + c`, as one instruction where the target has FMA
 ///
-/// `mul_add` is a single fused multiply-add with FMA available and a call into
-/// libm without it, which is far slower than the two instructions it replaces.
-/// The package build targets baseline x86-64 deliberately, so the choice is
-/// made at compile time rather than assumed
+/// `mul_add` is a single fused multiply-add where the target has FMA and a
+/// call into libm where it does not, which is far slower than the two
+/// instructions it replaces - so the form is chosen at compile time
 ///
 /// LLVM will not fuse `a * b + c` on its own: fusing rounds once instead of
 /// twice, which changes the result, so it waits to be asked
