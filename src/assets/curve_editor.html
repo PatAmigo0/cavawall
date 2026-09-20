@@ -26,10 +26,12 @@ canvas{max-width:100%;max-height:100%;object-fit:contain;cursor:crosshair;touch-
 #panel{flex:none;display:flex;gap:18px;align-items:center;padding:10px 14px;border-top:1px solid #26262e;flex-wrap:wrap}
 label{display:flex;gap:7px;align-items:center;white-space:nowrap;color:#b9b9c6}
 input[type=range]{width:130px}
+select{background:#1e1e26;color:#e6e6ea;border:1px solid #33333f;border-radius:6px;padding:3px 6px;font:inherit}
 .val{font-family:ui-monospace,monospace;color:#e6e6ea;min-width:42px;display:inline-block}
 #out{width:100%;height:132px;flex:none;background:#0b0b0e;color:#c8c8d4;border:0;border-top:1px solid #26262e;
      font-family:ui-monospace,monospace;font-size:12px;padding:10px 14px;resize:vertical}
 .hint{color:#71717f;font-size:12px}
+.hint2{color:#71717f;font-size:12px;white-space:normal}
 /* The hint is the first thing worth losing when the window cannot hold a
    row: the controls are not. */
 @media (max-width:1100px){.hint{display:none}}
@@ -59,7 +61,7 @@ input[type=range]{width:130px}
   <span class=key id=wpkey>__KEY__</span>
   <span class=pill id=count>0 points</span>
   <span class=spacer></span>
-  <span class=hint>click add &middot; drag move &middot; right-click delete &middot; shift+drag angle &middot; paint: drag to trace &middot; wheel zoom &middot; middle-drag pan</span>
+  <span class=hint>click add &middot; drag move &middot; right-click delete &middot; paint: drag to trace &middot; wheel zoom &middot; middle-drag pan &middot; see keys</span>
   <span class=pill id=pathlabel>path 1/1</span>
   <button id=prevpath title="previous path">&lsaquo;</button>
   <button id=nextpath title="next path">&rsaquo;</button>
@@ -77,6 +79,7 @@ input[type=range]{width:130px}
       <label><input type=checkbox id=showcurve checked> curve line</label>
       <label><input type=checkbox id=showocc checked> occluder</label>
       <label>dim image <input type=range id=dim min=0 max=90 step=5 value=0></label>
+      <label>grab radius <input type=range id=grabr min=3 max=40 step=1 value=10></label>
       <hr>
       <button id=reset>reset view</button>
     </div>
@@ -96,6 +99,20 @@ input[type=range]{width:130px}
       <hr>
       <button id=clear>clear active list</button>
       <button id=clearall>clear everything</button>
+    </div>
+  </div>
+  <div class=menu id=keysmenu>
+    <button data-pop>keys &#9662;</button>
+    <div class=pop>
+      <label>force new point
+        <select id=kcreate><option value=shift>shift</option><option value=ctrl>ctrl</option><option value=alt>alt</option></select>
+      </label>
+      <label>drag to set angle
+        <select id=kangle><option value=alt>alt</option><option value=shift>shift</option><option value=ctrl>ctrl</option></select>
+      </label>
+      <hr>
+      <span class=hint2>left-drag moves a point &middot; right-click deletes one</span>
+      <span class=hint2>middle-drag pans &middot; wheel zooms &middot; ctrl+z undoes</span>
     </div>
   </div>
   <button class=primary id=save>save to config</button>
@@ -151,7 +168,15 @@ const img=new Image();
 let paths=[{pts:[],h:10,w:4,up:false,fl:false}], cur=0;
 let pts=paths[0].pts, occ=[], sel=-1, drag=-1, shift=false, hist=[];
 const cp=()=>paths[cur];
+// Which modifier does what. Kept in the browser so a choice survives a
+// reload; a blocked or private store just means the defaults every time.
+const KEYS={create:'shift',angle:'alt'};
+function held(e,what){
+  const k=KEYS[what];
+  return k==='shift'?e.shiftKey:k==='ctrl'?(e.ctrlKey||e.metaKey):k==='alt'?e.altKey:false;
+}
 const KEY=document.getElementById('wpkey').textContent.trim();
+try{Object.assign(KEYS,JSON.parse(localStorage.getItem('cavawall.keys')||'{}'));}catch(e){}
 // The occluder is a second, independent polyline: the mountain silhouette
 // that bars have to hide behind. It is edited with the same handles, so the
 // mode flag decides which list a click lands in.
@@ -391,12 +416,24 @@ function draw(){
   emit();
 }
 function pos(e){const b=c.getBoundingClientRect();return{x:(e.clientX-b.left)/b.width,y:(e.clientY-b.top)/b.height};}
-function near(p){let bi=-1,bd=1e9;list().forEach((q,i)=>{const d=Math.hypot((q.x-p.x)*c.width,(q.y-p.y)*c.height);if(d<bd){bd=d;bi=i;}});return bd<Math.max(12,c.width/150)?bi:-1;}
+function grabPx(){
+  const r=c.getBoundingClientRect();
+  return +$('grabr').value*(c.width/Math.max(1,r.width));
+}
+function near(p){
+  let bi=-1,bd=1e9;
+  list().forEach((q,i)=>{const d=Math.hypot((q.x-p.x)*c.width,(q.y-p.y)*c.height);if(d<bd){bd=d;bi=i;}});
+  return bd<grabPx()?bi:-1;
+}
 c.addEventListener('pointerdown',e=>{
   // Left button only. Middle pans and right deletes, and both used to fall
   // through to "add a point" here.
   if(e.button!==0)return;
-  const p=pos(e),i=near(p);shift=e.shiftKey;const L=list();
+  const p=pos(e);const L=list();
+  // Forced creation wins over grabbing: on a snapped line the points are
+  // close enough together that there is no gap left to click in.
+  const i=held(e,'create')?-1:near(p);
+  shift=held(e,'angle');
   if(paintmode){
     pushHist();painting=true;sel=-1;showSel();
     L.push({x:p.x,y:p.y,s:1,a:null});L.sort((a,b)=>a.x-b.x);
@@ -604,6 +641,20 @@ for(const id of ['bars','height','width']) $(id).oninput=()=>{
   $('widthv').textContent=(cp().w/1000).toFixed(3);draw();};
 $('upright').onchange=()=>{cp().up=$('upright').checked;draw();};
 $('flip').onchange=()=>{cp().fl=$('flip').checked;draw();};
+for(const [id,what] of [['kcreate','create'],['kangle','angle']]){
+  $(id).value=KEYS[what];
+  $(id).onchange=()=>{
+    KEYS[what]=$(id).value;
+    // Both on one modifier would make every forced point set an angle.
+    const other=what==='create'?'angle':'create';
+    if(KEYS[other]===KEYS[what]){
+      KEYS[other]=['shift','ctrl','alt'].find(k=>k!==KEYS[what]);
+      $(other==='create'?'kcreate':'kangle').value=KEYS[other];
+    }
+    try{localStorage.setItem('cavawall.keys',JSON.stringify(KEYS));}catch(e){}
+  };
+}
+$('grabr').oninput=()=>{};
 $('prevpath').onclick=()=>{cur=(cur+paths.length-1)%paths.length;showPath();};
 $('nextpath').onclick=()=>{cur=(cur+1)%paths.length;showPath();};
 $('addpath').onclick=()=>{
