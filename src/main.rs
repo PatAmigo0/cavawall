@@ -664,6 +664,7 @@ fn main() {
     let mut path_ssbo: u32 = 0;
     let mut width_ssbo: u32 = 0;
     let mut occ_ssbo: u32 = 0;
+    let mut curve_horizon: Vec<f32> = Vec::new();
     // A curve is authored against ONE wallpaper. If the current one has no
     // entry, fall back to bars rather than draw a ridge traced from a
     // different image - which is the whole point of keying them.
@@ -821,7 +822,7 @@ fn main() {
                 // Seeded with a square aspect; configure() rebuilds with the
                 // real one as soon as a surface exists.
                 upload_bars(&curve::build(&curve_paths, bar_count, 1.0), path_ssbo, width_ssbo);
-                let curve_horizon = cfg.occlude.as_ref().map_or_else(Vec::new, |pts| {
+                curve_horizon = cfg.occlude.as_ref().map_or_else(Vec::new, |pts| {
                     let controls: Vec<curve::Control> = pts
                         .iter()
                         .filter(|p| p.len() >= 2)
@@ -957,6 +958,7 @@ fn main() {
         curve_paths: curve_paths.into_boxed_slice(),
         path_ssbo,
         width_ssbo,
+        curve_horizon: curve_horizon.into_boxed_slice(),
         curve_box: None,
         curve_output: (1, 1),
         resolution_location,
@@ -1058,6 +1060,9 @@ struct AppState {
     curve_paths: Box<[curve::PathSpec]>,
     path_ssbo: u32,
     width_ssbo: u32,
+    /// The sampled silhouette, kept so the bounding box can be cut down to
+    /// what is actually visible above it. Empty when the curve declares none.
+    curve_horizon: Box<[f32]>,
     /// Where the curve surface sits on the output, in output pixels:
     /// (left, top, width, height). None means the whole output.
     curve_box: Option<(u32, u32, u32, u32)>,
@@ -1451,11 +1456,38 @@ impl AppState {
         let right = (((x1 + 1.0) * 0.5 * ow) + pad).ceil().clamp(0.0, ow);
         let top = ((1.0 - (y1 + 1.0) * 0.5) * oh - pad).floor().clamp(0.0, oh);
         let bottom = ((1.0 - (y0 + 1.0) * 0.5) * oh + pad).ceil().clamp(0.0, oh);
+        // The occluder cuts the box too: every fragment below the ridge is
+        // discarded, so the surface never has to reach down there. On a
+        // ridgeline that sits high in the frame this is the difference
+        // between a band and a strip.
+        let bottom = match self.horizon_floor(left / ow, right / ow) {
+            Some(h) => bottom.min(((1.0 - h) * oh + pad).ceil().clamp(0.0, oh)),
+            None => bottom,
+        };
         let (w, h) = ((right - left).max(1.0), (bottom - top).max(1.0));
         if w * h > ow * oh * 0.8 {
             return None;
         }
         Some((left as u32, top as u32, w as u32, h as u32))
+    }
+
+    /// The lowest the silhouette drops across `x0..x1`, as a height above the
+    /// bottom of the output, or None when there is no silhouette.
+    ///
+    /// Below this nothing is ever drawn at any x in the range, which is what
+    /// makes it a floor for the surface rather than merely for one column.
+    fn horizon_floor(&self, x0: f32, x1: f32) -> Option<f32> {
+        let n = self.curve_horizon.len();
+        if n < 2 {
+            return None;
+        }
+        let last = n - 1;
+        let lo = (x0.clamp(0.0, 1.0) * last as f32).floor() as usize;
+        let hi = (x1.clamp(0.0, 1.0) * last as f32).ceil() as usize;
+        self.curve_horizon[lo.min(last)..=hi.min(last)]
+            .iter()
+            .copied()
+            .reduce(f32::min)
     }
 
     /// Build a fresh layer surface on `output` and start drawing to it.
