@@ -169,6 +169,35 @@ pub fn resample(
     out
 }
 
+/// NDC bounding box of every bar at full volume: `(min_x, min_y, max_x,
+/// max_y)`.
+///
+/// A bar reaches `reach * scale` along its normal and is `width * scale`
+/// across, so the box is the hull of both ends of every bar. This is what
+/// lets the surface shrink to the path instead of claiming the whole output.
+#[must_use]
+pub fn bounds(samples: &[(Sample, f32)], reach: f32, width: f32) -> (f32, f32, f32, f32) {
+    let (mut x0, mut y0) = (f32::MAX, f32::MAX);
+    let (mut x1, mut y1) = (f32::MIN, f32::MIN);
+    for (s, scale) in samples {
+        let n = s.normal;
+        let t = [-n[1], n[0]];
+        let half = width * scale * 0.5;
+        let tip = [n[0] * reach * scale, n[1] * reach * scale];
+        for base in [[0.0, 0.0], tip] {
+            for side in [-half, half] {
+                let x = s.pos[0] + base[0] + t[0] * side;
+                let y = s.pos[1] + base[1] + t[1] * side;
+                x0 = x0.min(x);
+                y0 = y0.min(y);
+                x1 = x1.max(x);
+                y1 = y1.max(y);
+            }
+        }
+    }
+    if x0 > x1 { (-1.0, -1.0, 1.0, 1.0) } else { (x0, y0, x1, y1) }
+}
+
 /// Resolution of the sampled horizon. 512 buckets across an output is about
 /// four pixels each at 1920, which is finer than a hand-drawn silhouette is.
 pub const HORIZON_BUCKETS: usize = 512;
@@ -350,6 +379,22 @@ mod tests {
             Control { x: 1.0, y: 0.2, scale: 1.0, angle: None },
         ];
         assert!(resample(&plain, 8, false, false, 1.0).iter().all(|(s, _)| s.normal[0] < 0.95));
+    }
+
+    /// A bar standing straight up from the middle of the screen occupies the
+    /// upper half and nothing else - that is the whole point of shrinking the
+    /// surface to it.
+    #[test]
+    fn bounds_cover_bar_and_width() {
+        let samples = vec![(Sample { pos: [0.0, 0.0], normal: [0.0, 1.0] }, 1.0)];
+        let (x0, y0, x1, y1) = bounds(&samples, 0.5, 0.2);
+        assert!((x0 - -0.1).abs() < 1e-6 && (x1 - 0.1).abs() < 1e-6, "width straddles the base");
+        assert!((y0 - 0.0).abs() < 1e-6 && (y1 - 0.5).abs() < 1e-6, "reach sets the top");
+        // The scale multiplies both, and an empty path claims everything
+        // rather than collapsing to a point.
+        let (_, _, _, y1) = bounds(&[(samples[0].0, 2.0)], 0.5, 0.2);
+        assert!((y1 - 1.0).abs() < 1e-6);
+        assert_eq!(bounds(&[], 0.5, 0.2), (-1.0, -1.0, 1.0, 1.0));
     }
 
     /// A flat silhouette occludes at a constant height, and one drawn across

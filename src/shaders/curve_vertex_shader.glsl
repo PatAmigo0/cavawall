@@ -13,6 +13,12 @@ layout(std430, binding = 1) readonly buffer PathSamples {
 // Reach of a full-volume bar and bar width, both NDC, before the per-bar scale.
 uniform float Reach;
 uniform float BarWidth;
+// The surface is the path's bounding box, not the output, so everything above
+// is still computed in the OUTPUT's NDC and mapped in at the end. One affine
+// map covers positions, reach and width alike; identity when the surface is
+// the whole output.
+uniform vec2 PathScale;
+uniform vec2 PathOffset;
 // 0 at the base, 1 at the tip. The fragment stage is the circle's, which
 // indexes the gradient and the alpha ramp by exactly this.
 out float vRadial;
@@ -29,5 +35,5 @@ void main() {
     vec2 p = s.xy
            + t * (corner.x - 0.5) * BarWidth * s.w
            + n * vRadial * Reach * s.w;
-    gl_Position = vec4(p, 0.0, 1.0);
+    gl_Position = vec4(p * PathScale + PathOffset, 0.0, 1.0);
 }
