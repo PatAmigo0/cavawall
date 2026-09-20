@@ -87,6 +87,8 @@ function clampPan(){
 }
 const img=new Image(); let pts=[], sel=-1, drag=-1, shift=false, hist=[];
 const $=i=>document.getElementById(i);
+// Capped so a long session cannot grow it without bound.
+function pushHist(){hist.push(JSON.stringify(pts));if(hist.length>200)hist.shift();}
 img.onload=()=>{c.width=img.naturalWidth;c.height=img.naturalHeight;loadExisting();};
 img.src='/wallpaper';
 
@@ -164,10 +166,12 @@ function draw(){
 function pos(e){const b=c.getBoundingClientRect();return{x:(e.clientX-b.left)/b.width,y:(e.clientY-b.top)/b.height};}
 function near(p){let bi=-1,bd=1e9;pts.forEach((q,i)=>{const d=Math.hypot((q.x-p.x)*c.width,(q.y-p.y)*c.height);if(d<bd){bd=d;bi=i;}});return bd<Math.max(12,c.width/150)?bi:-1;}
 c.addEventListener('pointerdown',e=>{
-  if(e.button===2)return;
+  // Left button only. Middle pans and right deletes, and both used to fall
+  // through to "add a point" here.
+  if(e.button!==0)return;
   const p=pos(e),i=near(p);shift=e.shiftKey;
-  if(i>=0){sel=drag=i;showSel();}
-  else{hist.push(JSON.stringify(pts));
+  if(i>=0){pushHist();sel=drag=i;showSel();}
+  else{pushHist();
        // Keep the list ordered along x so the spline never doubles back.
        pts.push({x:p.x,y:p.y,s:1,a:null});pts.sort((a,b)=>a.x-b.x);
        sel=pts.findIndex(q=>q.x===p.x&&q.y===p.y);drag=sel;showSel();}
@@ -199,7 +203,7 @@ c.addEventListener('pointermove',e=>{
 c.addEventListener('pointerup',e=>{if(e.button===1)panning=null;});
 $('reset').onclick=()=>{zoom=1;panx=pany=0;applyView();};
 c.addEventListener('contextmenu',e=>{e.preventDefault();const i=near(pos(e));
-  if(i>=0){hist.push(JSON.stringify(pts));pts.splice(i,1);sel=-1;showSel();draw();}});
+  if(i>=0){pushHist();pts.splice(i,1);sel=-1;showSel();draw();}});
 function showSel(){
   const b=$('selbox');
   if(sel<0){b.style.display='none';return;}
@@ -216,8 +220,17 @@ for(const id of ['bars','height','width']) $(id).oninput=()=>{
   $('heightv').textContent=(+$('height').value/100).toFixed(2);
   $('widthv').textContent=(+$('width').value/1000).toFixed(3);draw();};
 for(const id of ['upright','flip']) $(id).onchange=draw;
-$('undo').onclick=()=>{const h=hist.pop();if(h){pts=JSON.parse(h);sel=-1;showSel();draw();}};
-$('clear').onclick=()=>{hist.push(JSON.stringify(pts));pts=[];sel=-1;showSel();draw();};
+function undo(){const h=hist.pop();if(h){pts=JSON.parse(h);sel=-1;showSel();draw();}}
+$('undo').onclick=undo;
+// Ctrl+Z anywhere on the page, not just with the canvas focused - the canvas
+// takes no keyboard focus of its own.
+addEventListener('keydown',e=>{
+  if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='z'&&e.target.tagName!=='TEXTAREA'){
+    e.preventDefault();undo();
+  }
+});
+// Every mutation pushes history first, so undo has something to pop.
+$('clear').onclick=()=>{pushHist();pts=[];sel=-1;showSel();draw();};
 function emit(){
   const rows=pts.map(p=>{
     const v=[p.x.toFixed(4),p.y.toFixed(4),p.s.toFixed(2)];
