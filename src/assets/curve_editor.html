@@ -74,6 +74,7 @@ input[type=range]{width:130px}
       <label>handle size <input type=range id=dotsize min=1 max=14 step=1 value=5></label>
       <label>line width <input type=range id=linew min=1 max=12 step=1 value=3></label>
       <label><input type=checkbox id=showbars checked> bar preview</label>
+      <label><input type=checkbox id=showcurve checked> curve line</label>
       <label><input type=checkbox id=showocc checked> occluder</label>
       <label>dim image <input type=range id=dim min=0 max=90 step=5 value=0></label>
       <hr>
@@ -298,7 +299,7 @@ function draw(){
   const share=alloc(usable.map(i=>pathLen(ds[i])),+$('bars').value);
   const counts=new Array(ds.length).fill(0);
   usable.forEach((i,k)=>{counts[i]=share[k];});
-  ds.forEach((d,i)=>{
+  if($('showcurve').checked) ds.forEach((d,i)=>{
     if(d.length<2)return;
     // The path you are not editing is still drawn, just quietly.
     x.globalAlpha=alpha*(i===cur?1:0.35);
@@ -371,14 +372,19 @@ function draw(){
     x.strokeStyle='#101014';x.lineWidth=2;x.stroke();
   };
   if($('showdots').checked){
-    paths.forEach((P,i)=>{
-      if(i===cur)return;
-      x.globalAlpha=alpha*0.35;
-      P.pts.forEach(q=>dot(q,'#ff3b30'));
-    });
-    x.globalAlpha=alpha;
-    pts.forEach((p,i)=>dot(p,!occmode&&i===sel?'#ffd60a':'#ff3b30'));
-    occ.forEach((p,i)=>dot(p,occmode&&i===sel?'#ffd60a':'#30d5c8'));
+    if($('showcurve').checked){
+      paths.forEach((P,i)=>{
+        if(i===cur)return;
+        x.globalAlpha=alpha*0.35;
+        P.pts.forEach(q=>dot(q,'#ff3b30'));
+      });
+      x.globalAlpha=alpha;
+      pts.forEach((p,i)=>dot(p,!occmode&&i===sel?'#ffd60a':'#ff3b30'));
+    }
+    if($('showocc').checked){
+      x.globalAlpha=alpha;
+      occ.forEach((p,i)=>dot(p,occmode&&i===sel?'#ffd60a':'#30d5c8'));
+    }
   }
   x.globalAlpha=1;
   $('count').textContent=pts.length+' pts'+(occ.length?' / '+occ.length+' occ':'');
@@ -453,7 +459,7 @@ $('scale').oninput=e=>{if(sel<0)return;pts[sel].s=+e.target.value/100;$('scalev'
 $('angle').oninput=e=>{if(sel<0||!$('useangle').checked)return;pts[sel].a=+e.target.value;$('anglev').textContent=e.target.value;draw();};
 $('useangle').onchange=e=>{if(sel<0)return;pts[sel].a=e.target.checked?+$('angle').value:null;draw();};
 $('opacity').oninput=()=>{$('opacityv').textContent=(+$('opacity').value/100).toFixed(2);draw();};
-for(const id of ['showdots','showbars','showocc']) $(id).onchange=draw;
+for(const id of ['showdots','showbars','showocc','showcurve']) $(id).onchange=draw;
 for(const id of ['dotsize','dim','linew']) $(id).oninput=draw;
 // Ramer-Douglas-Peucker: a painted stroke lands hundreds of points where a
 // dozen describe the same line, and every one of them is a handle in the way.
