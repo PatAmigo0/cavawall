@@ -173,10 +173,9 @@ use std::{
     time::Duration,
 };
 
-pub mod app_config;
-mod curve;
+use cavawall::{app_config, curve};
 use app_config::*;
-pub mod scheme;
+use cavawall::scheme;
 pub mod cli_help;
 use cli_help::*;
 use std::collections::HashMap;
