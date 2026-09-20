@@ -58,8 +58,35 @@ conflicts. Publishing both is normal; they conflict with each other by name.
 
 ## The one trap
 
-This checkout sets `-C target-cpu=native` in `.cargo/config.toml`. A package
-built that way runs on the machine that built it and crashes with an illegal
-instruction on anyone else's. The PKGBUILD exports `RUSTFLAGS`, which takes
-precedence over that file, and appends `-C target-cpu=x86-64` so a later flag
-wins over an earlier one. Do not remove it.
+This checkout sets `-C target-cpu=native` in `.cargo/config.toml`. Left alone
+it leaks into the package, which then runs on the machine that built it and
+dies with an illegal instruction anywhere else. `RUSTFLAGS` in the environment
+takes precedence over that file, so the PKGBUILD sets it. Do not remove that
+line.
+
+It sets it with `${RUSTFLAGS:-...}`, so `makepkg.conf` wins wherever it has an
+opinion. That matters: a distribution that builds on the target machine sets
+`-C target-cpu=native` or a microarchitecture level there, and overriding it
+would throw the distribution's own tuning away. The baseline applies only when
+nothing else is configured.
+
+### Microarchitecture levels
+
+`x86-64` is the 2003 baseline. `-v2` adds SSE4 and POPCNT (2008 hardware),
+`-v3` adds AVX2, BMI2 and FMA (2013), `-v4` adds AVX-512. A binary built for
+a level refuses to start on anything below it, which is why a repository that
+ships prebuilt packages to unknown machines builds the baseline, and a
+distribution that builds locally, or ships a separate `-v3` repository, does
+not have that constraint.
+
+Check what a machine supports with:
+
+```bash
+/lib/ld-linux-x86-64.so.2 --help | grep x86-64-v
+```
+
+Choosing a level at BUILD time is all-or-nothing. Choosing at RUN time is a
+different technique: `is_x86_feature_detected!` plus `#[target_feature]`
+functions, with a dispatch decided once at startup. It costs a duplicated
+implementation per level and is worth it only for a hot loop that vectorises -
+which is a measurement, not an assumption.

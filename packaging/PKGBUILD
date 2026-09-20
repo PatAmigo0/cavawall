@@ -28,18 +28,22 @@ build() {
   cd "$pkgname"
   export RUSTUP_TOOLCHAIN=stable
   export CARGO_TARGET_DIR=target
-  # The checkout's .cargo/config.toml asks for target-cpu=native, which a
-  # package must not do: it would run on the build machine and crash on
-  # anyone else's. RUSTFLAGS in the environment takes precedence over that
-  # file, and a later -C target-cpu wins over an earlier one.
-  export RUSTFLAGS="${RUSTFLAGS:-} -C target-cpu=x86-64"
+  # .cargo/config.toml in the checkout asks for target-cpu=native, which
+  # would leak into the package. RUSTFLAGS in the environment takes
+  # precedence over that file, so setting it here is what stops the leak.
+  #
+  # makepkg.conf wins when it has an opinion: a distribution that builds on
+  # the target machine sets native or a microarchitecture level there, and
+  # that choice is the packager's. The baseline is only the fallback for a
+  # makepkg.conf that says nothing, where the alternative is native.
+  export RUSTFLAGS="${RUSTFLAGS:--C target-cpu=x86-64}"
   cargo build --frozen --release --all-features
 }
 
 check() {
   cd "$pkgname"
   export RUSTUP_TOOLCHAIN=stable
-  export RUSTFLAGS="${RUSTFLAGS:-} -C target-cpu=x86-64"
+  export RUSTFLAGS="${RUSTFLAGS:--C target-cpu=x86-64}"
   cargo test --frozen --release
 }
 
