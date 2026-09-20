@@ -31,14 +31,19 @@ input[type=range]{width:130px}
      font-family:ui-monospace,monospace;font-size:12px;padding:10px 14px;resize:vertical}
 .hint{color:#71717f;font-size:12px}
 .pill{background:#1a1a22;border:1px solid #2c2c36;border-radius:999px;padding:2px 9px;font-size:12px}
+/* Fixed width, and the selection controls only hide - they keep their box.
+   Either one reflowing its bar resizes the canvas and shifts the view. */
+#count{min-width:132px;text-align:center}
+#selbox[hidden]{display:flex!important;visibility:hidden}
 </style>
 <header>
   <h1>curve editor</h1>
   <span class=key>__KEY__</span>
   <span class=pill id=count>0 points</span>
   <span class=spacer></span>
-  <span class=hint>click add &middot; drag move &middot; right-click delete &middot; shift+drag angle &middot; wheel zoom &middot; middle-drag pan</span>
+  <span class=hint>click add &middot; drag move &middot; right-click delete &middot; shift+drag angle &middot; paint: drag to trace &middot; wheel zoom &middot; middle-drag pan</span>
   <button id=occbtn>occluder: off</button>
+  <button id=paintbtn>paint: off</button>
   <button id=reset>reset view</button>
   <button id=undo>undo</button>
   <button id=clear>clear</button>
@@ -53,7 +58,7 @@ input[type=range]{width:130px}
   <label><input type=checkbox id=upright> upright</label>
   <label><input type=checkbox id=flip> flip</label>
   <span class=spacer></span>
-  <label id=selbox style=display:none>
+  <label id=selbox hidden>
     point <span class=val id=selidx>-</span>
     scale <input type=range id=scale min=10 max=150 step=5 value=100><span class=val id=scalev>1.00</span>
     <label><input type=checkbox id=useangle> angle</label>
@@ -91,7 +96,7 @@ const img=new Image(); let pts=[], occ=[], sel=-1, drag=-1, shift=false, hist=[]
 // The occluder is a second, independent polyline: the mountain silhouette
 // that bars have to hide behind. It is edited with the same handles, so the
 // mode flag decides which list a click lands in.
-let occmode=false;
+let occmode=false, paintmode=false, painting=false;
 const list=()=>occmode?occ:pts;
 const $=i=>document.getElementById(i);
 // Capped so a long session cannot grow it without bound.
@@ -197,6 +202,7 @@ function draw(){
     if(clipped)x.restore();
   }
   if(occ.length>1){
+    x.globalAlpha=alpha;
     x.beginPath();x.moveTo(0,horizonAt(0));
     for(let px=0;px<=c.width;px+=4)x.lineTo(px,horizonAt(px));
     x.lineTo(c.width,c.height);x.lineTo(0,c.height);x.closePath();
@@ -204,6 +210,7 @@ function draw(){
     x.strokeStyle='#30d5c8';x.lineWidth=Math.max(2,c.width/900);
     x.beginPath();x.moveTo(0,horizonAt(0));
     for(let px=0;px<=c.width;px+=4)x.lineTo(px,horizonAt(px));x.stroke();
+    x.globalAlpha=1;
   }
   // Handles fade with the curve so they never sit on top of the landing spot
   // you are trying to judge.
@@ -217,7 +224,7 @@ function draw(){
   pts.forEach((p,i)=>dot(p,!occmode&&i===sel?'#ffd60a':'#ff3b30'));
   occ.forEach((p,i)=>dot(p,occmode&&i===sel?'#ffd60a':'#30d5c8'));
   x.globalAlpha=1;
-  $('count').textContent=pts.length+' points'+(occ.length?' / '+occ.length+' occluder':'');
+  $('count').textContent=pts.length+' pts'+(occ.length?' / '+occ.length+' occ':'');
   emit();
 }
 function pos(e){const b=c.getBoundingClientRect();return{x:(e.clientX-b.left)/b.width,y:(e.clientY-b.top)/b.height};}
@@ -227,6 +234,11 @@ c.addEventListener('pointerdown',e=>{
   // through to "add a point" here.
   if(e.button!==0)return;
   const p=pos(e),i=near(p);shift=e.shiftKey;const L=list();
+  if(paintmode){
+    pushHist();painting=true;sel=-1;showSel();
+    L.push({x:p.x,y:p.y,s:1,a:null});L.sort((a,b)=>a.x-b.x);
+    c.setPointerCapture(e.pointerId);draw();return;
+  }
   if(i>=0){pushHist();sel=drag=i;showSel();}
   else{pushHist();
        // Keep the list ordered along x so the spline never doubles back.
@@ -235,6 +247,17 @@ c.addEventListener('pointerdown',e=>{
   c.setPointerCapture(e.pointerId);draw();
 });
 c.addEventListener('pointermove',e=>{
+  if(painting){
+    const p=pos(e),L=list(),last=L[L.length-1];
+    // One point per step along the stroke, not one per mouse event: a slow
+    // drag would otherwise bury the list in near-identical points.
+    const step=Math.max(6,c.width/160);
+    if(!last||Math.hypot((p.x-last.x)*c.width,(p.y-last.y)*c.height)>=step){
+      L.push({x:Math.min(1,Math.max(0,p.x)),y:Math.min(1,Math.max(0,p.y)),s:1,a:null});
+      L.sort((a,b)=>a.x-b.x);draw();
+    }
+    return;
+  }
   if(drag<0)return;const p=pos(e);const L=list();
   if(shift&&!occmode){const q=L[drag];const dx=p.x-q.x,dy=p.y-q.y;
     q.a=Math.round(Math.atan2(dx*c.width,-dy*c.height)*180/Math.PI);
@@ -243,7 +266,7 @@ c.addEventListener('pointermove',e=>{
        const held=L[drag];L.sort((a,b)=>a.x-b.x);drag=L.indexOf(held);sel=drag;}
   draw();
 });
-c.addEventListener('pointerup',()=>{drag=-1;shift=false;});
+c.addEventListener('pointerup',()=>{drag=-1;shift=false;painting=false;});
 // Wheel zooms about the cursor; middle button pans.
 document.getElementById('wrap').addEventListener('wheel',e=>{
   e.preventDefault(); atCursor(e,z=>e.deltaY<0?z*1.15:z/1.15);
@@ -263,8 +286,8 @@ c.addEventListener('contextmenu',e=>{e.preventDefault();const i=near(pos(e));
   if(i>=0){pushHist();list().splice(i,1);sel=-1;showSel();draw();}});
 function showSel(){
   const b=$('selbox');
-  if(sel<0||occmode){b.style.display='none';return;}
-  b.style.display='flex';$('selidx').textContent=sel;
+  if(sel<0||occmode){b.hidden=true;return;}
+  b.hidden=false;$('selidx').textContent=sel;
   $('scale').value=Math.round(pts[sel].s*100);$('scalev').textContent=pts[sel].s.toFixed(2);
   $('useangle').checked=pts[sel].a!=null;
   $('angle').value=pts[sel].a??0;$('anglev').textContent=pts[sel].a??0;
@@ -289,6 +312,10 @@ addEventListener('keydown',e=>{
 });
 // Every mutation pushes history first, so undo has something to pop.
 $('clear').onclick=()=>{pushHist();if(occmode)occ=[];else pts=[];sel=-1;showSel();draw();};
+$('paintbtn').onclick=()=>{paintmode=!paintmode;
+  $('paintbtn').textContent='paint: '+(paintmode?'ON':'off');
+  $('paintbtn').classList.toggle('primary',paintmode);
+  c.style.cursor=paintmode?'cell':'crosshair';};
 $('occbtn').onclick=()=>{occmode=!occmode;sel=-1;
   $('occbtn').textContent='occluder: '+(occmode?'ON':'off');
   $('occbtn').classList.toggle('primary',occmode);showSel();draw();};
