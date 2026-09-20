@@ -5,7 +5,18 @@ over your wallpaper, as a layer-shell surface behind your windows.
 
 A fork of [rs-pro0/wallpaper-cava](https://github.com/rs-pro0/wallpaper-cava),
 which did all the hard work. Original by
-[rs-pro0](https://github.com/rs-pro0). MIT, as upstream.
+[rs-pro0](https://github.com/rs-pro0).
+
+## License
+
+GPL-3.0-or-later ([`LICENSE`](LICENSE)). Use it, change it, sell it; ship the
+source under the same terms if you pass it on, so it cannot be folded into
+something closed.
+
+Upstream was MIT and its notice is kept in [`LICENSE.MIT`](LICENSE.MIT),
+covering the code inherited from it. Releases of this repository up to and
+including `61be695` were published under MIT and stay available under those
+terms.
 
 ## Requirements
 
