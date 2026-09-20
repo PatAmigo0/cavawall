@@ -1690,18 +1690,18 @@ impl AppState {
 
 }
 
-/// Upload every bar: one vec4 each for base, angle and reach, one float each
-/// for width
+/// Upload every bar: one vec4 each for base and unit normal, one vec2 each
+/// for width and reach
 ///
-/// Rewritten whole rather than updated in place - it changes only when the
+/// Rewritten whole, since it changes only when the
 /// output's shape does, which is a monitor change, not a frame
 ///
 /// # Safety
 /// A GL context must be current and both buffers must already exist
 unsafe fn upload_bars(bars: &[curve::Bar], path_ssbo: u32, width_ssbo: u32) {
     let packed: Vec<[f32; 4]> =
-        bars.iter().map(|b| [b.pos[0], b.pos[1], b.angle, b.reach]).collect();
-    let widths: Vec<f32> = bars.iter().map(|b| b.width).collect();
+        bars.iter().map(|b| [b.pos[0], b.pos[1], b.normal[0], b.normal[1]]).collect();
+    let widths: Vec<[f32; 2]> = bars.iter().map(|b| [b.width, b.reach]).collect();
     // SAFETY: the caller guarantees a current context and live buffers; both
     // are only ever rewritten here, each bound to its own binding point
     unsafe {
