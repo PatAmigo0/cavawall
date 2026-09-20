@@ -208,8 +208,41 @@ struct CircleGeom {
     inner_radius: f32,
     inner_alpha: f32,
     outer_alpha: f32,
-    /// Logical pixels from centre, positive right and down.
-    offset: (i32, i32),
+    anchor: CircleAnchor,
+    /// Distance from the anchored edges, logical pixels.
+    margin: (u32, u32),
+}
+
+impl CircleGeom {
+    /// Top and left margins that put a `d`-wide circle where `anchor` says, on
+    /// an output `w` x `h`. Both are what `set_margin` wants alongside an
+    /// `Anchor::TOP | Anchor::LEFT` surface.
+    ///
+    /// Centring is done here rather than by leaving the surface unanchored so
+    /// that every anchor takes the same path - an unanchored layer surface is
+    /// centred by the compositor, which is one more behaviour to reason about
+    /// for no gain.
+    fn margins_for(&self, d: u32, w: u32, h: u32) -> (i32, i32) {
+        let (mx, my) = (self.margin.0 as i32, self.margin.1 as i32);
+        let (free_w, free_h) = (w.saturating_sub(d) as i32, h.saturating_sub(d) as i32);
+        let centre_x = free_w / 2;
+        let centre_y = free_h / 2;
+        let (left, top) = match self.anchor {
+            CircleAnchor::Center => (centre_x, centre_y),
+            CircleAnchor::Top => (centre_x, my),
+            CircleAnchor::Bottom => (centre_x, free_h - my),
+            CircleAnchor::Left => (mx, centre_y),
+            CircleAnchor::Right => (free_w - mx, centre_y),
+            CircleAnchor::TopLeft => (mx, my),
+            CircleAnchor::TopRight => (free_w - mx, my),
+            CircleAnchor::BottomLeft => (mx, free_h - my),
+            CircleAnchor::BottomRight => (free_w - mx, free_h - my),
+        };
+        // A margin larger than the free space would push the surface off the
+        // output, where the compositor clips it and the circle silently
+        // half-disappears.
+        (top.clamp(0, free_h), left.clamp(0, free_w))
+    }
 }
 
 impl CircleGeom {
@@ -222,9 +255,10 @@ impl CircleGeom {
             inner_radius: c.and_then(|c| c.inner_radius).unwrap_or(0.35).clamp(0.0, 0.95),
             inner_alpha: c.and_then(|c| c.inner_alpha).unwrap_or(1.0).clamp(0.0, 1.0),
             outer_alpha: c.and_then(|c| c.outer_alpha).unwrap_or(1.0).clamp(0.0, 1.0),
-            offset: (
-                c.and_then(|c| c.offset_x).unwrap_or(0),
-                c.and_then(|c| c.offset_y).unwrap_or(0),
+            anchor: c.and_then(|c| c.anchor).unwrap_or_default(),
+            margin: (
+                c.and_then(|c| c.margin_x).unwrap_or(0),
+                c.and_then(|c| c.margin_y).unwrap_or(0),
             ),
         }
     }
@@ -1324,11 +1358,7 @@ impl AppState {
             // band favours this even more strongly.
             Mode::Circle => {
                 let d = self.circle.diameter.min(self.width).min(self.height).max(1);
-                // saturating: d is clamped to both dimensions above, but the
-                // subtraction is unsigned and a future change to that clamp
-                // would wrap rather than fail.
-                let top = (self.height.saturating_sub(d) / 2) as i32 + self.circle.offset.1;
-                let left = (self.width.saturating_sub(d) / 2) as i32 + self.circle.offset.0;
+                let (top, left) = self.circle.margins_for(d, self.width, self.height);
                 self.layer_surface.set_size(d, d);
                 self.layer_surface.set_anchor(Anchor::TOP | Anchor::LEFT);
                 self.layer_surface.set_margin(top, 0, 0, left);
@@ -1870,8 +1900,9 @@ mod tests {
             inner_radius: Some(2.5),
             inner_alpha: Some(-1.0),
             outer_alpha: Some(9.0),
-            offset_x: None,
-            offset_y: None,
+            anchor: None,
+            margin_x: None,
+            margin_y: None,
         };
         let g = CircleGeom::from_config(Some(&wild));
         assert_eq!(g.diameter, 16, "diameter floored");
@@ -1880,8 +1911,35 @@ mod tests {
         assert_eq!(g.outer_alpha, 1.0);
 
         let d = CircleGeom::from_config(None);
-        assert_eq!(d.offset, (0, 0), "no section means centred");
+        assert_eq!(d.anchor, CircleAnchor::Center, "no section means centred");
+        assert_eq!(d.margin, (0, 0));
         assert!(d.inner_radius > 0.0 && d.inner_radius < 1.0);
+    }
+
+    /// Placement is the one part a screenshot checks badly: a circle 20px off
+    /// still looks fine, and only looks wrong on the other machine.
+    #[test]
+    fn circle_anchors_land_where_they_say() {
+        let geom = |a: CircleAnchor, mx, my| CircleGeom {
+            diameter: 300,
+            inner_radius: 0.35,
+            inner_alpha: 1.0,
+            outer_alpha: 1.0,
+            anchor: a,
+            margin: (mx, my),
+        };
+        // 1920x1080 output, 300px circle: 1620 and 780 of free space.
+        let (w, h, d) = (1920, 1080, 300);
+        assert_eq!(geom(CircleAnchor::Center, 0, 0).margins_for(d, w, h), (390, 810));
+        assert_eq!(geom(CircleAnchor::TopLeft, 40, 60).margins_for(d, w, h), (60, 40));
+        assert_eq!(geom(CircleAnchor::TopRight, 40, 60).margins_for(d, w, h), (60, 1580));
+        assert_eq!(geom(CircleAnchor::BottomRight, 40, 60).margins_for(d, w, h), (720, 1580));
+        // Anchors that centre one axis ignore that axis's margin.
+        assert_eq!(geom(CircleAnchor::Top, 999, 25).margins_for(d, w, h), (25, 810));
+        assert_eq!(geom(CircleAnchor::Left, 25, 999).margins_for(d, w, h), (390, 25));
+        // A margin bigger than the output cannot push it off-screen.
+        let far = geom(CircleAnchor::TopLeft, 9999, 9999).margins_for(d, w, h);
+        assert_eq!(far, (780, 1620), "clamped to the free space");
     }
 
     /// The vertex shader's own placement, replicated: it is the only consumer

@@ -27,6 +27,26 @@ pub enum Mode {
     Circle,
 }
 
+/// Where a circle sits on the output.
+///
+/// Anchor plus margin rather than an offset from the centre: an offset is a
+/// pixel count that means something different on every panel, and this repo
+/// runs on more than one. "top-right, 80px in" survives a resolution change.
+#[derive(Serialize, Deserialize, Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CircleAnchor {
+    #[default]
+    Center,
+    Top,
+    Bottom,
+    Left,
+    Right,
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
 /// Geometry and shading for `Mode::Circle`.
 ///
 /// Every field is optional so the section can be added a key at a time, and so
@@ -42,9 +62,13 @@ pub struct CircleConfig {
     pub inner_alpha: Option<f32>,
     /// Alpha multiplier at a full-volume bar's tip.
     pub outer_alpha: Option<f32>,
-    /// Offset from the centre in logical pixels, positive right and down.
-    pub offset_x: Option<i32>,
-    pub offset_y: Option<i32>,
+    /// Which point of the output the circle is pinned to.
+    pub anchor: Option<CircleAnchor>,
+    /// Distance from the anchored edges, logical pixels. Ignored on an axis
+    /// the anchor centres - "top" centres horizontally, so margin_x does
+    /// nothing there.
+    pub margin_x: Option<u32>,
+    pub margin_y: Option<u32>,
 }
 
 /// What to take from Caelestia's live state rather than from this file.
