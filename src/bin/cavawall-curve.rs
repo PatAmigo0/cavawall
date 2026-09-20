@@ -1,13 +1,13 @@
-//! Trace a curve over the current wallpaper and write it into cavawall's config.
+//! Trace a curve over the current wallpaper and write it into cavawall's config
 //!
 //! A separate binary on purpose. cavawall's argv must stay exactly `[binary]` -
 //! the launcher, cavawall-theme and fullscreen-watch all identify the process
 //! by an exact match, so a `--edit-curve` flag would have broken all three at
-//! once. This ships and installs alongside it and touches none of that.
+//! once. This ships and installs alongside it and touches none of that
 //!
 //! The UI is a page served to the browser rather than a window: clicking points
 //! on an image is what a browser is already good at, and cavawall has no input
-//! region - its layer surface is deliberately click-through.
+//! region - its layer surface is deliberately click-through
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -19,7 +19,7 @@ const PAGE: &str = include_str!("../assets/curve_editor.html");
 
 fn main() {
     let Some(wallpaper) = curve::current_wallpaper().filter(|p| p.is_file()) else {
-        eprintln!("cavawall-curve: no current wallpaper in Caelestia's state");
+        eprintln!("cavawall-curve: no current wallpaper in the shell's state");
         std::process::exit(1);
     };
     let Some(key) = curve::content_key(&wallpaper) else {
@@ -35,13 +35,13 @@ fn main() {
         }
     };
     // Port 0 means the kernel picks one, so two runs never collide and nothing
-    // has to guess whether a fixed port is free.
+    // has to guess whether a fixed port is free
     let port = listener.local_addr().map(|a| a.port()).unwrap_or(0);
     let url = format!("http://127.0.0.1:{port}/");
     println!("cavawall-curve: editing {}", wallpaper.display());
     println!("cavawall-curve: key {key}");
     println!("cavawall-curve: open {url}");
-    // Best effort. A headless run still prints the URL above.
+    // Best effort. A headless run still prints the URL above
     let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
 
     println!("cavawall-curve: ctrl-c when finished");
@@ -52,7 +52,7 @@ fn main() {
     }
 }
 
-/// Serve one request. Breaking ends the process, which is what Save does.
+/// Serve one request. Breaking ends the process, which is what Save does
 fn handle(mut s: TcpStream, wallpaper: &PathBuf, key: &str) -> std::ops::ControlFlow<()> {
     let mut reader = BufReader::new(match s.try_clone() {
         Ok(c) => c,
@@ -65,7 +65,7 @@ fn handle(mut s: TcpStream, wallpaper: &PathBuf, key: &str) -> std::ops::Control
     let mut parts = request.split_whitespace();
     let (method, path) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
 
-    // Headers, only for Content-Length: the body cannot be read without it.
+    // Headers, only for Content-Length: the body cannot be read without it
     let mut len = 0usize;
     loop {
         let mut line = String::new();
@@ -96,7 +96,7 @@ fn handle(mut s: TcpStream, wallpaper: &PathBuf, key: &str) -> std::ops::Control
         },
         ("GET", "/existing") => {
             // Hand back whatever block is already in the config so an edit
-            // starts from the current curve rather than a blank image.
+            // starts from the current curve rather than a blank image
             let body = existing_block(key).unwrap_or_default();
             reply(&mut s, "200 OK", "text/plain; charset=utf-8", body.as_bytes());
         }
@@ -114,7 +114,7 @@ fn handle(mut s: TcpStream, wallpaper: &PathBuf, key: &str) -> std::ops::Control
                     // re-read, so a saved curve does nothing until cavawall
                     // restarts. Through the launcher, never the binary: it
                     // holds the flock and reaps the stale instance, and
-                    // starting the binary directly stacks a second layer.
+                    // starting the binary directly stacks a second layer
                     match std::process::Command::new("cavawall-launch").spawn() {
                         Ok(_) => println!("cavawall-curve: restarted cavawall"),
                         Err(e) => eprintln!("cavawall-curve: run cavawall-launch yourself: {e}"),
@@ -124,7 +124,7 @@ fn handle(mut s: TcpStream, wallpaper: &PathBuf, key: &str) -> std::ops::Control
                     // the connection close under the client, which made fetch
                     // reject on a save that had succeeded - and the page then
                     // could not tell that apart from a real failure. Staying
-                    // up also makes save/look/adjust/save the normal loop.
+                    // up also makes save/look/adjust/save the normal loop
                 }
                 Err(e) => {
                     eprintln!("cavawall-curve: save failed: {e}");
@@ -155,12 +155,12 @@ fn config_path() -> PathBuf {
         .join("cavawall/config.toml")
 }
 
-/// Where this key's block starts and ends in `text`, as byte offsets into it.
+/// Where this key's block starts and ends in `text`, as byte offsets into it
 ///
 /// The end is the next section header at column 0 that is NOT one of this
 /// curve's own sub-tables: `[[curves.<key>.path]]` blocks belong to the block
 /// and stopping at the first `\n[` would cut every path but the first out of
-/// it - and then write the rest of the config away.
+/// it - and then write the rest of the config away
 fn block_span(text: &str, key: &str) -> Option<(usize, usize)> {
     let header = format!("[curves.{key}]");
     let start = text.find(&header)?;
@@ -179,7 +179,7 @@ fn block_span(text: &str, key: &str) -> Option<(usize, usize)> {
     Some((start, end))
 }
 
-/// The `[curves.<key>]` block currently in the config, if any.
+/// The `[curves.<key>]` block currently in the config, if any
 fn existing_block(key: &str) -> Option<String> {
     let text = std::fs::read_to_string(config_path()).ok()?;
     let (start, end) = block_span(&text, key)?;
@@ -188,7 +188,7 @@ fn existing_block(key: &str) -> Option<String> {
 }
 
 /// Replace this key's block, or append one. Everything else is left byte for
-/// byte as it was - this file is hand-written and full of comments.
+/// byte as it was - this file is hand-written and full of comments
 fn write_block(key: &str, block: &str) -> Result<PathBuf, String> {
     let path = config_path();
     let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
@@ -201,7 +201,7 @@ fn write_block(key: &str, block: &str) -> Result<PathBuf, String> {
     };
 
     // Written via a temp file in the same directory and renamed: a half-written
-    // config is one cavawall refuses to start on.
+    // config is one cavawall refuses to start on
     let tmp = path.with_extension("toml.tmp");
     std::fs::write(&tmp, updated).map_err(|e| e.to_string())?;
     std::fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
@@ -214,7 +214,7 @@ mod tests {
 
     /// The block ends at the next foreign section, and a curve's own path
     /// sub-tables are not foreign. Getting this wrong does not corrupt one
-    /// curve - it writes the entire rest of the config away.
+    /// curve - it writes the entire rest of the config away
     #[test]
     fn a_block_keeps_its_own_path_tables() {
         let text = "\
@@ -238,10 +238,10 @@ bars = 12
         assert_eq!(block.matches("[[curves.abc.path]]").count(), 2, "both paths kept");
         assert!(!block.contains("curves.def"), "stops at the next curve");
         assert!(!block.contains("[scheme]"), "starts at its own header");
-        // The tail has to survive verbatim: it is what gets written back.
+        // The tail has to survive verbatim: it is what gets written back
         assert!(text[end..].starts_with("[curves.def]"));
         assert!(block_span(text, "missing").is_none());
-        // A block at the very end runs to the end of the file.
+        // A block at the very end runs to the end of the file
         let (_, end) = block_span(text, "def").expect("last block");
         assert_eq!(end, text.len());
     }

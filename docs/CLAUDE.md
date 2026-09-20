@@ -13,6 +13,20 @@ per-frame cost matters and startup cost does not.
   prose files alike. Flags like `--config` are untouched.
 - Prefer recording a measurement over an adjective: "8 frames (0.18s)" beats
   "quickly".
+- **State what IS, never what WAS.** No history in comments: not what upstream
+  did, not what the old form allocated, not that a bug had no symptom until
+  something, not "used to be". Git holds that. A reader needs the code in
+  front of them explained, not its past.
+- No narration, no asides, no justification of a choice against alternatives
+  nobody proposed. If a constraint is real, name the constraint: "cava writes
+  a whole 24-byte frame at a time", not "we tried it the other way first".
+- Commit messages are where reasoning and history belong. Comments are facts
+  about the code as it stands.
+- **Abstract, not branded.** A comment names the mechanism, not the product:
+  "the external scheme source", not a vendor's name. Identifiers, paths and
+  file names in code are exempt - they have to match reality.
+- **No full stop at the end of a comment.** Interior sentences keep theirs;
+  the last one just ends.
 
 ## Build and install
 
