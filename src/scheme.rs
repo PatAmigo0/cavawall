@@ -1,22 +1,8 @@
-//! Reading Caelestia's live state directly, instead of having an external
-//! script rewrite this program's config file.
+//! The shell's live state, read directly. config.toml is never written and
+//! colours reach the GPU in place, so there is no restart
 //!
-//! What this replaces: a python script that mapped the scheme onto eight hex
-//! values, rewrote the `[colors]` block of config.toml in place, and restarted
-//! the process so it would re-read it. That worked, but the config file it
-//! rewrote is a stowed, version-controlled file, so every wallpaper change
-//! produced a diff in a file whose remaining content is hand-written prose -
-//! and the restart had to be gated on whether a fullscreen watcher had
-//! deliberately stopped the visualiser, because relaunching it on top of a game
-//! was exactly the thing that watcher existed to prevent.
-//!
-//! Reading the scheme here removes both problems at once: the config file is
-//! never written, and colours are re-uploaded to the GPU in place, so there is
-//! no restart to get wrong.
-//!
-//! Nothing here is required. Every function returns an Option and every failure
-//! path - no Caelestia, no scheme yet, a half-written file, a renamed key -
-//! leaves the static configuration in force.
+//! Every function returns an Option. No scheme source, no scheme yet, a
+//! half-written file or a renamed key all leave the static config in force
 
 use std::collections::HashMap;
 use std::ffi::CString;
@@ -27,6 +13,8 @@ use std::sync::OnceLock;
 
 pub const SCHEME_FILE: &str = "scheme.json";
 pub const SHELL_FILE: &str = "shell.json";
+/// The shell records the current wallpaper here, one path per line
+pub const WALLPAPER_FILE: &str = "path.txt";
 
 fn home() -> PathBuf {
     PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/root".into()))
@@ -44,24 +32,28 @@ fn config_dir() -> PathBuf {
         .unwrap_or_else(|| home().join(".config"))
 }
 
-/// Directory holding scheme.json. Watched rather than the file itself: the
-/// writer may replace the inode rather than truncate it, and a watch on the old
-/// inode would then go quiet forever while looking perfectly healthy.
+/// Directory holding scheme.json. The directory, not the file: a writer that
+/// replaces the inode leaves a watch on the file silently dead
 ///
-/// Resolved once: every call otherwise re-read the environment, which takes a
-/// process-wide lock and allocates, for a path that cannot change.
+/// Resolved once - reading the environment takes a process-wide lock
 pub fn scheme_dir() -> &'static Path {
     static DIR: OnceLock<PathBuf> = OnceLock::new();
     DIR.get_or_init(|| state_dir().join("caelestia"))
 }
 
-/// Directory holding shell.json, Caelestia's own settings file.
+/// Directory holding the current wallpaper's path
+pub fn wallpaper_dir() -> &'static Path {
+    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    DIR.get_or_init(|| state_dir().join("caelestia/wallpaper"))
+}
+
+/// Directory holding shell.json, the shell's own settings file
 pub fn shell_dir() -> &'static Path {
     static DIR: OnceLock<PathBuf> = OnceLock::new();
     DIR.get_or_init(|| config_dir().join("caelestia"))
 }
 
-/// Role name -> bare `rrggbb`, as Caelestia writes it (no leading `#`).
+/// Role name -> bare `rrggbb`, as the scheme file writes it (no leading `#`)
 pub fn colours() -> Option<HashMap<String, String>> {
     let raw = std::fs::read_to_string(scheme_dir().join(SCHEME_FILE)).ok()?;
     let parsed: serde_json::Value = serde_json::from_str(&raw).ok()?;
@@ -71,9 +63,8 @@ pub fn colours() -> Option<HashMap<String, String>> {
     let serde_json::Value::Object(obj) = root.remove("colours")? else {
         return None;
     };
-    // Moved out of the parsed document, not copied: the keys and hex values
-    // are already owned, so cloning each duplicated the whole palette per
-    // wallpaper change. Non-string values are still skipped, not rejected.
+    // Moved out of the parsed document rather than cloned. Non-string values
+    // are skipped, not rejected
     Some(
         obj.into_iter()
             .filter_map(|(k, v)| match v {
@@ -84,14 +75,12 @@ pub fn colours() -> Option<HashMap<String, String>> {
     )
 }
 
-/// `services.visualiserBars` from Caelestia's shell.json.
+/// `services.visualiserBars` from the shell's shell.json
 ///
-/// Clamped rather than trusted: the value drives an index buffer and cava's bar
-/// count, and a zero would divide by zero in the bar-width maths. The ceiling is
-/// well above anything the settings UI offers and only exists so a corrupt file
-/// cannot ask for a gigabyte of indices.
+/// Clamped: the value sizes an index buffer, and zero divides by zero in the
+/// bar-width maths
 pub fn bar_count() -> Option<u32> {
-    /// Absent `services` is not a failure - it just means nothing to follow.
+    /// Absent `services` means nothing to follow, not a failure
     #[derive(serde::Deserialize)]
     struct Shell {
         #[serde(default)]
@@ -105,9 +94,8 @@ pub fn bar_count() -> Option<u32> {
     }
 
     let raw = std::fs::read_to_string(shell_dir().join(SHELL_FILE)).ok()?;
-    // Naming only the field of interest lets serde walk past the rest without
-    // building a `Value` tree. Caelestia rewrites shell.json on every settings
-    // change and this runs on each one.
+    // Naming one field lets serde walk past the rest without building a
+    // `Value` tree. The shell rewrites shell.json on every settings change
     let n = serde_json::from_str::<Shell>(&raw)
         .ok()?
         .services
@@ -119,52 +107,50 @@ pub fn bar_count() -> Option<u32> {
     }
 }
 
-/// A non-blocking inotify watch over both files cavawall follows.
+/// A non-blocking inotify watch over both files cavawall follows
 ///
-/// One inotify instance, not one per directory: a single fd carries any number
-/// of watch descriptors, and `inotify_event.wd` says which fired. So a frame
-/// costs one `read` returning EAGAIN rather than one per file.
-///
-/// Non-blocking on purpose: this is polled from the render loop and must never
-/// stall on a file that may not change for hours.
+/// One inotify instance carries every watch descriptor, so a frame costs one
+/// `read` returning EAGAIN. Non-blocking: this is polled from the render loop
 pub struct Watch {
     fd: RawFd,
-    /// -1 when that file is not being followed.
+    /// -1 when that file is not being followed
     scheme_wd: i32,
     shell_wd: i32,
-    /// Owned rather than a local in `take`, which runs once per frame: a
-    /// zero-initialised 4 KiB local is a 4 KiB memset each time.
+    wallpaper_wd: i32,
+    /// Owned, not a local in `take`: that runs once per frame and a
+    /// zero-initialised 4 KiB local is a 4 KiB memset each time
     buf: Box<EventBuf>,
 }
 
-/// Which of the watched files changed since the last drain.
+/// Which of the watched files changed since the last drain
 ///
-/// Both answered at once because draining is destructive: asking one question
-/// at a time would make the second always come back false.
+/// All answered at once: draining is destructive, so a second question asked
+/// separately always comes back false
 #[derive(Default, Clone, Copy)]
 pub struct Changed {
     pub scheme: bool,
     pub shell: bool,
+    pub wallpaper: bool,
 }
 
-/// Backing store for the inotify queue, with its alignment pinned.
+/// Backing store for the inotify queue, with its alignment pinned
 ///
 /// Events are read out of it through a `&inotify_event`, which needs 4-byte
 /// alignment; a bare `[u8; N]` guarantees none, and an under-aligned reference
 /// is UB even where the load would work. The kernel pads each record, so
-/// pinning the base covers the whole walk.
+/// pinning the base covers the whole walk
 #[repr(C, align(8))]
 struct EventBuf([u8; 4096]);
 
 impl Watch {
     /// None when nothing was asked for, or nothing could be watched - no
-    /// Caelestia, or inotify unavailable. The caller carries on with whatever
-    /// the config file said.
+    /// scheme source, or inotify unavailable. The caller carries on with whatever
+    /// the config file said
     ///
     /// Directories are watched rather than the files themselves, so a name
     /// check is still needed on each event; see `take`.
-    pub fn new(scheme: bool, shell: bool) -> Option<Self> {
-        if !scheme && !shell {
+    pub fn new(scheme: bool, shell: bool, wallpaper: bool) -> Option<Self> {
+        if !scheme && !shell && !wallpaper {
             return None;
         }
         let fd = unsafe { libc::inotify_init1(libc::IN_CLOEXEC | libc::IN_NONBLOCK) };
@@ -175,6 +161,7 @@ impl Watch {
             fd,
             scheme_wd: -1,
             shell_wd: -1,
+            wallpaper_wd: -1,
             buf: Box::new(EventBuf([0; 4096])),
         };
         if scheme {
@@ -183,13 +170,16 @@ impl Watch {
         if shell {
             w.shell_wd = w.add(shell_dir());
         }
-        if w.scheme_wd < 0 && w.shell_wd < 0 {
+        if wallpaper {
+            w.wallpaper_wd = w.add(wallpaper_dir());
+        }
+        if w.scheme_wd < 0 && w.shell_wd < 0 && w.wallpaper_wd < 0 {
             return None; // Drop closes the fd
         }
         Some(w)
     }
 
-    /// -1 if the directory is missing or the watch could not be added.
+    /// -1 if the directory is missing or the watch could not be added
     fn add(&self, dir: &Path) -> i32 {
         if !dir.is_dir() {
             return -1;
@@ -198,25 +188,26 @@ impl Watch {
             return -1;
         };
         // IN_MOVED_TO as well as IN_CLOSE_WRITE: a write-then-rename produces
-        // only the former, and which one a writer uses is not ours to decide.
+        // only the former, and which one a writer uses is not ours to decide
         let mask = libc::IN_CLOSE_WRITE | libc::IN_MOVED_TO;
         unsafe { libc::inotify_add_watch(self.fd, path.as_ptr(), mask) }
     }
 
-    /// Drain every queued event and report which watched files they touched.
+    /// Drain every queued event and report which watched files they touched
     ///
     /// Draining fully in one call is the point: a write-then-rename delivers two
     /// events for one logical change, and reacting to each in turn would
-    /// re-upload the same palette twice.
+    /// re-upload the same palette twice
     pub fn take(&mut self) -> Changed {
         const HDR: usize = std::mem::size_of::<libc::inotify_event>();
-        let (scheme_wd, shell_wd) = (self.scheme_wd, self.shell_wd);
+        let (scheme_wd, shell_wd, wallpaper_wd) =
+            (self.scheme_wd, self.shell_wd, self.wallpaper_wd);
         let buf = &mut self.buf.0;
         let mut hit = Changed::default();
         loop {
             let n = unsafe { libc::read(self.fd, buf.as_mut_ptr().cast(), buf.len()) };
             if n <= 0 {
-                // EAGAIN: queue empty, which is the normal case every frame.
+                // EAGAIN: queue empty, which is the normal case every frame
                 return hit;
             }
             let n = n as usize;
@@ -225,22 +216,25 @@ impl Watch {
                 // SAFETY: the kernel just wrote `n` bytes, of which
                 // `off .. off + HDR` is a whole header; `EventBuf` pins the
                 // base alignment and inotify pads each record, so `off` stays
-                // a multiple of it.
+                // a multiple of it
                 let ev = unsafe { &*buf.as_ptr().add(off).cast::<libc::inotify_event>() };
                 let start = off + HDR;
                 // Clamped to what was read, not to the buffer: a truncated
-                // record must not expose bytes from an earlier one.
+                // record must not expose bytes from an earlier one
                 let end = (start + ev.len as usize).min(n);
                 if start < end {
                     // The name is NUL-padded out to the record length. Matched
                     // against the descriptor as well, so a shell.json dropped
-                    // into the scheme directory cannot pass for the real one.
+                    // into the scheme directory cannot pass for the real one
                     let name = buf[start..end].split(|b| *b == 0).next().unwrap_or(&[]);
                     if ev.wd == scheme_wd && name == SCHEME_FILE.as_bytes() {
                         hit.scheme = true;
                     }
                     if ev.wd == shell_wd && name == SHELL_FILE.as_bytes() {
                         hit.shell = true;
+                    }
+                    if ev.wd == wallpaper_wd && name == WALLPAPER_FILE.as_bytes() {
+                        hit.wallpaper = true;
                     }
                 }
                 off = start + ev.len as usize;
