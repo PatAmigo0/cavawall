@@ -59,7 +59,8 @@ input[type=range]{width:130px}
     <button data-pop>view &#9662;</button>
     <div class=pop>
       <label><input type=checkbox id=showdots checked> handles</label>
-      <label>handle size <input type=range id=dotsize min=2 max=14 step=1 value=5></label>
+      <label>handle size <input type=range id=dotsize min=1 max=14 step=1 value=5></label>
+      <label>line width <input type=range id=linew min=1 max=12 step=1 value=3></label>
       <label><input type=checkbox id=showbars checked> bar preview</label>
       <label><input type=checkbox id=showocc checked> occluder</label>
       <label>dim image <input type=range id=dim min=0 max=90 step=5 value=0></label>
@@ -204,6 +205,9 @@ function clipAboveHorizon(){
   x.lineTo(c.width,0);x.closePath();x.clip();
   return true;
 }
+// One place decides how thick a guide line is: at macro zoom a 3px line is
+// wider than the ridge you are tracing.
+const lw=()=>+$('linew').value*c.width/1600;
 function draw(){
   x.drawImage(img,0,0);
   const alpha=+$('opacity').value/100;
@@ -212,7 +216,7 @@ function draw(){
   const d=dense();
   if(d.length>1){
     x.globalAlpha=alpha;
-    x.strokeStyle='#ff3b30';x.lineWidth=Math.max(2,c.width/700);x.beginPath();
+    x.strokeStyle='#ff3b30';x.lineWidth=lw();x.beginPath();
     d.forEach((q,i)=>i?x.lineTo(q.p[0],q.p[1]):x.moveTo(q.p[0],q.p[1]));x.stroke();
     x.globalAlpha=1;
     // Bar preview at the real sample positions, arc-length spaced.
@@ -253,9 +257,19 @@ function draw(){
     for(let px=0;px<=c.width;px+=4)x.lineTo(px,horizonAt(px));
     x.lineTo(c.width,c.height);x.lineTo(0,c.height);x.closePath();
     x.fillStyle='rgba(48,213,200,.18)';x.fill();
-    x.strokeStyle='#30d5c8';x.lineWidth=Math.max(2,c.width/900);
-    x.beginPath();x.moveTo(0,horizonAt(0));
-    for(let px=0;px<=c.width;px+=4)x.lineTo(px,horizonAt(px));x.stroke();
+    x.strokeStyle='#30d5c8';x.lineWidth=lw();
+    const a=occ[0].x*c.width, b=occ[occ.length-1].x*c.width;
+    // Drawn part: what you actually traced.
+    x.beginPath();x.moveTo(a,horizonAt(a));
+    for(let px=a;px<=b;px+=4)x.lineTo(px,horizonAt(px));
+    x.lineTo(b,horizonAt(b));x.stroke();
+    // Past either end the horizon holds flat, which is what the shader does
+    // too - dashed and dimmed so it reads as an implication, not as a line
+    // you drew across the wallpaper.
+    x.save();x.setLineDash([lw()*3,lw()*3]);x.globalAlpha=alpha*0.45;
+    x.beginPath();x.moveTo(0,horizonAt(0));x.lineTo(a,horizonAt(a));
+    x.moveTo(b,horizonAt(b));x.lineTo(c.width,horizonAt(c.width));x.stroke();
+    x.restore();
     x.globalAlpha=1;
   }
   // Handles fade with the curve so they never sit on top of the landing spot
@@ -345,7 +359,7 @@ $('angle').oninput=e=>{if(sel<0||!$('useangle').checked)return;pts[sel].a=+e.tar
 $('useangle').onchange=e=>{if(sel<0)return;pts[sel].a=e.target.checked?+$('angle').value:null;draw();};
 $('opacity').oninput=()=>{$('opacityv').textContent=(+$('opacity').value/100).toFixed(2);draw();};
 for(const id of ['showdots','showbars','showocc']) $(id).onchange=draw;
-for(const id of ['dotsize','dim']) $(id).oninput=draw;
+for(const id of ['dotsize','dim','linew']) $(id).oninput=draw;
 // Ramer-Douglas-Peucker: a painted stroke lands hundreds of points where a
 // dozen describe the same line, and every one of them is a handle in the way.
 function rdp(list,eps){

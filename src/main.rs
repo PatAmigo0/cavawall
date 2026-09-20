@@ -665,6 +665,8 @@ fn main() {
     let mut curve_upright = false;
     let mut path_ssbo: u32 = 0;
     let mut occ_ssbo: u32 = 0;
+    let mut curve_reach = 0.0f32;
+    let mut curve_bar_width = 0.0f32;
     // A curve is authored against ONE wallpaper. If the current one has no
     // entry, fall back to bars rather than draw a ridge traced from a
     // different image - which is the whole point of keying them.
@@ -854,13 +856,15 @@ fn main() {
                 gl::BindBufferBase(gl::SHADER_STORAGE_BUFFER, 2, occ_ssbo);
                 gl::BindBuffer(gl::SHADER_STORAGE_BUFFER, 0);
                 // NDC spans 2.0, so a fraction of the output is twice that.
+                curve_reach = cfg.height.unwrap_or(0.18).clamp(0.0, 1.0) * 2.0;
+                curve_bar_width = cfg.width.unwrap_or(0.006).clamp(0.0, 1.0) * 2.0;
                 gl::Uniform1f(
                     gl::GetUniformLocation(shader_program, c"Reach".as_ptr()),
-                    cfg.height.unwrap_or(0.18).clamp(0.0, 1.0) * 2.0,
+                    curve_reach,
                 );
                 gl::Uniform1f(
                     gl::GetUniformLocation(shader_program, c"BarWidth".as_ptr()),
-                    cfg.width.unwrap_or(0.006).clamp(0.0, 1.0) * 2.0,
+                    curve_bar_width,
                 );
                 gl::Uniform1f(
                     gl::GetUniformLocation(shader_program, c"InnerAlpha".as_ptr()),
@@ -913,6 +917,11 @@ fn main() {
 
     let resolution_location =
         unsafe { gl::GetUniformLocation(shader_program, c"Resolution".as_ptr()) };
+    let path_scale_location =
+        unsafe { gl::GetUniformLocation(shader_program, c"PathScale".as_ptr()) };
+    let path_offset_location =
+        unsafe { gl::GetUniformLocation(shader_program, c"PathOffset".as_ptr()) };
+    let occ_map_location = unsafe { gl::GetUniformLocation(shader_program, c"OccMap".as_ptr()) };
     let gradient_scale_location =
         unsafe { gl::GetUniformLocation(shader_program, gradient_scale_name.as_ptr()) };
 
@@ -967,7 +976,14 @@ fn main() {
         curve_flip,
         curve_upright,
         path_ssbo,
+        curve_reach,
+        curve_bar_width,
+        curve_box: None,
+        curve_output: (1, 1),
         resolution_location,
+        path_scale_location,
+        path_offset_location,
+        occ_map_location,
         silent_frames: 0,
         background_color,
         pinned_output,
@@ -1064,7 +1080,20 @@ struct AppState {
     curve_flip: bool,
     curve_upright: bool,
     path_ssbo: u32,
+    /// Reach and width in OUTPUT NDC, kept so the bounding box can be
+    /// recomputed whenever the output changes.
+    curve_reach: f32,
+    curve_bar_width: f32,
+    /// Where the curve surface sits on the output, in output pixels:
+    /// (left, top, width, height). None means the whole output.
+    curve_box: Option<(u32, u32, u32, u32)>,
+    /// Output size, which stops being `width`/`height` the moment the surface
+    /// is smaller than the output it is on.
+    curve_output: (u32, u32),
     resolution_location: gl::types::GLint,
+    path_scale_location: gl::types::GLint,
+    path_offset_location: gl::types::GLint,
+    occ_map_location: gl::types::GLint,
     silent_frames: u32,
     /// Only read to restore the clear colour if a re-exec fails; it is set once
     /// at startup now rather than per frame.
@@ -1429,6 +1458,38 @@ impl AppState {
         self.place_on(qh, &output, &info, name);
     }
 
+    /// The path's bounding box in output pixels, or None to keep the whole
+    /// output.
+    ///
+    /// Bars are angled, so the box is the hull of every bar at full volume,
+    /// not just of the path. A box that saves little is not worth the mapping:
+    /// below a fifth saved this returns None and the surface stays whole.
+    fn curve_bbox(&self) -> Option<(u32, u32, u32, u32)> {
+        if self.curve_controls.is_empty() {
+            return None;
+        }
+        let (ow, oh) = (self.width as f32, self.height as f32);
+        let samples = curve::resample(
+            &self.curve_controls,
+            self.bar_count,
+            self.curve_flip,
+            self.curve_upright,
+            ow / oh.max(1.0),
+        );
+        let (x0, y0, x1, y1) = curve::bounds(&samples, self.curve_reach, self.curve_bar_width);
+        // NDC -> pixels, y flipped: NDC counts up, a margin counts down.
+        let pad = 2.0;
+        let left = (((x0 + 1.0) * 0.5 * ow) - pad).floor().clamp(0.0, ow);
+        let right = (((x1 + 1.0) * 0.5 * ow) + pad).ceil().clamp(0.0, ow);
+        let top = ((1.0 - (y1 + 1.0) * 0.5) * oh - pad).floor().clamp(0.0, oh);
+        let bottom = ((1.0 - (y0 + 1.0) * 0.5) * oh + pad).ceil().clamp(0.0, oh);
+        let (w, h) = ((right - left).max(1.0), (bottom - top).max(1.0));
+        if w * h > ow * oh * 0.8 {
+            return None;
+        }
+        Some((left as u32, top as u32, w as u32, h as u32))
+    }
+
     /// Build a fresh layer surface on `output` and start drawing to it.
     ///
     /// Moving is always a rebuild: a layer surface belongs to the output it was
@@ -1498,15 +1559,25 @@ impl AppState {
             // times max_height - on a 1920x1080 output a 520px circle is 270k
             // pixels against 1.3M, so the same damage argument that shrank the
             // band favours this even more strongly.
-            // The path is authored in output-normalised coordinates, so its
-            // NDC is the OUTPUT's NDC and the surface has to be the whole
-            // output for the two to agree. That gives up the damage win the
-            // band buys - shrinking to the path's bounding box means rescaling
-            // every sample into the smaller surface, which is worth doing once
-            // curve mode has earned it.
+            // The path is authored against the OUTPUT, so the surface can be
+            // anything as long as the shader maps output NDC into it - which
+            // PathScale/PathOffset do. A ridgeline across the upper third of a
+            // 1920x1080 output claims about 300k pixels where the whole output
+            // is 2.1M, and Hyprland recomposites by geometry.
             Mode::Curve => {
-                self.layer_surface.set_size(self.width, self.height);
-                self.layer_surface.set_anchor(Anchor::TOP | Anchor::LEFT);
+                self.curve_output = (self.width, self.height);
+                self.curve_box = self.curve_bbox();
+                match self.curve_box {
+                    Some((left, top, w, h)) => {
+                        self.layer_surface.set_size(w, h);
+                        self.layer_surface.set_anchor(Anchor::TOP | Anchor::LEFT);
+                        self.layer_surface.set_margin(top as i32, 0, 0, left as i32);
+                    }
+                    None => {
+                        self.layer_surface.set_size(self.width, self.height);
+                        self.layer_surface.set_anchor(Anchor::TOP | Anchor::LEFT);
+                    }
+                }
             }
             Mode::Circle => {
                 let d = self.circle.diameter.min(self.width).min(self.height).max(1);
@@ -2032,11 +2103,31 @@ impl LayerShellHandler for AppState {
             // which the vertex stage already normalises, so it has no such
             // uniform and GetUniformLocation returned -1 for it.
             if self.mode == Mode::Curve {
-                gl::Uniform2f(
-                    self.resolution_location,
-                    self.width as f32,
-                    self.height as f32,
-                );
+                gl::Uniform2f(self.resolution_location, self.width as f32, self.height as f32);
+                let (ow, oh) = (self.curve_output.0 as f32, self.curve_output.1 as f32);
+                let (sw, sh) = (self.width as f32, self.height as f32);
+                match self.curve_box {
+                    // Identity: the surface IS the output, so output NDC needs
+                    // no mapping and the horizon is already in frame.
+                    None => {
+                        gl::Uniform2f(self.path_scale_location, 1.0, 1.0);
+                        gl::Uniform2f(self.path_offset_location, 0.0, 0.0);
+                        gl::Uniform4f(self.occ_map_location, 0.0, 0.0, 1.0, 1.0);
+                    }
+                    Some((left, top, _, _)) => {
+                        let (l, t) = (left as f32, top as f32);
+                        // Margins count from the top; NDC and gl_FragCoord
+                        // both count from the bottom.
+                        let bottom = oh - t - sh;
+                        gl::Uniform2f(self.path_scale_location, ow / sw, oh / sh);
+                        gl::Uniform2f(
+                            self.path_offset_location,
+                            (ow - sw - 2.0 * l) / sw,
+                            (oh - sh - 2.0 * bottom) / sh,
+                        );
+                        gl::Uniform4f(self.occ_map_location, l / ow, bottom / oh, sw / ow, sh / oh);
+                    }
+                }
             }
             if self.mode == Mode::Bars {
                 gl::Uniform1f(
