@@ -183,6 +183,8 @@ use std::collections::HashMap;
 const VERTEX_SHADER_SRC: &str = include_str!("shaders/vertex_shader.glsl");
 
 const FRAGMENT_SHADER_SRC: &str = include_str!("shaders/fragment_shader.glsl");
+const CIRCLE_VERTEX_SHADER_SRC: &str = include_str!("shaders/circle_vertex_shader.glsl");
+const CIRCLE_FRAGMENT_SHADER_SRC: &str = include_str!("shaders/circle_fragment_shader.glsl");
 
 /// Bar width and stride in NDC, both fixed until a re-exec.
 ///
@@ -194,6 +196,38 @@ fn bar_geometry(bar_count: u32, gap: f32) -> (f32, f32) {
     let bar_width = 2.0 / (bars + (bars - 1.0) * gap);
     // Left edge to the next left edge.
     (bar_width, bar_width * (1.0 + gap))
+}
+
+/// `[circle]` with every default filled in, so the GL setup and the placement
+/// path both read plain values rather than `Option`s.
+#[derive(Clone, Copy)]
+struct CircleGeom {
+    /// Surface edge in logical pixels, before it is clamped to the output.
+    diameter: u32,
+    /// Fraction of the radius the bars start at. The hole in the middle.
+    inner_radius: f32,
+    inner_alpha: f32,
+    outer_alpha: f32,
+    /// Logical pixels from centre, positive right and down.
+    offset: (i32, i32),
+}
+
+impl CircleGeom {
+    fn from_config(c: Option<&CircleConfig>) -> Self {
+        // Clamped here rather than trusted: inner_radius at 1.0 leaves no span
+        // for a bar to grow into, and a negative one puts the base outside the
+        // surface where it is silently clipped.
+        Self {
+            diameter: c.and_then(|c| c.diameter).unwrap_or(520).max(16),
+            inner_radius: c.and_then(|c| c.inner_radius).unwrap_or(0.35).clamp(0.0, 0.95),
+            inner_alpha: c.and_then(|c| c.inner_alpha).unwrap_or(1.0).clamp(0.0, 1.0),
+            outer_alpha: c.and_then(|c| c.outer_alpha).unwrap_or(1.0).clamp(0.0, 1.0),
+            offset: (
+                c.and_then(|c| c.offset_x).unwrap_or(0),
+                c.and_then(|c| c.offset_y).unwrap_or(0),
+            ),
+        }
+    }
 }
 
 /// One unit quad in triangle-strip order: top-left, top-right, bottom-left,
@@ -209,9 +243,16 @@ const UNIT_QUAD: [f32; 8] = [0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0];
 /// On a compile or link failure, with the driver's log. COMPILE_STATUS went
 /// unchecked before, so a bad shader surfaced only as a link failure whose log
 /// does not name the offending line.
-fn build_program() -> u32 {
-    let vert = compile_shader(gl::VERTEX_SHADER, VERTEX_SHADER_SRC, "vertex");
-    let frag = compile_shader(gl::FRAGMENT_SHADER, FRAGMENT_SHADER_SRC, "fragment");
+fn build_program(mode: Mode) -> u32 {
+    // Two programs, one picked at startup. Mode cannot change without a
+    // re-exec, so nothing ever calls UseProgram again and the "GL state is set
+    // once" invariant holds for both.
+    let (vert_src, frag_src) = match mode {
+        Mode::Bars => (VERTEX_SHADER_SRC, FRAGMENT_SHADER_SRC),
+        Mode::Circle => (CIRCLE_VERTEX_SHADER_SRC, CIRCLE_FRAGMENT_SHADER_SRC),
+    };
+    let vert = compile_shader(gl::VERTEX_SHADER, vert_src, "vertex");
+    let frag = compile_shader(gl::FRAGMENT_SHADER, frag_src, "fragment");
     // SAFETY: main() has a current EGL context and loaded GL symbols by here.
     unsafe {
         let program = gl::CreateProgram();
@@ -565,7 +606,9 @@ fn main() {
             }
         );
     }
-    let shader_program = build_program();
+    let mode = config.general.mode.unwrap_or_default();
+    let circle = CircleGeom::from_config(config.circle.as_ref());
+    let shader_program = build_program(mode);
     let mut quad_vbo = 0;
     let mut height_vbo = 0;
     let mut vao = 0;
@@ -656,14 +699,47 @@ fn main() {
         gl::UseProgram(shader_program);
         // Bar geometry is a pair of constants now, not a buffer full of
         // coordinates. Set once; neither can change without a re-exec.
-        gl::Uniform1f(
-            gl::GetUniformLocation(shader_program, c"BarWidth".as_ptr()),
-            bar_width,
-        );
-        gl::Uniform1f(
-            gl::GetUniformLocation(shader_program, c"Stride".as_ptr()),
-            bar_stride,
-        );
+        match mode {
+            Mode::Bars => {
+                gl::Uniform1f(
+                    gl::GetUniformLocation(shader_program, c"BarWidth".as_ptr()),
+                    bar_width,
+                );
+                gl::Uniform1f(
+                    gl::GetUniformLocation(shader_program, c"Stride".as_ptr()),
+                    bar_stride,
+                );
+            }
+            Mode::Circle => {
+                // A slot is one bar plus one gap, and the circle closes, so
+                // there are as many gaps as bars - not bars - 1 as on a line.
+                let step = std::f32::consts::TAU / bar_count as f32;
+                gl::Uniform1f(
+                    gl::GetUniformLocation(shader_program, c"AngleStep".as_ptr()),
+                    step,
+                );
+                gl::Uniform1f(
+                    gl::GetUniformLocation(shader_program, c"AngularHalf".as_ptr()),
+                    step / (1.0 + config.bars.gap) * 0.5,
+                );
+                gl::Uniform1f(
+                    gl::GetUniformLocation(shader_program, c"InnerRadius".as_ptr()),
+                    circle.inner_radius,
+                );
+                gl::Uniform1f(
+                    gl::GetUniformLocation(shader_program, c"RadialSpan".as_ptr()),
+                    1.0 - circle.inner_radius,
+                );
+                gl::Uniform1f(
+                    gl::GetUniformLocation(shader_program, c"InnerAlpha".as_ptr()),
+                    circle.inner_alpha,
+                );
+                gl::Uniform1f(
+                    gl::GetUniformLocation(shader_program, c"OuterAlpha".as_ptr()),
+                    circle.outer_alpha,
+                );
+            }
+        }
         gl::Enable(gl::BLEND);
         gl::BlendFunc(gl::SRC_ALPHA, gl::ONE_MINUS_SRC_ALPHA);
         gl::ClearColor(
@@ -722,6 +798,8 @@ fn main() {
         swap_damage,
         force_full_damage: true,
         max_height: config.bars.max_height.unwrap_or(1.0),
+        mode,
+        circle,
         silent_frames: 0,
         background_color,
         pinned_output,
@@ -807,6 +885,10 @@ struct AppState {
     /// not capture - a new palette, a resize, coming back from parked.
     force_full_damage: bool,
     max_height: f32,
+    /// Startup-only, like the bar count: the two modes are different programs
+    /// with different uniforms and different surface geometry.
+    mode: Mode,
+    circle: CircleGeom,
     silent_frames: u32,
     /// Only read to restore the clear colour if a re-exec fails; it is set once
     /// at startup now rather than per frame.
@@ -1223,10 +1305,35 @@ impl AppState {
         // The bar NDC is rescaled to match (see draw) so the bars look
         // identical - inside a surface that IS the band, they use its full
         // height rather than max_height of it.
-        let band = ((self.height as f32 * self.max_height).ceil() as u32).clamp(1, self.height);
         self.layer_surface.set_exclusive_zone(-1); // see note at startup
-        self.layer_surface.set_size(self.width, band);
-        self.layer_surface.set_anchor(Anchor::BOTTOM);
+        match self.mode {
+            Mode::Bars => {
+                let band =
+                    ((self.height as f32 * self.max_height).ceil() as u32).clamp(1, self.height);
+                self.layer_surface.set_size(self.width, band);
+                self.layer_surface.set_anchor(Anchor::BOTTOM);
+            }
+            // A square surface, which is what keeps NDC square and the circle
+            // round with no aspect uniform. Anchored to a corner and positioned
+            // with margins rather than left to centre itself, so offset_x/y
+            // have somewhere to apply.
+            //
+            // This claims diameter^2 where the bar band claims the full width
+            // times max_height - on a 1920x1080 output a 520px circle is 270k
+            // pixels against 1.3M, so the same damage argument that shrank the
+            // band favours this even more strongly.
+            Mode::Circle => {
+                let d = self.circle.diameter.min(self.width).min(self.height).max(1);
+                // saturating: d is clamped to both dimensions above, but the
+                // subtraction is unsigned and a future change to that clamp
+                // would wrap rather than fail.
+                let top = (self.height.saturating_sub(d) / 2) as i32 + self.circle.offset.1;
+                let left = (self.width.saturating_sub(d) / 2) as i32 + self.circle.offset.0;
+                self.layer_surface.set_size(d, d);
+                self.layer_surface.set_anchor(Anchor::TOP | Anchor::LEFT);
+                self.layer_surface.set_margin(top, 0, 0, left);
+            }
+        }
         self.surface.commit();
         drop(input_region);
         old_surface.destroy();
@@ -1330,7 +1437,12 @@ impl AppState {
     fn present(&mut self) {
         let mut rects = [0 as egl::Int; DAMAGE_BUCKETS * 4];
         let len = match self.swap_damage {
-            Some(_) if !self.force_full_damage => {
+            // DamageMap buckets a bar by its x column, which only means
+            // anything when bars are a row. A circle's bar sweeps an arc whose
+            // bounding box depends on its angle, and the surface is already
+            // diameter^2 rather than a full-width band - so declare all of it
+            // and keep the per-bar arithmetic out of the frame entirely.
+            Some(_) if !self.force_full_damage && self.mode == Mode::Bars => {
                 damage_rects(&self.heights, &self.prev_heights, &self.damage_map, &mut rects)
             }
             // Whole surface. Not the same as passing zero rects, which means
@@ -1703,10 +1815,15 @@ impl LayerShellHandler for AppState {
             // The stop count folds in with the height so the shader multiplies
             // once instead of converting, multiplying and dividing per
             // fragment. The count cannot change without a re-exec.
-            gl::Uniform1f(
-                self.gradient_scale_location,
-                (self.gradient_stops - 1) as f32 / self.height as f32,
-            );
+            // Bars only. The circle shader indexes the gradient by radius,
+            // which the vertex stage already normalises, so it has no such
+            // uniform and GetUniformLocation returned -1 for it.
+            if self.mode == Mode::Bars {
+                gl::Uniform1f(
+                    self.gradient_scale_location,
+                    (self.gradient_stops - 1) as f32 / self.height as f32,
+                );
+            }
         }
         // Only draw once a real output has been chosen. main() maps a
         // bootstrap surface purely so EGL has a window to build its context
@@ -1722,6 +1839,50 @@ impl LayerShellHandler for AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A circle closes, so it has as many gaps as bars - one more than a row
+    /// of the same count. Getting that wrong leaves a visible seam at bar 0 or
+    /// overlaps it with the last bar, and no GL test would catch either.
+    #[test]
+    fn circle_slots_tile_the_full_turn() {
+        for bars in [1u32, 8, 76, 255] {
+            for gap in [0.0f32, 0.1, 0.5] {
+                let step = std::f32::consts::TAU / bars as f32;
+                let bar = step / (1.0 + gap);
+                // Bars plus gaps come back to exactly one turn.
+                let total = (bar + bar * gap) * bars as f32;
+                assert!(
+                    (total - std::f32::consts::TAU).abs() < 1e-4,
+                    "bars={bars} gap={gap} covered {total}"
+                );
+                // And the gap really is that fraction of the bar, as on a row.
+                assert!((bar * gap - (step - bar)).abs() < 1e-5, "gap ratio wrong");
+            }
+        }
+    }
+
+    /// Defaults and clamps, because an out-of-range inner_radius is silently
+    /// invisible rather than loud: 1.0 leaves no span for a bar to grow into.
+    #[test]
+    fn circle_geom_clamps_its_config() {
+        let wild = CircleConfig {
+            diameter: Some(0),
+            inner_radius: Some(2.5),
+            inner_alpha: Some(-1.0),
+            outer_alpha: Some(9.0),
+            offset_x: None,
+            offset_y: None,
+        };
+        let g = CircleGeom::from_config(Some(&wild));
+        assert_eq!(g.diameter, 16, "diameter floored");
+        assert_eq!(g.inner_radius, 0.95, "inner_radius leaves a span");
+        assert_eq!(g.inner_alpha, 0.0);
+        assert_eq!(g.outer_alpha, 1.0);
+
+        let d = CircleGeom::from_config(None);
+        assert_eq!(d.offset, (0, 0), "no section means centred");
+        assert!(d.inner_radius > 0.0 && d.inner_radius < 1.0);
+    }
 
     /// The vertex shader's own placement, replicated: it is the only consumer
     /// of `bar_geometry`, and nothing else checks that the two agree.
