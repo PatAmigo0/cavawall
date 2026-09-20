@@ -88,6 +88,33 @@ fn densify(controls: &[Control], per_segment: usize) -> Vec<([f32; 2], f32, Opti
     out
 }
 
+/// A densified path plus its cumulative arc length, measured in the y-up
+/// PIXEL frame rather than in NDC.
+///
+/// NDC is square and the screen is not, so measuring there spaces bars evenly
+/// in NDC and therefore unevenly on screen: a horizontal stretch of a 16:9
+/// output gets fewer bars per pixel than a vertical one. Building it once is
+/// also what lets `build` decide how many bars a path deserves before it
+/// samples it.
+struct Arc {
+    dense: Vec<([f32; 2], f32, Option<f32>)>,
+    acc: Vec<f32>,
+    total: f32,
+}
+
+fn arc(controls: &[Control], aspect: f32) -> Arc {
+    let dense = densify(controls, 16);
+    let mut acc = Vec::with_capacity(dense.len());
+    let mut total = 0.0f32;
+    acc.push(0.0f32);
+    for w in dense.windows(2) {
+        let (a, b) = (w[0].0, w[1].0);
+        total += (((b[0] - a[0]) * aspect).powi(2) + (b[1] - a[1]).powi(2)).sqrt();
+        acc.push(total);
+    }
+    Arc { dense, acc, total }
+}
+
 /// `count` samples spaced evenly BY ARC LENGTH, not by parameter.
 ///
 /// Even in t would bunch bars up wherever control points sit close together,
@@ -114,18 +141,11 @@ pub fn resample(
         let s = controls.first().map_or(1.0, |c| c.scale);
         return vec![(Sample { pos: p, normal: [0.0, 1.0] }, s); count];
     }
-    let dense = densify(controls, 16);
+    sample_arc(&arc(controls, aspect), count, flip, upright, aspect)
+}
 
-    // Cumulative arc length, so a target length maps to a position by search.
-    let mut acc = Vec::with_capacity(dense.len());
-    let mut total = 0.0f32;
-    acc.push(0.0f32);
-    for w in dense.windows(2) {
-        let (a, b) = (w[0].0, w[1].0);
-        total += ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2)).sqrt();
-        acc.push(total);
-    }
-
+fn sample_arc(a: &Arc, count: usize, flip: bool, upright: bool, aspect: f32) -> Vec<(Sample, f32)> {
+    let (dense, acc, total) = (&a.dense, &a.acc, a.total);
     let mut out = Vec::with_capacity(count);
     let mut cursor = 0usize;
     for i in 0..count {
@@ -169,25 +189,118 @@ pub fn resample(
     out
 }
 
+/// One stretch of path, resolved from config into what the sampler needs.
+#[derive(Clone, Debug, Default)]
+pub struct PathSpec {
+    pub controls: Box<[Control]>,
+    /// Reach of a full-volume bar and its width, both NDC, before the
+    /// per-point scale.
+    pub reach: f32,
+    pub width: f32,
+    pub flip: bool,
+    pub upright: bool,
+}
+
+/// One bar, ready for the GPU: base, the normal's angle, and the reach and
+/// width already multiplied by the per-point scale.
+///
+/// Folding the scale in here is what lets paths differ in reach and width at
+/// all - the shader has no per-path anything, just one bar after another.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Bar {
+    pub pos: [f32; 2],
+    pub angle: f32,
+    pub reach: f32,
+    pub width: f32,
+}
+
+/// Split `count` bars between paths in proportion to their length.
+///
+/// Largest remainder, so the total is exactly `count` and never one off: the
+/// instance count, the SSBO and cava's channel count all have to agree, and a
+/// rounding error in any direction desynchronises them. A path short enough to
+/// round to nothing gets nothing rather than stealing a bar from a long one.
+#[must_use]
+pub fn allocate(lengths: &[f32], count: u32) -> Vec<u32> {
+    let n = lengths.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let total: f32 = lengths.iter().sum();
+    // NaN included: a path whose length is not a positive number cannot be
+    // weighted by it.
+    if !total.is_finite() || total <= 0.0 {
+        // Degenerate paths: spread evenly and let the remainder fall to the
+        // front, which at least keeps the total right.
+        let each = count / n as u32;
+        let mut out = vec![each; n];
+        for slot in out.iter_mut().take((count % n as u32) as usize) {
+            *slot += 1;
+        }
+        return out;
+    }
+    let ideal: Vec<f32> = lengths.iter().map(|l| count as f32 * l / total).collect();
+    let mut out: Vec<u32> = ideal.iter().map(|v| *v as u32).collect();
+    let assigned: u32 = out.iter().sum();
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&a, &b| {
+        (ideal[b] - ideal[b].floor())
+            .total_cmp(&(ideal[a] - ideal[a].floor()))
+            .then(a.cmp(&b))
+    });
+    for &i in order.iter().cycle().take(count.saturating_sub(assigned) as usize) {
+        out[i] += 1;
+    }
+    out
+}
+
+/// Every bar of every path, in one buffer.
+///
+/// One draw call covers the lot: the shader indexes per instance and has no
+/// idea paths exist, so a second curve costs nothing but its own bars.
+#[must_use]
+pub fn build(paths: &[PathSpec], count: u32, aspect: f32) -> Vec<Bar> {
+    let usable: Vec<&PathSpec> = paths.iter().filter(|p| p.controls.len() >= 2).collect();
+    if usable.is_empty() {
+        return Vec::new();
+    }
+    // Densified once and kept: measuring a path and sampling it are the same
+    // walk, and build runs on every configure.
+    let arcs: Vec<Arc> = usable.iter().map(|p| arc(&p.controls, aspect)).collect();
+    let counts = allocate(&arcs.iter().map(|a| a.total).collect::<Vec<_>>(), count);
+    let mut out = Vec::with_capacity(count as usize);
+    for ((spec, a), n) in usable.iter().zip(&arcs).zip(counts) {
+        for (s, scale) in sample_arc(a, n as usize, spec.flip, spec.upright, aspect) {
+            out.push(Bar {
+                pos: s.pos,
+                angle: s.normal[1].atan2(s.normal[0]),
+                reach: spec.reach * scale,
+                width: spec.width * scale,
+            });
+        }
+    }
+    out
+}
+
 /// NDC bounding box of every bar at full volume: `(min_x, min_y, max_x,
 /// max_y)`.
 ///
-/// A bar reaches `reach * scale` along its normal and is `width * scale`
-/// across, so the box is the hull of both ends of every bar. This is what
-/// lets the surface shrink to the path instead of claiming the whole output.
+/// The hull of both ends of every bar, not of the path: bars lean, and a
+/// leaning bar reaches outside the path's own box. This is what lets the
+/// surface shrink to the curve instead of claiming the whole output.
 #[must_use]
-pub fn bounds(samples: &[(Sample, f32)], reach: f32, width: f32) -> (f32, f32, f32, f32) {
+pub fn bounds(bars: &[Bar]) -> (f32, f32, f32, f32) {
     let (mut x0, mut y0) = (f32::MAX, f32::MAX);
     let (mut x1, mut y1) = (f32::MIN, f32::MIN);
-    for (s, scale) in samples {
-        let n = s.normal;
+    for bar in bars {
+        let n = [bar.angle.cos(), bar.angle.sin()];
         let t = [-n[1], n[0]];
-        let half = width * scale * 0.5;
-        let tip = [n[0] * reach * scale, n[1] * reach * scale];
+        let half = bar.width * 0.5;
+        let tip = [n[0] * bar.reach, n[1] * bar.reach];
         for base in [[0.0, 0.0], tip] {
             for side in [-half, half] {
-                let x = s.pos[0] + base[0] + t[0] * side;
-                let y = s.pos[1] + base[1] + t[1] * side;
+                let x = bar.pos[0] + base[0] + t[0] * side;
+                let y = bar.pos[1] + base[1] + t[1] * side;
                 x0 = x0.min(x);
                 y0 = y0.min(y);
                 x1 = x1.max(x);
@@ -386,15 +499,68 @@ mod tests {
     /// surface to it.
     #[test]
     fn bounds_cover_bar_and_width() {
-        let samples = vec![(Sample { pos: [0.0, 0.0], normal: [0.0, 1.0] }, 1.0)];
-        let (x0, y0, x1, y1) = bounds(&samples, 0.5, 0.2);
+        let bar = Bar {
+            pos: [0.0, 0.0],
+            angle: std::f32::consts::FRAC_PI_2,
+            reach: 0.5,
+            width: 0.2,
+        };
+        let (x0, y0, x1, y1) = bounds(&[bar]);
         assert!((x0 - -0.1).abs() < 1e-6 && (x1 - 0.1).abs() < 1e-6, "width straddles the base");
         assert!((y0 - 0.0).abs() < 1e-6 && (y1 - 0.5).abs() < 1e-6, "reach sets the top");
-        // The scale multiplies both, and an empty path claims everything
-        // rather than collapsing to a point.
-        let (_, _, _, y1) = bounds(&[(samples[0].0, 2.0)], 0.5, 0.2);
-        assert!((y1 - 1.0).abs() < 1e-6);
-        assert_eq!(bounds(&[], 0.5, 0.2), (-1.0, -1.0, 1.0, 1.0));
+        assert_eq!(bounds(&[]), (-1.0, -1.0, 1.0, 1.0), "no bars claims everything");
+    }
+
+    /// The instance count, the SSBO and cava's channels all have to agree, so
+    /// an allocation that is one off is a desync, not a rounding detail.
+    #[test]
+    fn allocation_is_proportional_and_exact() {
+        assert_eq!(allocate(&[3.0, 1.0], 40), vec![30, 10]);
+        // 10 bars over thirds: 3.33 each, and the remainder goes to the
+        // largest fraction first.
+        let split = allocate(&[1.0, 1.0, 1.0], 10);
+        assert_eq!(split.iter().sum::<u32>(), 10);
+        assert_eq!(split, vec![4, 3, 3]);
+        // A path too short to earn a bar gets none rather than stealing one.
+        assert_eq!(allocate(&[100.0, 0.001], 8), vec![8, 0]);
+        // Degenerate input still totals exactly.
+        assert_eq!(allocate(&[0.0, 0.0], 5).iter().sum::<u32>(), 5);
+        assert!(allocate(&[], 5).is_empty());
+        for n in [1u32, 7, 27, 64, 200] {
+            assert_eq!(allocate(&[2.0, 5.0, 0.3], n).iter().sum::<u32>(), n, "total for {n}");
+        }
+    }
+
+    /// Two paths share one buffer and one draw call, and each carries its own
+    /// reach - which is the whole reason a bar holds reach rather than the
+    /// shader holding a uniform.
+    #[test]
+    fn build_splits_bars_and_keeps_per_path_reach() {
+        let line = |x0: f32, x1: f32| {
+            vec![
+                Control { x: x0, y: 0.5, scale: 1.0, angle: None },
+                Control { x: x1, y: 0.5, scale: 1.0, angle: None },
+            ]
+            .into_boxed_slice()
+        };
+        let paths = vec![
+            PathSpec { controls: line(0.0, 0.6), reach: 0.4, width: 0.01, ..Default::default() },
+            PathSpec { controls: line(0.7, 1.0), reach: 0.1, width: 0.02, ..Default::default() },
+        ];
+        let bars = build(&paths, 20, 16.0 / 9.0);
+        assert_eq!(bars.len(), 20);
+        // Twice the length, twice the bars.
+        let long = bars.iter().filter(|b| (b.reach - 0.4).abs() < 1e-6).count();
+        assert_eq!(long, 13, "0.6 against 0.3 of width");
+        assert!(bars.iter().filter(|b| (b.reach - 0.1).abs() < 1e-6).count() == 7);
+        // A path with too few points to be a curve is skipped, not drawn as a
+        // point: one path left means it takes every bar.
+        let broken = vec![
+            paths[0].clone(),
+            PathSpec { controls: Box::new([]), ..Default::default() },
+        ];
+        assert_eq!(build(&broken, 9, 1.0).len(), 9);
+        assert!(build(&[], 9, 1.0).is_empty());
     }
 
     /// A flat silhouette occludes at a constant height, and one drawn across

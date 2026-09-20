@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::collections::HashMap;
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Config {
@@ -44,7 +45,10 @@ pub struct CurveConfig {
     /// the origin top-left, plus an optional third component scaling the bars
     /// there. That third value is what makes a distant part of a ridge carry
     /// shorter, thinner bars.
-    pub points: Vec<Vec<f32>>,
+    ///
+    /// The single-path shorthand. A curve made of several disconnected
+    /// stretches writes a `[[curves.<key>.path]]` block each instead.
+    pub points: Option<Vec<Vec<f32>>>,
     /// How far a full-volume bar reaches along the normal, as a fraction of
     /// the output height.
     pub height: Option<f32>,
@@ -53,18 +57,59 @@ pub struct CurveConfig {
     pub width: Option<f32>,
     /// Flip which side of the path the bars grow toward.
     pub flip: Option<bool>,
-    /// Bar count for this mode only. A path wants its own density - 12 bars
-    /// suits a bottom row and leaves gaping holes along a ridge - and changing
+    /// Keep bars vertical instead of turning them onto the path's normal.
+    /// Straight rectangles rising from the ridge rather than leaning with it.
+    pub upright: Option<bool>,
+    /// Several disconnected paths, each with its own shape and its own bar
+    /// geometry - two ridges at different distances want different reaches.
+    /// Present, it replaces the fields above; absent, they are the one path.
+    pub path: Option<Vec<PathConfig>>,
+    /// Bar count for this mode only, shared across every path and split
+    /// between them by length. A path wants its own density - 12 bars suits a
+    /// bottom row and leaves gaping holes along a ridge - and changing
     /// `[bars] amount` would move the other modes with it.
     pub bars: Option<u32>,
     /// Optional silhouette to hide behind: `[[x, y], ...]` in the same
     /// normalised coordinates as `points`. Anything BELOW it is discarded, so
     /// bars rise from behind a ridge instead of being positioned to look as
     /// though they do.
+    ///
+    /// One per curve, not one per path: it is the wallpaper's skyline, and
+    /// every path on that wallpaper hides behind the same one.
     pub occlude: Option<Vec<Vec<f32>>>,
-    /// Keep bars vertical instead of turning them onto the path's normal.
-    /// Straight rectangles rising from the ridge rather than leaning with it.
+}
+
+/// One stretch of path. Everything about a bar's geometry lives here, so two
+/// paths on the same wallpaper can differ in reach, width and lean.
+#[derive(Serialize, Deserialize, Debug, Default, Clone)]
+pub struct PathConfig {
+    /// As `CurveConfig::points`.
+    pub points: Vec<Vec<f32>>,
+    pub height: Option<f32>,
+    pub width: Option<f32>,
+    pub flip: Option<bool>,
     pub upright: Option<bool>,
+}
+
+impl CurveConfig {
+    /// The paths to draw, however they were written.
+    ///
+    /// Borrowed where they already exist and synthesised only for the
+    /// single-path shorthand, which is both the old format and still the
+    /// shortest way to write one curve.
+    #[must_use]
+    pub fn paths(&self) -> Cow<'_, [PathConfig]> {
+        match &self.path {
+            Some(paths) if !paths.is_empty() => Cow::Borrowed(paths),
+            _ => Cow::Owned(vec![PathConfig {
+                points: self.points.clone().unwrap_or_default(),
+                height: self.height,
+                width: self.width,
+                flip: self.flip,
+                upright: self.upright,
+            }]),
+        }
+    }
 }
 
 /// Where a circle sits on the output.
@@ -487,5 +532,59 @@ mod tests {
         assert_eq!(&buf[4..16], &[0u8; 12], "vec4 alignment padding");
         assert_eq!(buf.len(), 16 + 2 * 16);
         assert_eq!(&buf[16..20], &1.0f32.to_le_bytes());
+    }
+
+    /// Both spellings have to parse, and mean what they say: the shorthand is
+    /// what every existing config is written in, and dropping it would break
+    /// every curve anyone has already authored.
+    #[test]
+    fn a_curve_reads_as_one_path_or_many() {
+        // Deserialised as the curve map itself: the surrounding Config wants
+        // half a dozen unrelated sections that say nothing about a curve.
+        let short: HashMap<String, CurveConfig> = toml::from_str(
+            r#"
+            [abc]
+            bars = 27
+            height = 0.10
+            upright = true
+            points = [[0.1, 0.2], [0.3, 0.4]]
+            "#,
+        )
+        .expect("shorthand parses");
+        let curve = &short["abc"];
+        let paths = curve.paths();
+        assert_eq!(paths.len(), 1, "the top level is the one path");
+        assert_eq!(paths[0].points.len(), 2);
+        assert_eq!(paths[0].height, Some(0.10));
+        assert_eq!(paths[0].upright, Some(true));
+        assert_eq!(curve.bars, Some(27));
+
+        let many: HashMap<String, CurveConfig> = toml::from_str(
+            r#"
+            [abc]
+            bars = 40
+            occlude = [[0.0, 0.5], [1.0, 0.5]]
+
+            [[abc.path]]
+            height = 0.20
+            points = [[0.1, 0.2], [0.3, 0.4]]
+
+            [[abc.path]]
+            height = 0.05
+            flip = true
+            points = [[0.6, 0.3], [0.9, 0.3]]
+            "#,
+        )
+        .expect("path blocks parse");
+        let curve = &many["abc"];
+        let paths = curve.paths();
+        assert_eq!(paths.len(), 2);
+        // Each path keeps its own geometry; the silhouette stays shared.
+        assert_eq!(paths[0].height, Some(0.20));
+        assert_eq!(paths[1].height, Some(0.05));
+        assert_eq!(paths[1].flip, Some(true));
+        assert_eq!(paths[0].flip, None);
+        assert_eq!(curve.occlude.as_ref().unwrap().len(), 2);
+        assert!(curve.points.is_none(), "path blocks replace the shorthand");
     }
 }
