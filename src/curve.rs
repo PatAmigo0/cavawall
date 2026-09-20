@@ -39,15 +39,37 @@ impl Control {
 /// Catmull-Rom through `p1`..`p2`, with `p0`/`p3` as the neighbouring tangent
 /// controls. Chosen over Bezier because it passes THROUGH its control points:
 /// a point clicked on a ridge is on the ridge, with no handles to tune
+/// `a * b + c`, as one instruction where the target has FMA
+///
+/// `mul_add` is a single `vfmaddss` with FMA available and a call into libm
+/// without it, which is far slower than the two instructions it replaces. The
+/// package build targets baseline x86-64 deliberately, so the choice has to be
+/// made at compile time rather than assumed
+#[inline(always)]
+fn fma(a: f32, b: f32, c: f32) -> f32 {
+    #[cfg(target_feature = "fma")]
+    {
+        a.mul_add(b, c)
+    }
+    #[cfg(not(target_feature = "fma"))]
+    {
+        a * b + c
+    }
+}
+
+/// One Catmull-Rom segment, evaluated by Horner's method
+///
+/// Horner is 3 multiplies and 3 adds per axis against 6 and 5 for the expanded
+/// polynomial, needs no `t2`/`t3`, and rounds once per step instead of twice.
+/// Each step is also exactly the shape FMA wants
 fn catmull_rom(p0: [f32; 2], p1: [f32; 2], p2: [f32; 2], p3: [f32; 2], t: f32) -> [f32; 2] {
-    let (t2, t3) = (t * t, t * t * t);
     let mut out = [0.0; 2];
     for i in 0..2 {
-        out[i] = 0.5
-            * ((2.0 * p1[i])
-                + (-p0[i] + p2[i]) * t
-                + (2.0 * p0[i] - 5.0 * p1[i] + 4.0 * p2[i] - p3[i]) * t2
-                + (-p0[i] + 3.0 * p1[i] - 3.0 * p2[i] + p3[i]) * t3);
+        let a = -p0[i] + 3.0 * p1[i] - 3.0 * p2[i] + p3[i];
+        let b = 2.0 * p0[i] - 5.0 * p1[i] + 4.0 * p2[i] - p3[i];
+        let c = -p0[i] + p2[i];
+        let d = 2.0 * p1[i];
+        out[i] = 0.5 * fma(fma(fma(a, t, b), t, c), t, d);
     }
     out
 }
