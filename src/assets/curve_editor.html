@@ -119,7 +119,8 @@ select{background:#1e1e26;color:#e6e6ea;border:1px solid #33333f;border-radius:6
 </header>
 <div id=wrap><canvas id=c></canvas></div>
 <div id=panel>
-  <label>bars <input type=range id=bars min=8 max=200 step=1 value=64><span class=val id=barsv>64</span></label>
+  <label>bars <input type=range id=bars min=1 max=200 step=1 value=64><span class=val id=barsv>64</span>
+    <input type=checkbox id=ownbars> <span class=hint>own</span></label>
   <label>height <input type=range id=height min=1 max=40 step=1 value=10><span class=val id=heightv>0.10</span></label>
   <label>width <input type=range id=width min=1 max=30 step=1 value=4><span class=val id=widthv>0.004</span></label>
   <label>curve <input type=range id=opacity min=5 max=100 step=5 value=100><span class=val id=opacityv>1.00</span></label>
@@ -165,7 +166,9 @@ const img=new Image();
 // two ridges at different distances want different reaches. `pts` is the
 // active path's point array itself, not a copy, so every editing path below
 // keeps working on it unchanged.
-let paths=[{pts:[],h:10,w:4,up:false,fl:false}], cur=0;
+// `bn` is a path's own bar count, or null for a share of the total by
+// length - exactly the two forms the config has.
+let paths=[{pts:[],h:10,w:4,up:false,fl:false,bn:null}], cur=0, barsTotal=64;
 let pts=paths[0].pts, occ=[], sel=-1, drag=-1, shift=false, hist=[];
 const cp=()=>paths[cur];
 // Which modifier does what. Kept in the browser so a choice survives a
@@ -226,20 +229,21 @@ function loadExisting(){
     // so the head of the file is just another block when there are none.
     const sources=blocks.length?blocks:[t];
     paths=sources.map(b=>{
-      const p={pts:[],h:Math.round(num(b,'height',num(t,'height',0.10))*100),
+      const p={pts:[],bn:blocks.length?(/bars\s*=/.test(b)?Math.round(num(b,'bars',0)):null):null,
+               h:Math.round(num(b,'height',num(t,'height',0.10))*100),
                w:Math.round(num(b,'width',num(t,'width',0.004))*1000),
                up:/upright\s*=\s*true/.test(b),fl:/flip\s*=\s*true/.test(b)};
       pointsIn(b,p.pts);
       return p;
     }).filter(p=>p.pts.length);
-    if(!paths.length)paths=[{pts:[],h:10,w:4,up:false,fl:false}];
+    if(!paths.length)paths=[{pts:[],h:10,w:4,up:false,fl:false,bn:null}];
     cur=0;pts=cp().pts;
     const o=t.match(/occlude\s*=\s*\[([\s\S]*?)\n\]/);
     if(o) for(const row of o[1].matchAll(/\[([^\]]+)\]/g)){
       const v=row[1].split(',').map(s=>parseFloat(s.trim()));
       if(v.length>=2) occ.push({x:v[0],y:v[1],s:1,a:null});
     }
-    $('bars').value=num(t,'bars',64);
+    barsTotal=Math.round(num(t,'bars',64));
     showPath();
   }).catch(draw);
 }
@@ -250,7 +254,9 @@ function showPath(){
   $('pathlabel').textContent='path '+(cur+1)+'/'+paths.length;
   $('height').value=cp().h; $('width').value=cp().w;
   $('upright').checked=cp().up; $('flip').checked=cp().fl;
-  $('barsv').textContent=$('bars').value;
+  $('ownbars').checked=cp().bn!=null;
+  $('bars').value=cp().bn!=null?cp().bn:barsTotal;
+  $('barsv').textContent=$('bars').value+(cp().bn!=null?'':' all');
   $('heightv').textContent=(cp().h/100).toFixed(2);
   $('widthv').textContent=(cp().w/1000).toFixed(3);
   sel=-1;showSel();draw();
@@ -294,11 +300,30 @@ function clipAboveHorizon(){
   x.lineTo(c.width,0);x.closePath();x.clip();
   return true;
 }
+// Paths that each name a count add up to the total; otherwise the total is
+// its own setting and they share it.
+function totalBars(){
+  return paths.every(P=>P.bn!=null)
+    ? Math.max(1,paths.reduce((a,P)=>a+P.bn,0))
+    : barsTotal;
+}
 function pathLen(d){let t=0;for(let i=1;i<d.length;i++)t+=Math.hypot(d[i].p[0]-d[i-1].p[0],d[i].p[1]-d[i-1].p[1]);return t;}
-// Largest remainder, the same rule curve::allocate uses: bars split between
-// paths by length, and the total is exactly the bar count.
-function alloc(lens,total){
+// The same rule curve::allocate uses: a path's own count comes off the top,
+// the rest split what is left by length, largest remainder, and the total is
+// exactly the bar count.
+function alloc(lens,fixed,total){
   const n=lens.length; if(!n)return[];
+  if(fixed&&fixed.some(v=>v!=null)){
+    const asked=fixed.reduce((a,v)=>a+(v||0),0);
+    if(asked>=total) return alloc(fixed.map(v=>v||0),null,total);
+    const out=fixed.map(v=>v||0);
+    const rest=lens.map((l,i)=>fixed[i]!=null?0:l);
+    if(rest.some(l=>l>0)){
+      const share=alloc(rest,null,total-asked);
+      for(let i=0;i<n;i++) if(!out[i]) out[i]=share[i];
+    }
+    return out;
+  }
   const sum=lens.reduce((a,b)=>a+b,0);
   if(!(sum>0)){const e=Math.floor(total/n),o=new Array(n).fill(e);for(let i=0;i<total%n;i++)o[i]++;return o;}
   const ideal=lens.map(l=>total*l/sum), out=ideal.map(v=>Math.floor(v));
@@ -321,7 +346,7 @@ function draw(){
   // them the same way the renderer does - over the paths that ARE paths,
   // since curve::build drops a one-point path before it allocates anything.
   const usable=ds.map((d,i)=>d.length>1?i:-1).filter(i=>i>=0);
-  const share=alloc(usable.map(i=>pathLen(ds[i])),+$('bars').value);
+  const share=alloc(usable.map(i=>pathLen(ds[i])),usable.map(i=>paths[i].bn),totalBars());
   const counts=new Array(ds.length).fill(0);
   usable.forEach((i,k)=>{counts[i]=share[k];});
   if($('showcurve').checked) ds.forEach((d,i)=>{
@@ -632,11 +657,18 @@ $('trace').onclick=()=>{
   sel=-1;showSel();draw();
 };
 $('clearall').onclick=()=>{
-  pushHist();paths=[{pts:[],h:cp().h,w:cp().w,up:cp().up,fl:cp().fl}];cur=0;occ=[];showPath();
+  pushHist();paths=[{pts:[],h:cp().h,w:cp().w,up:cp().up,fl:cp().fl,bn:cp().bn}];cur=0;occ=[];showPath();
+};
+$('ownbars').onchange=()=>{
+  cp().bn=$('ownbars').checked?+$('bars').value:null;
+  $('bars').value=cp().bn!=null?cp().bn:barsTotal;
+  $('barsv').textContent=$('bars').value+(cp().bn!=null?'':' all');
+  draw();
 };
 for(const id of ['bars','height','width']) $(id).oninput=()=>{
   cp().h=+$('height').value; cp().w=+$('width').value;
-  $('barsv').textContent=$('bars').value;
+  if(cp().bn!=null) cp().bn=+$('bars').value; else barsTotal=+$('bars').value;
+  $('barsv').textContent=$('bars').value+(cp().bn!=null?'':' all');
   $('heightv').textContent=(cp().h/100).toFixed(2);
   $('widthv').textContent=(cp().w/1000).toFixed(3);draw();};
 $('upright').onchange=()=>{cp().up=$('upright').checked;draw();};
@@ -661,13 +693,13 @@ $('addpath').onclick=()=>{
   pushHist();
   // A new path inherits the current one's geometry: a second ridge on the
   // same wallpaper usually wants the same look, not the defaults.
-  paths.push({pts:[],h:cp().h,w:cp().w,up:cp().up,fl:cp().fl});
+  paths.push({pts:[],h:cp().h,w:cp().w,up:cp().up,fl:cp().fl,bn:cp().bn});
   cur=paths.length-1;occmode=false;syncOcc();showPath();
 };
 $('delpath').onclick=()=>{
   pushHist();
   paths.splice(cur,1);
-  if(!paths.length)paths=[{pts:[],h:10,w:4,up:false,fl:false}];
+  if(!paths.length)paths=[{pts:[],h:10,w:4,up:false,fl:false,bn:null}];
   cur=Math.min(cur,paths.length-1);showPath();
 };
 function undo(){
@@ -705,13 +737,16 @@ function emit(){
     if(p.a!=null)v.push(p.a.toFixed(0));
     return '  ['+v.join(', ')+'],';
   }).join('\n');
-  let out='bars = '+$('bars').value+'\n';
+  // Only written when some path is sharing: when every path names its own
+  // count, the total is their sum and saying it twice invites them to differ.
+  let out=paths.every(P=>P.bn!=null)?'':'bars = '+barsTotal+'\n';
   // One silhouette for the whole curve: it is the wallpaper's skyline, and
   // every path on it hides behind the same one.
   if(occ.length>1) out+='occlude = [\n'+occ.map(p=>'  ['+p.x.toFixed(4)+', '+p.y.toFixed(4)+'],').join('\n')+'\n]\n';
   for(const P of paths){
     if(P.pts.length<2)continue;
     out+='\n[[curves.'+KEY+'.path]]\n'
+       +(P.bn!=null?'bars = '+P.bn+'\n':'')
        +'height = '+(P.h/100).toFixed(2)+'\n'
        +'width = '+(P.w/1000).toFixed(3)+'\n'
        +(P.up?'upright = true\n':'')

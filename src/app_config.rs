@@ -85,6 +85,9 @@ pub struct CurveConfig {
 pub struct PathConfig {
     /// As `CurveConfig::points`.
     pub points: Vec<Vec<f32>>,
+    /// Exactly this many bars on this path, instead of its share by length.
+    /// A short foreground ridge can want more bars than a long distant one.
+    pub bars: Option<u32>,
     pub height: Option<f32>,
     pub width: Option<f32>,
     pub flip: Option<bool>,
@@ -92,6 +95,25 @@ pub struct PathConfig {
 }
 
 impl CurveConfig {
+    /// How many bars this curve draws in total.
+    ///
+    /// The curve's own `bars` is the authority, because it is also what cava
+    /// is told to produce. Without one, paths that each name a count add up to
+    /// it - which is the form the editor writes, and saves naming the total
+    /// twice.
+    #[must_use]
+    pub fn total_bars(&self) -> Option<u32> {
+        if let Some(n) = self.bars {
+            return Some(n);
+        }
+        let paths = self.path.as_ref()?;
+        paths
+            .iter()
+            .map(|p| p.bars)
+            .try_fold(0u32, |acc, n| Some(acc + n?))
+            .filter(|n| *n > 0)
+    }
+
     /// The paths to draw, however they were written.
     ///
     /// Borrowed where they already exist and synthesised only for the
@@ -103,6 +125,7 @@ impl CurveConfig {
             Some(paths) if !paths.is_empty() => Cow::Borrowed(paths),
             _ => Cow::Owned(vec![PathConfig {
                 points: self.points.clone().unwrap_or_default(),
+                bars: self.bars,
                 height: self.height,
                 width: self.width,
                 flip: self.flip,

@@ -442,13 +442,24 @@ fn main() {
     // wants a different density from a bottom row, and `[bars] amount` is
     // shared by all three.
     let configured_mode = config.general.mode.unwrap_or_default();
+    // Resolved here rather than at the curve setup below, because the bar
+    // count comes out of it. Taking `values().next()` instead was a bug with
+    // no symptom until a second wallpaper was configured: HashMap order is
+    // not defined, so the count came from an arbitrary curve and could differ
+    // between two runs of the same binary on the same config.
+    let active_curve = (configured_mode == Mode::Curve)
+        .then(|| {
+            let key = curve::current_wallpaper().and_then(|w| curve::content_key(&w))?;
+            let found = config.curves.as_ref()?.get(&key);
+            if found.is_none() && debug_enabled() {
+                eprintln!("cavawall: no curve for wallpaper {key}, falling back to bars");
+            }
+            found
+        })
+        .flatten();
     let bar_count = match configured_mode {
         Mode::Circle => config.circle.as_ref().and_then(|c| c.bars),
-        Mode::Curve => config
-            .curves
-            .as_ref()
-            .and_then(|m| m.values().next())
-            .and_then(|c| c.bars),
+        Mode::Curve => active_curve.and_then(CurveConfig::total_bars),
         Mode::Bars => None,
     }
     .unwrap_or(if follow_bars {
@@ -668,16 +679,6 @@ fn main() {
     // A curve is authored against ONE wallpaper. If the current one has no
     // entry, fall back to bars rather than draw a ridge traced from a
     // different image - which is the whole point of keying them.
-    let active_curve = (mode == Mode::Curve)
-        .then(|| {
-            let key = curve::current_wallpaper().and_then(|w| curve::content_key(&w))?;
-            let found = config.curves.as_ref()?.get(&key);
-            if found.is_none() && debug_enabled() {
-                eprintln!("cavawall: no curve for wallpaper {key}, falling back to bars");
-            }
-            found
-        })
-        .flatten();
     if mode == Mode::Curve && active_curve.is_none() {
         mode = Mode::Bars;
     }
@@ -811,6 +812,7 @@ fn main() {
                         // NDC spans 2.0, so a fraction of the output is twice
                         // that. Per path, because two ridges at different
                         // distances want different reaches.
+                        bars: path.bars,
                         reach: path.height.or(cfg.height).unwrap_or(0.18).clamp(0.0, 1.0) * 2.0,
                         width: path.width.or(cfg.width).unwrap_or(0.006).clamp(0.0, 1.0) * 2.0,
                         flip: path.flip.or(cfg.flip).unwrap_or(false),
