@@ -209,7 +209,8 @@ pub struct PathSpec {
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Bar {
     pub pos: [f32; 2],
-    pub angle: f32,
+    /// Unit normal, the direction the bar grows in
+    pub normal: [f32; 2],
     pub reach: f32,
     pub width: f32,
 }
@@ -319,7 +320,7 @@ pub fn build(paths: &[PathSpec], count: u32, aspect: f32, fit: Fit) -> Vec<Bar> 
         for (s, scale) in sample_arc(a, n as usize, spec.flip, spec.upright, aspect) {
             out.push(Bar {
                 pos: s.pos,
-                angle: s.normal[1].atan2(s.normal[0]),
+                normal: s.normal,
                 reach: spec.reach * scale,
                 width: spec.width * scale,
             });
@@ -338,7 +339,7 @@ pub fn bounds(bars: &[Bar]) -> (f32, f32, f32, f32) {
     let (mut x0, mut y0) = (f32::MAX, f32::MAX);
     let (mut x1, mut y1) = (f32::MIN, f32::MIN);
     for bar in bars {
-        let n = [bar.angle.cos(), bar.angle.sin()];
+        let n = bar.normal;
         let t = [-n[1], n[0]];
         let half = bar.width * 0.5;
         let tip = [n[0] * bar.reach, n[1] * bar.reach];
@@ -685,7 +686,7 @@ mod tests {
     fn bounds_cover_bar_and_width() {
         let bar = Bar {
             pos: [0.0, 0.0],
-            angle: std::f32::consts::FRAC_PI_2,
+            normal: [0.0, 1.0],
             reach: 0.5,
             width: 0.2,
         };
