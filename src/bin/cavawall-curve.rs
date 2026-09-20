@@ -155,15 +155,36 @@ fn config_path() -> PathBuf {
         .join("cavawall/config.toml")
 }
 
+/// Where this key's block starts and ends in `text`, as byte offsets into it.
+///
+/// The end is the next section header at column 0 that is NOT one of this
+/// curve's own sub-tables: `[[curves.<key>.path]]` blocks belong to the block
+/// and stopping at the first `\n[` would cut every path but the first out of
+/// it - and then write the rest of the config away.
+fn block_span(text: &str, key: &str) -> Option<(usize, usize)> {
+    let header = format!("[curves.{key}]");
+    let start = text.find(&header)?;
+    let body = start + header.len();
+    let own = format!("[curves.{key}.");
+    let mut end = text.len();
+    let mut at = body;
+    for line in text[body..].split_inclusive('\n') {
+        if line.starts_with('[') && !line.starts_with(&own) && !line.starts_with(&format!("[{own}"))
+        {
+            end = at;
+            break;
+        }
+        at += line.len();
+    }
+    Some((start, end))
+}
+
 /// The `[curves.<key>]` block currently in the config, if any.
 fn existing_block(key: &str) -> Option<String> {
     let text = std::fs::read_to_string(config_path()).ok()?;
+    let (start, end) = block_span(&text, key)?;
     let header = format!("[curves.{key}]");
-    let start = text.find(&header)?;
-    let rest = &text[start + header.len()..];
-    // Runs to the next section header at column 0, or to the end.
-    let end = rest.find("\n[").map_or(rest.len(), |i| i + 1);
-    Some(rest[..end].to_string())
+    Some(text[start + header.len()..end].to_string())
 }
 
 /// Replace this key's block, or append one. Everything else is left byte for
@@ -174,12 +195,9 @@ fn write_block(key: &str, block: &str) -> Result<PathBuf, String> {
     let header = format!("[curves.{key}]");
     let new_section = format!("{header}\n{}\n", block.trim_end());
 
-    let updated = if let Some(start) = text.find(&header) {
-        let rest = &text[start + header.len()..];
-        let end = rest.find("\n[").map_or(text.len(), |i| start + header.len() + i + 1);
-        format!("{}{new_section}{}", &text[..start], &text[end..])
-    } else {
-        format!("{}\n\n{new_section}", text.trim_end())
+    let updated = match block_span(&text, key) {
+        Some((start, end)) => format!("{}{new_section}{}", &text[..start], &text[end..]),
+        None => format!("{}\n\n{new_section}", text.trim_end()),
     };
 
     // Written via a temp file in the same directory and renamed: a half-written
@@ -188,4 +206,43 @@ fn write_block(key: &str, block: &str) -> Result<PathBuf, String> {
     std::fs::write(&tmp, updated).map_err(|e| e.to_string())?;
     std::fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
     Ok(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::block_span;
+
+    /// The block ends at the next foreign section, and a curve's own path
+    /// sub-tables are not foreign. Getting this wrong does not corrupt one
+    /// curve - it writes the entire rest of the config away.
+    #[test]
+    fn a_block_keeps_its_own_path_tables() {
+        let text = "\
+[scheme]
+bars = true
+
+[curves.abc]
+bars = 27
+
+[[curves.abc.path]]
+points = [[0.1, 0.2]]
+
+[[curves.abc.path]]
+points = [[0.3, 0.4]]
+
+[curves.def]
+bars = 12
+";
+        let (start, end) = block_span(text, "abc").expect("block is there");
+        let block = &text[start..end];
+        assert_eq!(block.matches("[[curves.abc.path]]").count(), 2, "both paths kept");
+        assert!(!block.contains("curves.def"), "stops at the next curve");
+        assert!(!block.contains("[scheme]"), "starts at its own header");
+        // The tail has to survive verbatim: it is what gets written back.
+        assert!(text[end..].starts_with("[curves.def]"));
+        assert!(block_span(text, "missing").is_none());
+        // A block at the very end runs to the end of the file.
+        let (_, end) = block_span(text, "def").expect("last block");
+        assert_eq!(end, text.len());
+    }
 }

@@ -660,13 +660,10 @@ fn main() {
         );
     }
     let mut mode = configured_mode;
-    let mut curve_controls: Vec<curve::Control> = Vec::new();
-    let mut curve_flip = false;
-    let mut curve_upright = false;
+    let mut curve_paths: Vec<curve::PathSpec> = Vec::new();
     let mut path_ssbo: u32 = 0;
+    let mut width_ssbo: u32 = 0;
     let mut occ_ssbo: u32 = 0;
-    let mut curve_reach = 0.0f32;
-    let mut curve_bar_width = 0.0f32;
     // A curve is authored against ONE wallpaper. If the current one has no
     // entry, fall back to bars rather than draw a ridge traced from a
     // different image - which is the whole point of keying them.
@@ -793,41 +790,37 @@ fn main() {
                 let cfg = active_curve.expect("curve mode implies a matching curve");
                 // [x, y] or [x, y, scale]; a short or empty entry is a config
                 // typo, and skipping it beats rendering a bar at the origin.
-                curve_flip = cfg.flip.unwrap_or(false);
-                curve_upright = cfg.upright.unwrap_or(false);
-                curve_controls = cfg
-                    .points
+                // Every path resolved up front, each with its own geometry:
+                // the shader never learns that paths exist.
+                curve_paths = cfg
+                    .paths()
                     .iter()
-                    .filter(|p| p.len() >= 2)
-                    .map(|p| curve::Control {
-                        x: p[0],
-                        y: p[1],
-                        scale: p.get(2).copied().unwrap_or(1.0).max(0.0),
-                        angle: p.get(3).copied(),
-                    })
-                    .collect();
-                // Seeded with a square aspect; configure() re-uploads with the
-                // real one as soon as a surface exists.
-                let samples =
-                    curve::resample(&curve_controls, bar_count, curve_flip, curve_upright, 1.0);
-                // One vec4 per bar: xy base, z the normal's angle, w the
-                // scale. Angle keeps a bar to a single vec4.
-                let packed: Vec<[f32; 4]> = samples
-                    .iter()
-                    .map(|(s, scale)| {
-                        [s.pos[0], s.pos[1], s.normal[1].atan2(s.normal[0]), *scale]
+                    .map(|path| curve::PathSpec {
+                        controls: path
+                            .points
+                            .iter()
+                            .filter(|p| p.len() >= 2)
+                            .map(|p| curve::Control {
+                                x: p[0],
+                                y: p[1],
+                                scale: p.get(2).copied().unwrap_or(1.0).max(0.0),
+                                angle: p.get(3).copied(),
+                            })
+                            .collect(),
+                        // NDC spans 2.0, so a fraction of the output is twice
+                        // that. Per path, because two ridges at different
+                        // distances want different reaches.
+                        reach: path.height.or(cfg.height).unwrap_or(0.18).clamp(0.0, 1.0) * 2.0,
+                        width: path.width.or(cfg.width).unwrap_or(0.006).clamp(0.0, 1.0) * 2.0,
+                        flip: path.flip.or(cfg.flip).unwrap_or(false),
+                        upright: path.upright.or(cfg.upright).unwrap_or(false),
                     })
                     .collect();
                 gl::GenBuffers(1, &mut path_ssbo);
-                gl::BindBuffer(gl::SHADER_STORAGE_BUFFER, path_ssbo);
-                gl::BufferData(
-                    gl::SHADER_STORAGE_BUFFER,
-                    std::mem::size_of_val(packed.as_slice()) as GLsizeiptr,
-                    packed.as_ptr().cast(),
-                    gl::STATIC_DRAW,
-                );
-                gl::BindBufferBase(gl::SHADER_STORAGE_BUFFER, 1, path_ssbo);
-                gl::BindBuffer(gl::SHADER_STORAGE_BUFFER, 0);
+                gl::GenBuffers(1, &mut width_ssbo);
+                // Seeded with a square aspect; configure() rebuilds with the
+                // real one as soon as a surface exists.
+                upload_bars(&curve::build(&curve_paths, bar_count, 1.0), path_ssbo, width_ssbo);
                 let curve_horizon = cfg.occlude.as_ref().map_or_else(Vec::new, |pts| {
                     let controls: Vec<curve::Control> = pts
                         .iter()
@@ -855,17 +848,6 @@ fn main() {
                 );
                 gl::BindBufferBase(gl::SHADER_STORAGE_BUFFER, 2, occ_ssbo);
                 gl::BindBuffer(gl::SHADER_STORAGE_BUFFER, 0);
-                // NDC spans 2.0, so a fraction of the output is twice that.
-                curve_reach = cfg.height.unwrap_or(0.18).clamp(0.0, 1.0) * 2.0;
-                curve_bar_width = cfg.width.unwrap_or(0.006).clamp(0.0, 1.0) * 2.0;
-                gl::Uniform1f(
-                    gl::GetUniformLocation(shader_program, c"Reach".as_ptr()),
-                    curve_reach,
-                );
-                gl::Uniform1f(
-                    gl::GetUniformLocation(shader_program, c"BarWidth".as_ptr()),
-                    curve_bar_width,
-                );
                 gl::Uniform1f(
                     gl::GetUniformLocation(shader_program, c"InnerAlpha".as_ptr()),
                     circle.inner_alpha,
@@ -972,12 +954,9 @@ fn main() {
         max_height: config.bars.max_height.unwrap_or(1.0),
         mode,
         circle,
-        curve_controls: curve_controls.into_boxed_slice(),
-        curve_flip,
-        curve_upright,
+        curve_paths: curve_paths.into_boxed_slice(),
         path_ssbo,
-        curve_reach,
-        curve_bar_width,
+        width_ssbo,
         curve_box: None,
         curve_output: (1, 1),
         resolution_location,
@@ -1073,17 +1052,12 @@ struct AppState {
     /// with different uniforms and different surface geometry.
     mode: Mode,
     circle: CircleGeom,
-    /// Curve mode only. Kept so the path can be resampled again in configure:
-    /// normals are perpendicular in PIXEL space, which depends on the output's
-    /// aspect ratio, and that is not known until a surface is configured.
-    curve_controls: Box<[curve::Control]>,
-    curve_flip: bool,
-    curve_upright: bool,
+    /// Curve mode only. Kept so the bars can be rebuilt in configure: normals
+    /// are perpendicular in PIXEL space, which depends on the output's aspect
+    /// ratio, and that is not known until a surface is configured.
+    curve_paths: Box<[curve::PathSpec]>,
     path_ssbo: u32,
-    /// Reach and width in OUTPUT NDC, kept so the bounding box can be
-    /// recomputed whenever the output changes.
-    curve_reach: f32,
-    curve_bar_width: f32,
+    width_ssbo: u32,
     /// Where the curve surface sits on the output, in output pixels:
     /// (left, top, width, height). None means the whole output.
     curve_box: Option<(u32, u32, u32, u32)>,
@@ -1465,18 +1439,12 @@ impl AppState {
     /// not just of the path. A box that saves little is not worth the mapping:
     /// below a fifth saved this returns None and the surface stays whole.
     fn curve_bbox(&self) -> Option<(u32, u32, u32, u32)> {
-        if self.curve_controls.is_empty() {
+        if self.curve_paths.is_empty() {
             return None;
         }
         let (ow, oh) = (self.width as f32, self.height as f32);
-        let samples = curve::resample(
-            &self.curve_controls,
-            self.bar_count,
-            self.curve_flip,
-            self.curve_upright,
-            ow / oh.max(1.0),
-        );
-        let (x0, y0, x1, y1) = curve::bounds(&samples, self.curve_reach, self.curve_bar_width);
+        let bars = curve::build(&self.curve_paths, self.bar_count, ow / oh.max(1.0));
+        let (x0, y0, x1, y1) = curve::bounds(&bars);
         // NDC -> pixels, y flipped: NDC counts up, a margin counts down.
         let pad = 2.0;
         let left = (((x0 + 1.0) * 0.5 * ow) - pad).floor().clamp(0.0, ow);
@@ -1599,6 +1567,34 @@ impl AppState {
         self.placed_size = info.logical_size;
     }
 
+}
+
+/// Upload every bar: one vec4 each for base, angle and reach, one float each
+/// for width.
+///
+/// Rewritten whole rather than updated in place - it changes only when the
+/// output's shape does, which is a monitor change, not a frame.
+///
+/// # Safety
+/// A GL context must be current and both buffers must already exist.
+unsafe fn upload_bars(bars: &[curve::Bar], path_ssbo: u32, width_ssbo: u32) {
+    let packed: Vec<[f32; 4]> =
+        bars.iter().map(|b| [b.pos[0], b.pos[1], b.angle, b.reach]).collect();
+    let widths: Vec<f32> = bars.iter().map(|b| b.width).collect();
+    // SAFETY: the caller guarantees a current context and live buffers; both
+    // are only ever rewritten here, each bound to its own binding point.
+    unsafe {
+        let pairs: [(u32, usize, *const ffi::c_void, u32); 2] = [
+            (path_ssbo, size_of_val(packed.as_slice()), packed.as_ptr().cast(), 1),
+            (width_ssbo, size_of_val(widths.as_slice()), widths.as_ptr().cast(), 3),
+        ];
+        for (buf, bytes, ptr, binding) in pairs {
+            gl::BindBuffer(gl::SHADER_STORAGE_BUFFER, buf);
+            gl::BufferData(gl::SHADER_STORAGE_BUFFER, bytes as GLsizeiptr, ptr, gl::STATIC_DRAW);
+            gl::BindBufferBase(gl::SHADER_STORAGE_BUFFER, binding, buf);
+        }
+        gl::BindBuffer(gl::SHADER_STORAGE_BUFFER, 0);
+    }
 }
 
 /// The affine map from OUTPUT NDC into a surface that covers only
@@ -2078,32 +2074,12 @@ impl LayerShellHandler for AppState {
         // the output's shape - which is only known here. Rebuilt on every
         // configure so a move to a differently proportioned monitor re-leans
         // the bars rather than skewing them.
-        if self.mode == Mode::Curve && !self.curve_controls.is_empty() {
-            let aspect = self.width as f32 / self.height.max(1) as f32;
-            let samples = curve::resample(
-                &self.curve_controls,
-                self.bar_count,
-                self.curve_flip,
-                self.curve_upright,
-                aspect,
-            );
-            let packed: Vec<[f32; 4]> = samples
-                .iter()
-                .map(|(s, sc)| [s.pos[0], s.pos[1], s.normal[1].atan2(s.normal[0]), *sc])
-                .collect();
-            // SAFETY: a context is current here; the buffer was created at
-            // startup and is only ever rewritten, never rebound elsewhere.
-            unsafe {
-                gl::BindBuffer(gl::SHADER_STORAGE_BUFFER, self.path_ssbo);
-                gl::BufferData(
-                    gl::SHADER_STORAGE_BUFFER,
-                    std::mem::size_of_val(packed.as_slice()) as GLsizeiptr,
-                    packed.as_ptr().cast(),
-                    gl::STATIC_DRAW,
-                );
-                gl::BindBufferBase(gl::SHADER_STORAGE_BUFFER, 1, self.path_ssbo);
-                gl::BindBuffer(gl::SHADER_STORAGE_BUFFER, 0);
-            }
+        if self.mode == Mode::Curve && !self.curve_paths.is_empty() {
+            let aspect = self.curve_output.0 as f32 / self.curve_output.1.max(1) as f32;
+            let bars = curve::build(&self.curve_paths, self.bar_count, aspect);
+            // SAFETY: a context is current here, and both buffers were created
+            // at startup.
+            unsafe { upload_bars(&bars, self.path_ssbo, self.width_ssbo) };
         }
         // The only moment the bar-to-pixel mapping can change.
         self.damage_map =
