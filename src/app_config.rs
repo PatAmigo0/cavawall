@@ -344,6 +344,7 @@ pub struct CavaSmoothingConfig {
 /// # Panics
 ///
 /// If `hex` is not six hex digits, optionally prefixed with `#`.
+#[must_use]
 pub fn color_from_hex(hex: &str, a: f32) -> [f32; 4] {
     match try_color_from_hex(hex, a) {
         Some(rgba) => rgba,
@@ -354,6 +355,7 @@ pub fn color_from_hex(hex: &str, a: f32) -> [f32; 4] {
 /// Borrows rather than consumes: this runs per stop on every palette reload,
 /// and the old signature cloned the hex `String` twice per call to read six
 /// characters out of it
+#[must_use]
 pub fn array_from_config_color(color: &ConfigColor) -> [f32; 4] {
     match color {
         ConfigColor::Simple(hex) => color_from_hex(hex, 1.0),
@@ -366,6 +368,7 @@ pub fn array_from_config_color(color: &ConfigColor) -> [f32; 4] {
 /// Fallible where `color_from_hex` panics, because this one runs on live input:
 /// the scheme is re-read while the visualiser is running, and a truncated or
 /// half-written file must not take the process down mid-song
+#[must_use]
 pub fn try_color_from_hex(hex: &str, a: f32) -> Option<[f32; 4]> {
     // The slice pattern is the length check, and decoding nibbles directly
     // replaces three `from_str_radix` calls over re-sliced `&str`s
@@ -400,6 +403,7 @@ const fn hex_nibble(b: u8) -> Option<u8> {
 /// puts c10 after c9 rather than after c1, which a plain string sort would not.
 /// A key with no trailing digits keeps a stable place at the end, sorted by
 /// name: losing a stop silently is worse than giving it an arbitrary position
+#[must_use]
 pub fn ordered_stops(colors: &HashMap<String, ConfigColor>) -> Vec<ConfigColor> {
     fn trailing_number(k: &str) -> Option<u64> {
         let digits = k.trim_end_matches(|c: char| !c.is_ascii_digit());
@@ -428,6 +432,7 @@ pub fn ordered_stops(colors: &HashMap<String, ConfigColor>) -> Vec<ConfigColor> 
 /// Every fallback lands on the stop's own `hex`: no scheme, no role on this
 /// stop, a role the scheme lacks, or a value that will not parse. The static
 /// palette is therefore always the floor, never a hole
+#[must_use]
 pub fn resolve_stops(
     stops: &[ConfigColor],
     scheme: Option<&HashMap<String, String>>,
@@ -454,6 +459,7 @@ fn live_colour(stop: &ConfigColor, scheme: Option<&HashMap<String, String>>) -> 
 /// Shared by the initial upload and every live re-upload; when this layout and
 /// the shader's `GradientColors` block disagree the result is silent garbage on
 /// screen, so there is exactly one copy of it
+#[must_use]
 pub fn gradient_buffer(rgba: &[[f32; 4]]) -> Vec<u8> {
     /// i32 count plus three words of padding to reach the stops' vec4 alignment
     const HEADER: usize = 16;
