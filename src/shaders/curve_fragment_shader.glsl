@@ -1,7 +1,7 @@
 #version 430 core
 // The circle's fragment stage plus an occluder. Kept separate rather than
 // branching the shared one: circle mode never binds the occluder buffer, and
-// reading an unbound SSBO is undefined rather than merely empty.
+// reading an unbound SSBO is undefined rather than merely empty
 layout(std430, binding = 0) readonly buffer GradientColors {
     int gradient_colors_size;
     vec4 gradient_colors[];
@@ -15,17 +15,17 @@ layout(std430, binding = 2) readonly buffer Occluder {
 uniform vec2 Resolution;
 // Where this surface sits on the output: xy = origin, zw = size, both
 // normalised, y counted from the bottom. The horizon is authored against the
-// output, so a fragment has to be put back there before it is sampled.
+// output, so a fragment has to be put back there before it is sampled
 uniform vec4 OccMap;
 in float vRadial;
 uniform float InnerAlpha;
 uniform float OuterAlpha;
 // A matte finish: every bar mixed toward one flat tone, so the gradient stops
 // reading as a lit ramp. The tone is the palette's own mean, computed on the
-// CPU, so matte = 1 is the palette flattened rather than an arbitrary grey.
+// CPU, so matte = 1 is the palette flattened rather than an arbitrary grey
 uniform vec3 MatteColor;
 uniform float Matte;
-// One multiplier over whatever alpha the stops already carry.
+// One multiplier over whatever alpha the stops already carry
 uniform float Opacity;
 out vec4 fragColor;
 void main() {
@@ -35,7 +35,7 @@ void main() {
         int i = min(int(f), occ_len - 2);
         float h = mix(horizon[i], horizon[i + 1], f - float(i));
         // gl_FragCoord.y counts up from the bottom, which is the direction the
-        // horizon is stored in, so neither needs flipping.
+        // horizon is stored in, so neither needs flipping
         float fy = OccMap.y + (gl_FragCoord.y / Resolution.y) * OccMap.w;
         if (fy < h) {
             discard;

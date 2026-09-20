@@ -3,9 +3,8 @@
 <style>
 :root{color-scheme:dark}
 *{box-sizing:border-box}
-/* The page fills the viewport and never scrolls: a scrollbar appears exactly
-   at the right edge, which is where the last control point is, and grabbing it
-   instead of the point is the whole problem. */
+/* The page fills the viewport and never scrolls: a scrollbar sits exactly
+   where the last control point does */
 html,body{height:100%;overflow:hidden;overscroll-behavior:none}
 body{margin:0;background:#101014;color:#e6e6ea;font:13px/1.5 ui-sans-serif,system-ui,sans-serif;
      display:flex;flex-direction:column}
@@ -44,8 +43,8 @@ select{background:#1e1e26;color:#e6e6ea;border:1px solid #33333f;border-radius:6
 /* Menus are absolutely positioned, so opening one never reflows a bar and
    never moves the canvas underneath. */
 .menu{position:relative;display:inline-block}
- /* Fixed, and placed by JS: anchored to the button's right edge it ran off
-    the left of a narrow window, taking half of every label with it. */
+ /* Fixed, and placed by JS: a menu anchored to its button's right edge runs
+    off the left of a narrow window */
 .pop{position:fixed;z-index:5;display:none;min-width:210px;max-width:calc(100vw - 16px);
      max-height:72vh;overflow-y:auto;
      background:#16161c;border:1px solid #33333f;border-radius:8px;padding:8px;
@@ -137,13 +136,13 @@ select{background:#1e1e26;color:#e6e6ea;border:1px solid #33333f;border-radius:6
 <textarea id=out readonly spellcheck=false></textarea>
 <script>
 const c=document.getElementById('c'),x=c.getContext('2d');
-// Zoom lives in a CSS transform, not in the drawing: getBoundingClientRect
-// already reports the transformed box, so pos() keeps returning correct
-// normalised coordinates with no maths of its own.
+// Zoom lives in a CSS transform, not in the drawing:
+// getBoundingClientRect reports the transformed box, so pos() needs no
+// maths of its own
 let zoom=1,panx=0,pany=0;
 function applyView(){c.style.transform=`translate(${panx}px,${pany}px) scale(${zoom})`;}
 function atCursor(e,f){
-  // Keep the point under the cursor fixed while the scale changes.
+  // Keep the point under the cursor fixed while the scale changes
   const w=document.getElementById('wrap').getBoundingClientRect();
   const cx=e.clientX-w.left, cy=e.clientY-w.top;
   const before=zoom; zoom=Math.min(12,Math.max(1,f(zoom)));
@@ -153,7 +152,7 @@ function atCursor(e,f){
 }
 function clampPan(){
   // At zoom 1 the canvas is letterboxed and must not drift; beyond that, do
-  // not let the image be dragged entirely off its own frame.
+  // not let the image be dragged entirely off its own frame
   if(zoom<=1){panx=pany=0;return;}
   const w=document.getElementById('wrap').getBoundingClientRect();
   const r=c.getBoundingClientRect();
@@ -167,12 +166,12 @@ const img=new Image();
 // active path's point array itself, not a copy, so every editing path below
 // keeps working on it unchanged.
 // `bn` is a path's own bar count, or null for a share of the total by
-// length - exactly the two forms the config has.
+// length - exactly the two forms the config has
 let paths=[{pts:[],h:10,w:4,up:false,fl:false,bn:null}], cur=0, barsTotal=64;
 let pts=paths[0].pts, occ=[], sel=-1, drag=-1, shift=false, hist=[];
 const cp=()=>paths[cur];
 // Which modifier does what. Kept in the browser so a choice survives a
-// reload; a blocked or private store just means the defaults every time.
+// reload; a blocked or private store just means the defaults every time
 const KEYS={create:'shift',angle:'alt'};
 function held(e,what){
   const k=KEYS[what];
@@ -182,7 +181,7 @@ const KEY=document.getElementById('wpkey').textContent.trim();
 try{Object.assign(KEYS,JSON.parse(localStorage.getItem('cavawall.keys')||'{}'));}catch(e){}
 // The occluder is a second, independent polyline: the mountain silhouette
 // that bars have to hide behind. It is edited with the same handles, so the
-// mode flag decides which list a click lands in.
+// mode flag decides which list a click lands in
 let occmode=false, paintmode=false, painting=false;
 const list=()=>occmode?occ:pts;
 const $=i=>document.getElementById(i);
@@ -197,7 +196,7 @@ for(const m of document.querySelectorAll('.menu')){
   m.querySelector('.pop').onclick=e=>e.stopPropagation();
 }
 // Right-aligned to its button, then pushed back inside the window. Measured
-// after it is shown, because a display:none box measures zero.
+// after it is shown, because a display:none box measures zero
 function place(m){
   const b=m.querySelector('[data-pop]').getBoundingClientRect();
   const pop=m.querySelector('.pop');
@@ -208,7 +207,7 @@ function place(m){
 }
 addEventListener('click',()=>document.querySelectorAll('.menu').forEach(m=>m.classList.remove('open')));
 addEventListener('resize',()=>document.querySelectorAll('.menu.open').forEach(place));
-// Capped so a long session cannot grow it without bound.
+// Capped so a long session cannot grow it without bound
 function invalidateHz(){hzCache=null;hzKey='';}
 function pushHist(){hist.push(JSON.stringify({p:paths,o:occ,c:cur}));if(hist.length>200)hist.shift();}
 img.onload=()=>{c.width=img.naturalWidth;c.height=img.naturalHeight;loadExisting();};
@@ -227,7 +226,7 @@ function loadExisting(){
     const num=(block,k,d)=>{const r=block.match(new RegExp(k+'\\s*=\\s*([0-9.]+)'));return r?parseFloat(r[1]):d;};
     const blocks=t.split(/\[\[curves\.[^\]]+\.path\]\]/).slice(1);
     // The shorthand and the path blocks are the same thing written two ways,
-    // so the head of the file is just another block when there are none.
+    // so the head of the file is just another block when there are none
     const sources=blocks.length?blocks:[t];
     paths=sources.map(b=>{
       const p={pts:[],bn:blocks.length?(/bars\s*=/.test(b)?Math.round(num(b,'bars',0)):null):null,
@@ -249,7 +248,7 @@ function loadExisting(){
   }).catch(draw);
 }
 // Everything that has to follow the active path: the sliders edit it, so they
-// have to be reloaded from it whenever it changes.
+// have to be reloaded from it whenever it changes
 function showPath(){
   pts=cp().pts;
   $('pathlabel').textContent='path '+(cur+1)+'/'+paths.length;
@@ -262,7 +261,7 @@ function showPath(){
   $('widthv').textContent=(cp().w/1000).toFixed(3);
   sel=-1;showSel();draw();
 }
-// Catmull-Rom, matching curve.rs so the preview is the real placement.
+// Catmull-Rom, matching curve.rs so the preview is the real placement
 function cr(p0,p1,p2,p3,t){const t2=t*t,t3=t2*t;return[0,1].map(i=>0.5*((2*p1[i])+(-p0[i]+p2[i])*t+(2*p0[i]-5*p1[i]+4*p2[i]-p3[i])*t2+(-p0[i]+3*p1[i]-3*p2[i]+p3[i])*t3));}
 function dense(pts){
   if(pts.length<2)return[];
@@ -279,13 +278,11 @@ function dense(pts){
   return o;
 }
 // The silhouette as the SHADER sees it: sampled into the same fixed number
-// of buckets, by the same rule, and read back with the same interpolation.
+// of buckets, by the same rule, and read back with the same interpolation
 //
-// Clipping against the polyline directly is what made the editor disagree
-// with the render on steep stretches - the preview cut a clean diagonal where
-// the shader, reading a coarse bucket, left the corner of a bar showing. The
-// resampling is the renderer's; the preview has no business being better at
-// it than the thing it previews.
+// The resampling is the renderer's: clipping against the polyline
+// directly disagrees with the shader on steep stretches, where a bucket
+// is coarser than the line
 const HZ=2048;
 let hzCache=null, hzKey='';
 function horizonArr(){
@@ -305,7 +302,7 @@ function horizonArr(){
       const a=q[k-1],b=q[k],span=Math.max(b.x-a.x,1e-6);
       y=a.y+(b.y-a.y)*((x-a.x)/span);
     }
-    // Stored counting UP from the bottom, exactly as curve::horizon does.
+    // Stored counting UP from the bottom, exactly as curve::horizon does
     out[i]=1-y;
   }
   hzCache=out;hzKey=key;
@@ -326,7 +323,7 @@ function clipAboveHorizon(){
   return true;
 }
 // Paths that each name a count add up to the total; otherwise the total is
-// its own setting and they share it.
+// its own setting and they share it
 function totalBars(){
   return paths.every(P=>P.bn!=null)
     ? Math.max(1,paths.reduce((a,P)=>a+P.bn,0))
@@ -335,7 +332,7 @@ function totalBars(){
 function pathLen(d){let t=0;for(let i=1;i<d.length;i++)t+=Math.hypot(d[i].p[0]-d[i-1].p[0],d[i].p[1]-d[i-1].p[1]);return t;}
 // The same rule curve::allocate uses: a path's own count comes off the top,
 // the rest split what is left by length, largest remainder, and the total is
-// exactly the bar count.
+// exactly the bar count
 function alloc(lens,fixed,total){
   const n=lens.length; if(!n)return[];
   if(fixed&&fixed.some(v=>v!=null)){
@@ -359,11 +356,11 @@ function alloc(lens,fixed,total){
   return out;
 }
 // One place decides how thick a guide line is: at macro zoom a 3px line is
-// wider than the ridge you are tracing.
+// wider than the ridge you are tracing
 const hzStep=()=>Math.max(1,c.width/HZ);
 const lw=()=>+$('linew').value*c.width/1600;
 function draw(){
-  // Points move in place, so a cached sample cannot be trusted across a draw.
+  // Points move in place, so a cached sample cannot be trusted across a draw
   invalidateHz();
   x.drawImage(img,0,0);
   const alpha=+$('opacity').value/100;
@@ -372,23 +369,23 @@ function draw(){
   const ds=paths.map(p=>dense(p.pts));
   // Bars are split between paths by length, so the preview has to allocate
   // them the same way the renderer does - over the paths that ARE paths,
-  // since curve::build drops a one-point path before it allocates anything.
+  // since curve::build drops a one-point path before it allocates anything
   const usable=ds.map((d,i)=>d.length>1?i:-1).filter(i=>i>=0);
   const share=alloc(usable.map(i=>pathLen(ds[i])),usable.map(i=>paths[i].bn),totalBars());
   const counts=new Array(ds.length).fill(0);
   usable.forEach((i,k)=>{counts[i]=share[k];});
   if($('showcurve').checked) ds.forEach((d,i)=>{
     if(d.length<2)return;
-    // The path you are not editing is still drawn, just quietly.
+    // The path you are not editing is still drawn, just quietly
     x.globalAlpha=alpha*(i===cur?1:0.35);
     x.strokeStyle='#ff3b30';x.lineWidth=lw();x.beginPath();
     d.forEach((q,k)=>k?x.lineTo(q.p[0],q.p[1]):x.moveTo(q.p[0],q.p[1]));x.stroke();
   });
   x.globalAlpha=1;
-  // Bar preview at the real sample positions, arc-length spaced.
+  // Bar preview at the real sample positions, arc-length spaced
   if($('showbars').checked){
     // Bars are clipped exactly where the shader discards them, so the preview
-    // shows what the silhouette actually hides.
+    // shows what the silhouette actually hides
     const clipped=clipAboveHorizon();
     x.strokeStyle='rgba(255,255,255,.85)';
     ds.forEach((d,pi)=>{
@@ -410,8 +407,7 @@ function draw(){
         else{const dx=b[0]-a[0],dy=b[1]-a[1],L=Math.hypot(dx,dy)||1;nx=dy/L;ny=-dx/L;}
         if(P.fl){nx=-nx;ny=-ny;}
         // Bar WIDTH has to be per bar, not one lineWidth for the batch: the
-        // renderer multiplies it by each bar's scale, so a batched stroke
-        // would make the width slider look like it does nothing - which it did.
+        // renderer multiplies it by each bar's scale
         x.lineWidth=Math.max(1,wpx*d[seg].s);
         const len=d[seg].s*reach;
         x.beginPath();x.moveTo(px,py);x.lineTo(px+nx*len,py+ny*len);x.stroke();
@@ -427,13 +423,13 @@ function draw(){
     x.fillStyle='rgba(48,213,200,.18)';x.fill();
     x.strokeStyle='#30d5c8';x.lineWidth=lw();
     const a=occ[0].x*c.width, b=occ[occ.length-1].x*c.width;
-    // Drawn part: what you actually traced.
+    // Drawn part: what you actually traced
     x.beginPath();x.moveTo(a,horizonAt(a));
     for(let px=a;px<=b;px+=hzStep())x.lineTo(px,horizonAt(px));
     x.lineTo(b,horizonAt(b));x.stroke();
     // Past either end the horizon holds flat, which is what the shader does
     // too - dashed and dimmed so it reads as an implication, not as a line
-    // you drew across the wallpaper.
+    // you drew across the wallpaper
     x.save();x.setLineDash([lw()*3,lw()*3]);x.globalAlpha=alpha*0.45;
     x.beginPath();x.moveTo(0,horizonAt(0));x.lineTo(a,horizonAt(a));
     x.moveTo(b,horizonAt(b));x.lineTo(c.width,horizonAt(c.width));x.stroke();
@@ -441,7 +437,7 @@ function draw(){
     x.globalAlpha=1;
   }
   // Handles fade with the curve so they never sit on top of the landing spot
-  // you are trying to judge.
+  // you are trying to judge
   x.globalAlpha=alpha;
   const dot=(p,fill)=>{
     const r=+$('dotsize').value*c.width/1600;
@@ -480,11 +476,11 @@ function near(p){
 }
 c.addEventListener('pointerdown',e=>{
   // Left button only. Middle pans and right deletes, and both used to fall
-  // through to "add a point" here.
+  // through to "add a point" here
   if(e.button!==0)return;
   const p=pos(e);const L=list();
   // Forced creation wins over grabbing: on a snapped line the points are
-  // close enough together that there is no gap left to click in.
+  // close enough together that there is no gap left to click in
   const i=held(e,'create')?-1:near(p);
   shift=held(e,'angle');
   if(paintmode){
@@ -494,7 +490,7 @@ c.addEventListener('pointerdown',e=>{
   }
   if(i>=0){pushHist();sel=drag=i;showSel();}
   else{pushHist();
-       // Keep the list ordered along x so the spline never doubles back.
+       // Keep the list ordered along x so the spline never doubles back
        L.push({x:p.x,y:p.y,s:1,a:null});L.sort((a,b)=>a.x-b.x);
        sel=L.findIndex(q=>q.x===p.x&&q.y===p.y);drag=sel;showSel();}
   c.setPointerCapture(e.pointerId);draw();
@@ -503,7 +499,7 @@ c.addEventListener('pointermove',e=>{
   if(painting){
     const p=pos(e),L=list(),last=L[L.length-1];
     // One point per step along the stroke, not one per mouse event: a slow
-    // drag would otherwise bury the list in near-identical points.
+    // drag would otherwise bury the list in near-identical points
     const step=Math.max(6,c.width/160);
     if(!last||Math.hypot((p.x-last.x)*c.width,(p.y-last.y)*c.height)>=step){
       L.push({x:Math.min(1,Math.max(0,p.x)),y:Math.min(1,Math.max(0,p.y)),s:1,a:null});
@@ -520,7 +516,7 @@ c.addEventListener('pointermove',e=>{
   draw();
 });
 c.addEventListener('pointerup',()=>{drag=-1;shift=false;painting=false;});
-// Wheel zooms about the cursor; middle button pans.
+// Wheel zooms about the cursor; middle button pans
 document.getElementById('wrap').addEventListener('wheel',e=>{
   e.preventDefault(); atCursor(e,z=>e.deltaY<0?z*1.15:z/1.15);
 },{passive:false});
@@ -552,7 +548,7 @@ $('opacity').oninput=()=>{$('opacityv').textContent=(+$('opacity').value/100).to
 for(const id of ['showdots','showbars','showocc','showcurve']) $(id).onchange=draw;
 for(const id of ['dotsize','dim','linew']) $(id).oninput=draw;
 // Ramer-Douglas-Peucker: a painted stroke lands hundreds of points where a
-// dozen describe the same line, and every one of them is a handle in the way.
+// dozen describe the same line, and every one of them is a handle in the way
 function rdp(list,eps){
   if(list.length<3)return list;
   const P=q=>[q.x*c.width,q.y*c.height];
@@ -580,17 +576,15 @@ $('thin').onclick=()=>{
   if(occmode)occ=rdp(occ,eps);else{cp().pts=rdp(pts,eps);pts=cp().pts;}
   sel=-1;showSel();draw();
 };
-// Snap a roughly traced line onto the edge that is actually in the image.
+// Snap a roughly traced line onto the edge that is actually in the image
 //
-// Tracing the strongest edge globally finds the strongest edge in the
-// WALLPAPER, which on any picture with a subject in it is the subject - tried
-// it, and it drew the knight. So the search is confined to a corridor around
-// the line you drew: you say which edge, the image says exactly where it runs.
+// The strongest edge in a wallpaper is usually its subject, not its
+// horizon, so the search is confined to a corridor around the line
+// drawn by hand
 //
-// Inside the corridor it is a shortest path, not a per-column maximum: a
-// column-by-column pick jumps between a cloud edge and a rock edge wherever
-// both are strong, and the result is a comb. Charging for vertical movement
-// buys continuity, which is what makes the output smooth enough to keep.
+// Inside the corridor it is a shortest path, not a per-column maximum:
+// a column-by-column pick alternates between two strong edges and comes
+// out a comb. Charging for vertical movement buys continuity
 function snapToEdge(q){
   if(q.length<2)return null;
   const W=Math.min(960,c.width), H=Math.max(4,Math.round(c.height*W/c.width));
@@ -601,7 +595,7 @@ function snapToEdge(q){
   try{px=ox.getImageData(0,0,W,H).data;}catch(e){alert('cannot read the image: '+e.message);return null;}
   const lum=(cx,y)=>{const i=((y*W)+cx)*4;return 0.2126*px[i]+0.7152*px[i+1]+0.0722*px[i+2];};
   // Strength of the horizontal edge at (cx, y): how much the image changes
-  // across three rows, in either direction.
+  // across three rows, in either direction
   const edge=(cx,y)=>Math.abs(lum(cx,y)-lum(cx,Math.min(H-1,y+3)));
 
   const sorted=q.slice().sort((a,b)=>a.x-b.x);
@@ -620,7 +614,7 @@ function snapToEdge(q){
   const R=+$('snapr').value, LAM=+$('snaplam').value, K=3;
   const cols=hi-lo+1, span=2*R+1;
   // Flat arrays indexed [col*span + (y - top)], so the whole search is one
-  // pass over typed memory rather than a map per column.
+  // pass over typed memory rather than a map per column
   const top=new Int32Array(cols), cost=new Float32Array(cols*span), back=new Int32Array(cols*span);
   for(let i=0;i<cols;i++) top[i]=Math.round(guide(lo+i))-R;
   for(let i=0;i<cols;i++){
@@ -643,9 +637,9 @@ function snapToEdge(q){
   for(let j=1;j<span;j++) if(cost[(cols-1)*span+j]<cost[(cols-1)*span+k]) k=j;
   const ys=new Array(cols);
   for(let i=cols-1;i>=0;i--){ys[i]=top[i]+k;k=back[i*span+k];}
-  // The backtrack lands on a whole row, and a line made of whole rows is a
-  // staircase however smooth the path through them was. A parabola through
-  // the edge strength on either side puts it back between rows.
+  // The backtrack lands on a whole row, and a line of whole rows is a
+  // staircase. A parabola through the edge strength either side puts the
+  // point back between rows
   const sub=ys.map((y,i)=>{
     if(y<1||y>=H-1)return y;
     const a=edge(lo+i,y-1),b=edge(lo+i,y),cc=edge(lo+i,y+1);
@@ -653,7 +647,7 @@ function snapToEdge(q){
     return Math.abs(den)<1e-6?y:y+Math.max(-1,Math.min(1,0.5*(a-cc)/den));
   });
   // Five columns of averaging: enough to take the last of the jitter out,
-  // short enough to leave a summit pointed.
+  // short enough to leave a summit pointed
   const sm=sub.map((_,i)=>{
     let t=0,n=0;
     for(let j=Math.max(0,i-2);j<=Math.min(sub.length-1,i+2);j++){t+=sub[j];n++;}
@@ -666,14 +660,13 @@ $('trace').onclick=()=>{
   const found=snapToEdge(q);
   if(!found){alert('draw a rough line across the edge first, then snap');return;}
   pushHist();
-  // Simplified far more finely than a hand-edited path: the horizon between
-  // two points is a straight chord, so a coarse epsilon cuts the corner and
-  // the line leaves the ridge exactly where the ridge is interesting. Points
-  // cost nothing at runtime - the renderer resamples to a fixed 512 buckets
-  // whether there are 12 of them or 300.
+  // Finer than a hand-edited path: the horizon between two points is a
+  // straight chord, so a coarse epsilon cuts the corners worth keeping.
+  // Points cost nothing at runtime - the renderer resamples to a fixed
+  // number of buckets whatever the count
   const traced=rdp(found,+$('snapeps').value/10);
   // Per-point scale and angle overrides are worth keeping: the snap moves
-  // where a bar stands, not how it is drawn. Nearest old point wins.
+  // where a bar stands, not how it is drawn. Nearest old point wins
   if(!occmode&&q.length){
     for(const t of traced){
       let best=q[0];
@@ -705,7 +698,7 @@ for(const [id,what] of [['kcreate','create'],['kangle','angle']]){
   $(id).value=KEYS[what];
   $(id).onchange=()=>{
     KEYS[what]=$(id).value;
-    // Both on one modifier would make every forced point set an angle.
+    // Both on one modifier would make every forced point set an angle
     const other=what==='create'?'angle':'create';
     if(KEYS[other]===KEYS[what]){
       KEYS[other]=['shift','ctrl','alt'].find(k=>k!==KEYS[what]);
@@ -720,7 +713,7 @@ $('nextpath').onclick=()=>{cur=(cur+1)%paths.length;showPath();};
 $('addpath').onclick=()=>{
   pushHist();
   // A new path inherits the current one's geometry: a second ridge on the
-  // same wallpaper usually wants the same look, not the defaults.
+  // same wallpaper usually wants the same look, not the defaults
   paths.push({pts:[],h:cp().h,w:cp().w,up:cp().up,fl:cp().fl,bn:cp().bn});
   cur=paths.length-1;occmode=false;syncOcc();showPath();
 };
@@ -738,13 +731,13 @@ function undo(){
 }
 $('undo').onclick=undo;
 // Ctrl+Z anywhere on the page, not just with the canvas focused - the canvas
-// takes no keyboard focus of its own.
+// takes no keyboard focus of its own
 addEventListener('keydown',e=>{
   if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='z'&&e.target.tagName!=='TEXTAREA'){
     e.preventDefault();undo();
   }
 });
-// Every mutation pushes history first, so undo has something to pop.
+// Every mutation pushes history first, so undo has something to pop
 $('clear').onclick=()=>{
   pushHist();
   if(occmode)occ=[];else{cp().pts=[];pts=cp().pts;}
@@ -766,10 +759,10 @@ function emit(){
     return '  ['+v.join(', ')+'],';
   }).join('\n');
   // Only written when some path is sharing: when every path names its own
-  // count, the total is their sum and saying it twice invites them to differ.
+  // count, the total is their sum and saying it twice invites them to differ
   let out=paths.every(P=>P.bn!=null)?'':'bars = '+barsTotal+'\n';
   // One silhouette for the whole curve: it is the wallpaper's skyline, and
-  // every path on it hides behind the same one.
+  // every path on it hides behind the same one
   if(occ.length>1) out+='occlude = [\n'+occ.map(p=>'  ['+p.x.toFixed(4)+', '+p.y.toFixed(4)+'],').join('\n')+'\n]\n';
   for(const P of paths){
     if(P.pts.length<2)continue;
@@ -789,9 +782,7 @@ $('save').onclick=()=>{
   fetch('/save',{method:'POST',body:$('out').value})
     .then(r=>r.text().then(t=>({ok:r.ok,t})))
     .then(({ok,t})=>{
-      // Never report success on a failure: the previous version swallowed
-      // every error into "saved", so a save that never happened looked
-      // identical to one that did.
+      // Never report success on a failure
       btn.textContent = ok&&t==='saved' ? 'saved - cavawall restarted' : 'FAILED: '+t;
       if(ok) setTimeout(()=>btn.textContent='save to config',2500);
     })
