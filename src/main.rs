@@ -51,6 +51,10 @@ const BAR_NDC_SCALE: f32 = 2.0 / 65530.0;
 /// an SHM probe, 76 rects covering a quarter of a band cost more than one rect
 /// of the same area
 const DAMAGE_BUCKETS: usize = 8;
+/// Masks a bucket index into range. Cheaper than the bounds check it replaces,
+/// and unlike the check it cannot branch or panic inside the per-frame loop
+const DAMAGE_MASK: usize = DAMAGE_BUCKETS - 1;
+const _: () = assert!(DAMAGE_BUCKETS.is_power_of_two(), "DAMAGE_MASK needs a power of two");
 
 /// `eglSwapBuffersWithDamageKHR`, resolved once
 ///
@@ -159,6 +163,7 @@ use std::{
 };
 
 use cavawall::{app_config, curve};
+use cavawall::math::fma;
 use app_config::*;
 use std::collections::HashSet;
 use cavawall::scheme;
@@ -427,9 +432,13 @@ fn main() {
     // Resolved here, not at the curve setup below, because the bar count
     // comes out of it. It has to be the curve for the CURRENT wallpaper:
     // HashMap order is undefined, so any other choice is arbitrary
-    let curve_key = (configured_mode == Mode::Curve)
-        .then(|| curve::current_wallpaper().and_then(|w| curve::content_key(&w)))
-        .flatten();
+    // One read of the wallpaper answers both questions it is asked: which
+    // curve this is, and how the image crops onto the output
+    let wallpaper = (configured_mode == Mode::Curve)
+        .then(curve::current_wallpaper)
+        .flatten()
+        .and_then(|w| curve::describe(&w));
+    let curve_key = wallpaper.as_ref().map(|(key, _)| key.clone());
     let curve_keys: HashSet<String> =
         config.curves.iter().flat_map(|m| m.keys().cloned()).collect();
     let active_curve = (configured_mode == Mode::Curve)
@@ -808,7 +817,7 @@ fn main() {
                 gl::GenBuffers(1, &mut width_ssbo);
                 upload_bars(&[], path_ssbo, width_ssbo);
                 curve_fit = cfg.fit.unwrap_or_default();
-                curve_image = curve::current_wallpaper().and_then(|w| curve::image_size(&w));
+                curve_image = wallpaper.as_ref().and_then(|(_, size)| *size);
                 if curve_image.is_none() && debug_enabled() {
                     eprintln!("cavawall: wallpaper size unreadable, treating it as output-shaped");
                 }
@@ -956,6 +965,7 @@ fn main() {
         curve_paths: curve_paths.into_boxed_slice(),
         path_ssbo,
         width_ssbo,
+        curve_bars: Box::new([]),
         curve_occlude: curve_occlude.into_boxed_slice(),
         curve_horizon: Box::new([]),
         curve_fit,
@@ -1063,6 +1073,11 @@ struct AppState {
     curve_paths: Box<[curve::PathSpec]>,
     path_ssbo: u32,
     width_ssbo: u32,
+    /// Every bar, built when an output is chosen and uploaded on the next
+    /// configure. They depend on the OUTPUT's shape - normals are
+    /// perpendicular in pixel space, and the crop follows the output's aspect
+    /// - so a configure that only resizes the surface does not change them
+    curve_bars: Box<[curve::Bar]>,
     /// The silhouette as authored, in IMAGE coordinates. Sampled into a
     /// horizon only once an output is known, since where it lands depends on
     /// how the wallpaper is cropped onto that output
@@ -1476,17 +1491,11 @@ impl AppState {
     /// not just of the path. A box that saves little is not worth the mapping:
     /// below a fifth saved this returns None and the surface stays whole
     fn curve_bbox(&self) -> Option<(u32, u32, u32, u32)> {
-        if self.curve_paths.is_empty() {
+        if self.curve_bars.is_empty() {
             return None;
         }
         let (ow, oh) = (self.width as f32, self.height as f32);
-        let bars = curve::build(
-            &self.curve_paths,
-            self.bar_count,
-            ow / oh.max(1.0),
-            self.fit_for((self.width, self.height)),
-        );
-        let (x0, y0, x1, y1) = curve::bounds(&bars);
+        let (x0, y0, x1, y1) = curve::bounds(&self.curve_bars);
         // NDC -> pixels, y flipped: NDC counts up, a margin counts down
         let pad = 2.0;
         let left = (((x0 + 1.0) * 0.5 * ow) - pad).floor().clamp(0.0, ow);
@@ -1618,9 +1627,12 @@ impl AppState {
                 // crop does: a move to a differently proportioned monitor
                 // re-lands the whole curve rather than leaving it beside the
                 // ridge it was drawn on
+                let fit = self.fit_for(self.curve_output);
+                let aspect = self.width as f32 / self.height.max(1) as f32;
+                self.curve_bars =
+                    curve::build(&self.curve_paths, self.bar_count, aspect, fit).into();
                 self.curve_horizon =
-                    curve::horizon(&self.curve_occlude, self.fit_for(self.curve_output))
-                        .into_boxed_slice();
+                    curve::horizon(&self.curve_occlude, fit).into_boxed_slice();
                 self.curve_box = self.curve_bbox();
                 match self.curve_box {
                     Some((left, top, w, h)) => {
@@ -1727,7 +1739,7 @@ impl DamageMap {
         let mut bucket_of = vec![0u8; bars].into_boxed_slice();
         let mut bucket_x = [(i32::MAX, i32::MIN); DAMAGE_BUCKETS];
         for (i, slot) in bucket_of.iter_mut().enumerate() {
-            let b = (i * DAMAGE_BUCKETS / bars.max(1)).min(DAMAGE_BUCKETS - 1);
+            let b = (i * DAMAGE_BUCKETS / bars.max(1)) & DAMAGE_MASK;
             *slot = b as u8;
             // Widened a pixel each way here, once, rather than per frame: the
             // NDC-to-pixel conversion rounds, and a rect one pixel short leaves
@@ -1765,7 +1777,10 @@ fn damage_rects(heights: &[f32], prev: &[f32], map: &DamageMap, out: &mut [egl::
         if new == old {
             continue;
         }
-        let b = b as usize;
+        // Masked, not indexed raw: the index is a u8 and the compiler cannot
+        // prove it is under DAMAGE_BUCKETS, so a plain index puts a compare,
+        // a branch and a panic path in this loop once per bar per frame
+        let b = b as usize & DAMAGE_MASK;
         lo[b] = lo[b].min(new).min(old);
         hi[b] = hi[b].max(new).max(old);
     }
@@ -1807,7 +1822,10 @@ impl AppState {
             }
         };
         self.force_full_damage = false;
-        self.prev_heights.copy_from_slice(&self.heights);
+        // Swapped, not copied: draw() overwrites every element of `heights`
+        // before the next present, so the buffer that just became stale is
+        // exactly the one it can write into. Two pointers instead of a memcpy
+        std::mem::swap(&mut self.heights, &mut self.prev_heights);
 
         match self.swap_damage {
             // SAFETY: display and surface are current and live, and `rects`
@@ -1939,7 +1957,10 @@ impl AppState {
         // max_height^2 tall, visibly short
         let (samples, _) = self.cava_buffer.as_chunks::<2>();
         for (height, sample) in self.heights.iter_mut().zip(samples) {
-            *height = f32::from(u16::from_le_bytes(*sample)) * BAR_NDC_SCALE - 1.0;
+            // fma, not `x * s - 1.0`: this loop vectorises to 8 floats per
+            // register, and the fused form is one vfmadd213ps where the plain
+            // one is a vmulps and a vaddps
+            *height = fma(f32::from(u16::from_le_bytes(*sample)), BAR_NDC_SCALE, -1.0);
         }
         unsafe {
             // The only binding draw() still makes: BufferData writes through
@@ -2156,10 +2177,7 @@ impl LayerShellHandler for AppState {
         // the output's shape - which is only known here. Rebuilt on every
         // configure so a move to a differently proportioned monitor re-leans
         // the bars rather than skewing them
-        if self.mode == Mode::Curve && !self.curve_paths.is_empty() {
-            let aspect = self.curve_output.0 as f32 / self.curve_output.1.max(1) as f32;
-            let bars =
-                curve::build(&self.curve_paths, self.bar_count, aspect, self.fit_for(self.curve_output));
+        if self.mode == Mode::Curve && !self.curve_bars.is_empty() {
             let mut blob: Vec<u8> = Vec::with_capacity(4 + self.curve_horizon.len() * 4);
             blob.extend_from_slice(&(self.curve_horizon.len() as i32).to_ne_bytes());
             for h in &self.curve_horizon {
@@ -2168,7 +2186,7 @@ impl LayerShellHandler for AppState {
             // SAFETY: a context is current here, and every buffer was created
             // at startup
             unsafe {
-                upload_bars(&bars, self.path_ssbo, self.width_ssbo);
+                upload_bars(&self.curve_bars, self.path_ssbo, self.width_ssbo);
                 gl::BindBuffer(gl::SHADER_STORAGE_BUFFER, self.occ_ssbo);
                 gl::BufferData(
                     gl::SHADER_STORAGE_BUFFER,
