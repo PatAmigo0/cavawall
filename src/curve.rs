@@ -94,6 +94,11 @@ fn densify(controls: &[Control], per_segment: usize) -> Vec<([f32; 2], f32, Opti
 /// which on a hand-clicked ridge is exactly where the detail is - the bars
 /// would crowd the interesting part and thin out across the flat stretches.
 ///
+/// `aspect` is the output's width / height. NDC is square and the screen is
+/// not, so a normal perpendicular in NDC is NOT perpendicular on screen - it
+/// leans by the aspect ratio. Normals are taken in a y-up PIXEL frame instead,
+/// which is also the frame the editor's preview draws in.
+///
 /// Returns each bar's base, its unit normal, and the scale interpolated there.
 #[must_use]
 pub fn resample(
@@ -101,6 +106,7 @@ pub fn resample(
     count: u32,
     flip: bool,
     upright: bool,
+    aspect: f32,
 ) -> Vec<(Sample, f32)> {
     let count = count.max(1) as usize;
     if controls.len() < 2 {
@@ -137,7 +143,8 @@ pub fn resample(
 
         // Tangent from the segment, normal perpendicular to it. Degenerate
         // segments fall back to straight up rather than producing NaN.
-        let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+        // Into the pixel frame before taking the perpendicular.
+        let (dx, dy) = ((b[0] - a[0]) * aspect, b[1] - a[1]);
         let len = (dx * dx + dy * dy).sqrt();
         // Direction first, THEN flip - applied uniformly, including to an
         // angle override. Returning early from the override branch left one
@@ -217,7 +224,7 @@ mod tests {
     /// generalises.
     #[test]
     fn a_flat_path_reproduces_a_row_of_bars() {
-        let s = resample(&line(4), 8, false, false);
+        let s = resample(&line(4), 8, false, false, 1.0);
         assert_eq!(s.len(), 8);
         for (sample, scale) in &s {
             assert!((sample.pos[1] - 0.0).abs() < 1e-3, "y drifted: {:?}", sample.pos);
@@ -243,7 +250,7 @@ mod tests {
             Control { x: 0.7, y: 0.6, scale: 1.0, angle: None },
             Control { x: 1.0, y: 0.35, scale: 1.0, angle: None },
         ];
-        for (s, _) in resample(&controls, 32, false, false) {
+        for (s, _) in resample(&controls, 32, false, false, 1.0) {
             let len = (s.normal[0].powi(2) + s.normal[1].powi(2)).sqrt();
             assert!((len - 1.0).abs() < 1e-3, "normal length {len}");
         }
@@ -253,7 +260,7 @@ mod tests {
     #[test]
     fn flip_only_reverses_the_normal() {
         let c = line(3);
-        for ((a, _), (b, _)) in resample(&c, 6, false, false).iter().zip(resample(&c, 6, true, false).iter()) {
+        for ((a, _), (b, _)) in resample(&c, 6, false, false, 1.0).iter().zip(resample(&c, 6, true, false, 1.0).iter()) {
             assert_eq!(a.pos, b.pos);
             assert!((a.normal[0] + b.normal[0]).abs() < 1e-6);
             assert!((a.normal[1] + b.normal[1]).abs() < 1e-6);
@@ -268,7 +275,7 @@ mod tests {
             Control { x: 0.0, y: 0.5, scale: 1.0, angle: None },
             Control { x: 1.0, y: 0.5, scale: 0.2, angle: None },
         ];
-        let s = resample(&controls, 10, false, false);
+        let s = resample(&controls, 10, false, false, 1.0);
         assert!(s[0].1 > s[9].1, "scale should fall along the path");
         assert!(s[0].1 <= 1.0 && s[9].1 >= 0.2);
         // Monotone, not jumping about.
@@ -294,7 +301,7 @@ mod tests {
             Control { x: 0.0, y: 0.9, scale: 1.0, angle: Some(90.0) },
             Control { x: 1.0, y: 0.2, scale: 1.0, angle: Some(90.0) },
         ];
-        for (s, _) in resample(&controls, 8, false, false) {
+        for (s, _) in resample(&controls, 8, false, false, 1.0) {
             // 90 degrees clockwise from up is straight right.
             assert!((s.normal[0] - 1.0).abs() < 1e-3, "normal {:?}", s.normal);
             assert!(s.normal[1].abs() < 1e-3);
@@ -304,7 +311,39 @@ mod tests {
             Control { x: 0.0, y: 0.9, scale: 1.0, angle: None },
             Control { x: 1.0, y: 0.2, scale: 1.0, angle: None },
         ];
-        assert!(resample(&plain, 8, false, false).iter().all(|(s, _)| s.normal[0] < 0.95));
+        assert!(resample(&plain, 8, false, false, 1.0).iter().all(|(s, _)| s.normal[0] < 0.95));
+    }
+
+    /// A normal has to be perpendicular ON SCREEN, not in NDC. NDC is square
+    /// and a 16:9 output is not, so ignoring aspect leans every bar on a slope
+    /// by a visible amount - and the editor, which works in pixels, would draw
+    /// something the renderer never produced.
+    #[test]
+    fn normals_are_perpendicular_on_screen_not_in_ndc() {
+        // Pixel slope of exactly 45 degrees on 16:9. to_ndc doubles a
+        // normalised delta, so dx_ndc = 2*dx_norm and dy_ndc = 2*dy_norm; for
+        // dx_ndc * aspect == dy_ndc the normalised dx must be dy * 9/16.
+        let dy_norm = 0.5; // 0.75 -> 0.25
+        let dx_norm = dy_norm * 9.0 / 16.0;
+        let controls = vec![
+            Control { x: 0.5 - dx_norm / 2.0, y: 0.75, scale: 1.0, angle: None },
+            Control { x: 0.5 + dx_norm / 2.0, y: 0.25, scale: 1.0, angle: None },
+        ];
+        let aspect = 16.0 / 9.0;
+        let (s, _) = resample(&controls, 3, false, false, aspect)[1];
+        // Perpendicular to a 45-degree pixel slope is 45 degrees the other way.
+        assert!(
+            (s.normal[0].abs() - s.normal[1].abs()).abs() < 0.02,
+            "not 45 degrees in pixel space: {:?}",
+            s.normal
+        );
+        // The same path at aspect 1.0 gives a measurably different lean, which
+        // is precisely the bug this guards.
+        let (flat, _) = resample(&controls, 3, false, false, 1.0)[1];
+        assert!(
+            (flat.normal[0] - s.normal[0]).abs() > 0.05,
+            "aspect made no difference, so it is not being applied"
+        );
     }
 
     /// flip must reach EVERY bar, including one carrying an angle override.
@@ -316,7 +355,7 @@ mod tests {
             Control { x: 0.0, y: 0.5, scale: 1.0, angle: Some(0.0) },
             Control { x: 1.0, y: 0.5, scale: 1.0, angle: Some(0.0) },
         ];
-        for (s, _) in resample(&controls, 6, true, false) {
+        for (s, _) in resample(&controls, 6, true, false, 1.0) {
             assert!((s.normal[1] + 1.0).abs() < 1e-3, "override ignored flip: {:?}", s.normal);
         }
         // And upright flips as well.
@@ -324,7 +363,7 @@ mod tests {
             Control { x: 0.0, y: 0.4, scale: 1.0, angle: None },
             Control { x: 1.0, y: 0.7, scale: 1.0, angle: None },
         ];
-        for (s, _) in resample(&plain, 6, true, true) {
+        for (s, _) in resample(&plain, 6, true, true, 1.0) {
             assert_eq!(s.normal, [0.0, -1.0]);
         }
     }
@@ -332,9 +371,9 @@ mod tests {
     /// Fewer than two controls is a config mistake, not a crash.
     #[test]
     fn degenerate_input_yields_usable_samples() {
-        assert_eq!(resample(&[], 4, false, false).len(), 4);
+        assert_eq!(resample(&[], 4, false, false, 1.0).len(), 4);
         let one = vec![Control { x: 0.5, y: 0.5, scale: 1.0, angle: None }];
-        let s = resample(&one, 3, false, false);
+        let s = resample(&one, 3, false, false, 1.0);
         assert_eq!(s.len(), 3);
         assert_eq!(s[0].0.normal, [0.0, 1.0]);
     }

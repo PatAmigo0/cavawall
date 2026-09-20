@@ -659,6 +659,10 @@ fn main() {
         );
     }
     let mut mode = configured_mode;
+    let mut curve_controls: Vec<curve::Control> = Vec::new();
+    let mut curve_flip = false;
+    let mut curve_upright = false;
+    let mut path_ssbo: u32 = 0;
     // A curve is authored against ONE wallpaper. If the current one has no
     // entry, fall back to bars rather than draw a ridge traced from a
     // different image - which is the whole point of keying them.
@@ -780,10 +784,14 @@ fn main() {
             }
             Mode::Curve => {
                 // Safe: mode was demoted to Bars above when no curve matched.
+                // Aspect from the first output's size; place_on re-derives the
+                // surface but the shape of the screen does not change under us.
                 let cfg = active_curve.expect("curve mode implies a matching curve");
                 // [x, y] or [x, y, scale]; a short or empty entry is a config
                 // typo, and skipping it beats rendering a bar at the origin.
-                let controls: Vec<curve::Control> = cfg
+                curve_flip = cfg.flip.unwrap_or(false);
+                curve_upright = cfg.upright.unwrap_or(false);
+                curve_controls = cfg
                     .points
                     .iter()
                     .filter(|p| p.len() >= 2)
@@ -794,12 +802,10 @@ fn main() {
                         angle: p.get(3).copied(),
                     })
                     .collect();
-                let samples = curve::resample(
-                    &controls,
-                    bar_count,
-                    cfg.flip.unwrap_or(false),
-                    cfg.upright.unwrap_or(false),
-                );
+                // Seeded with a square aspect; configure() re-uploads with the
+                // real one as soon as a surface exists.
+                let samples =
+                    curve::resample(&curve_controls, bar_count, curve_flip, curve_upright, 1.0);
                 // One vec4 per bar: xy base, z the normal's angle, w the
                 // scale. Angle keeps a bar to a single vec4.
                 let packed: Vec<[f32; 4]> = samples
@@ -808,7 +814,6 @@ fn main() {
                         [s.pos[0], s.pos[1], s.normal[1].atan2(s.normal[0]), *scale]
                     })
                     .collect();
-                let mut path_ssbo = 0;
                 gl::GenBuffers(1, &mut path_ssbo);
                 gl::BindBuffer(gl::SHADER_STORAGE_BUFFER, path_ssbo);
                 gl::BufferData(
@@ -927,6 +932,10 @@ fn main() {
         max_height: config.bars.max_height.unwrap_or(1.0),
         mode,
         circle,
+        curve_controls: curve_controls.into_boxed_slice(),
+        curve_flip,
+        curve_upright,
+        path_ssbo,
         silent_frames: 0,
         background_color,
         pinned_output,
@@ -1016,6 +1025,13 @@ struct AppState {
     /// with different uniforms and different surface geometry.
     mode: Mode,
     circle: CircleGeom,
+    /// Curve mode only. Kept so the path can be resampled again in configure:
+    /// normals are perpendicular in PIXEL space, which depends on the output's
+    /// aspect ratio, and that is not known until a surface is configured.
+    curve_controls: Box<[curve::Control]>,
+    curve_flip: bool,
+    curve_upright: bool,
+    path_ssbo: u32,
     silent_frames: u32,
     /// Only read to restore the clear colour if a re-exec fails; it is set once
     /// at startup now rather than per frame.
@@ -1936,6 +1952,37 @@ impl LayerShellHandler for AppState {
         // A new EGL surface has undefined contents, and the compositor holds
         // nothing for it: the first frame after this has to be whole.
         self.force_full_damage = true;
+        // Normals are perpendicular ON SCREEN, not in NDC, so they depend on
+        // the output's shape - which is only known here. Rebuilt on every
+        // configure so a move to a differently proportioned monitor re-leans
+        // the bars rather than skewing them.
+        if self.mode == Mode::Curve && !self.curve_controls.is_empty() {
+            let aspect = self.width as f32 / self.height.max(1) as f32;
+            let samples = curve::resample(
+                &self.curve_controls,
+                self.bar_count,
+                self.curve_flip,
+                self.curve_upright,
+                aspect,
+            );
+            let packed: Vec<[f32; 4]> = samples
+                .iter()
+                .map(|(s, sc)| [s.pos[0], s.pos[1], s.normal[1].atan2(s.normal[0]), *sc])
+                .collect();
+            // SAFETY: a context is current here; the buffer was created at
+            // startup and is only ever rewritten, never rebound elsewhere.
+            unsafe {
+                gl::BindBuffer(gl::SHADER_STORAGE_BUFFER, self.path_ssbo);
+                gl::BufferData(
+                    gl::SHADER_STORAGE_BUFFER,
+                    std::mem::size_of_val(packed.as_slice()) as GLsizeiptr,
+                    packed.as_ptr().cast(),
+                    gl::STATIC_DRAW,
+                );
+                gl::BindBufferBase(gl::SHADER_STORAGE_BUFFER, 1, self.path_ssbo);
+                gl::BindBuffer(gl::SHADER_STORAGE_BUFFER, 0);
+            }
+        }
         // The only moment the bar-to-pixel mapping can change.
         self.damage_map =
             DamageMap::new(self.bar_count, self.bar_width, self.bar_stride, self.width, self.height);
@@ -2055,11 +2102,11 @@ mod tests {
             curve::Control { x: 0.5, y: 0.2, scale: 1.0, angle: None },
             curve::Control { x: 1.0, y: 0.8, scale: 1.0, angle: None },
         ];
-        for (s, _) in curve::resample(&controls, 16, false, true) {
+        for (s, _) in curve::resample(&controls, 16, false, true, 1.0) {
             assert_eq!(s.normal, [0.0, 1.0], "upright bar leaned");
         }
         // And the slope still moves them when upright is off.
-        let leaned = curve::resample(&controls, 16, false, false);
+        let leaned = curve::resample(&controls, 16, false, false, 1.0);
         assert!(leaned.iter().any(|(s, _)| s.normal[0].abs() > 0.1), "nothing leaned");
     }
 
