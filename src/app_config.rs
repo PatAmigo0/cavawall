@@ -8,6 +8,43 @@ pub struct Config {
     pub smoothing: SmoothingConfig,
     /// Absent in an upstream config, and absent means "follow nothing".
     pub scheme: Option<SchemeConfig>,
+    /// Only read when `general.mode` is `Circle`; absent means every default.
+    pub circle: Option<CircleConfig>,
+}
+
+/// Which shape the bars are arranged into.
+///
+/// Startup-only, exactly like the bar count and for the same reason: the two
+/// modes are separate GL programs with different uniforms, and the surface
+/// geometry each one asks for is different. Changing it re-execs.
+#[derive(Serialize, Deserialize, Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Mode {
+    /// Left-to-right along the bottom of the output.
+    #[default]
+    Bars,
+    /// Radiating from the centre of a square surface.
+    Circle,
+}
+
+/// Geometry and shading for `Mode::Circle`.
+///
+/// Every field is optional so the section can be added a key at a time, and so
+/// a config carrying it still loads on a build that predates the mode.
+#[derive(Serialize, Deserialize, Debug, Default)]
+pub struct CircleConfig {
+    /// Surface edge length in logical pixels. The surface is square, which is
+    /// what keeps NDC square and the circle round without an aspect uniform.
+    pub diameter: Option<u32>,
+    /// Where a bar starts, as a fraction of the radius. The hole in the middle.
+    pub inner_radius: Option<f32>,
+    /// Alpha multiplier at the inner edge, blended to `outer_alpha` at the tip.
+    pub inner_alpha: Option<f32>,
+    /// Alpha multiplier at a full-volume bar's tip.
+    pub outer_alpha: Option<f32>,
+    /// Offset from the centre in logical pixels, positive right and down.
+    pub offset_x: Option<i32>,
+    pub offset_y: Option<i32>,
 }
 
 /// What to take from Caelestia's live state rather than from this file.
@@ -36,6 +73,9 @@ pub struct SchemeConfig {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct GeneralConfig {
     pub framerate: u32,
+    /// Absent means `Mode::Bars`, which is what every config predating this
+    /// key expects.
+    pub mode: Option<Mode>,
     pub background_color: ConfigColor,
     pub autosens: Option<bool>,
     pub sensitivity: Option<f32>,
