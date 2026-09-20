@@ -82,6 +82,10 @@ input[type=range]{width:130px}
       <label>thin &#949; <input type=range id=thineps min=1 max=30 step=1 value=6></label>
       <button id=thin>thin points in active list</button>
       <hr>
+      <label>snap radius <input type=range id=snapr min=3 max=40 step=1 value=12></label>
+      <label>snap smoothness <input type=range id=snaplam min=1 max=24 step=1 value=6></label>
+      <button id=trace>snap active list to the edge</button>
+      <hr>
       <button id=clear>clear active list</button>
       <button id=clearall>clear everything</button>
     </div>
@@ -459,6 +463,91 @@ $('thin').onclick=()=>{
   pushHist();
   const eps=+$('thineps').value;
   if(occmode)occ=rdp(occ,eps);else{cp().pts=rdp(pts,eps);pts=cp().pts;}
+  sel=-1;showSel();draw();
+};
+// Snap a roughly traced line onto the edge that is actually in the image.
+//
+// Tracing the strongest edge globally finds the strongest edge in the
+// WALLPAPER, which on any picture with a subject in it is the subject - tried
+// it, and it drew the knight. So the search is confined to a corridor around
+// the line you drew: you say which edge, the image says exactly where it runs.
+//
+// Inside the corridor it is a shortest path, not a per-column maximum: a
+// column-by-column pick jumps between a cloud edge and a rock edge wherever
+// both are strong, and the result is a comb. Charging for vertical movement
+// buys continuity, which is what makes the output smooth enough to keep.
+function snapToEdge(q){
+  if(q.length<2)return null;
+  const W=Math.min(960,c.width), H=Math.max(4,Math.round(c.height*W/c.width));
+  const o=document.createElement('canvas');o.width=W;o.height=H;
+  const ox=o.getContext('2d',{willReadFrequently:true});
+  ox.drawImage(img,0,0,W,H);
+  let px;
+  try{px=ox.getImageData(0,0,W,H).data;}catch(e){alert('cannot read the image: '+e.message);return null;}
+  const lum=(cx,y)=>{const i=((y*W)+cx)*4;return 0.2126*px[i]+0.7152*px[i+1]+0.0722*px[i+2];};
+  // Strength of the horizontal edge at (cx, y): how much the image changes
+  // across three rows, in either direction.
+  const edge=(cx,y)=>Math.abs(lum(cx,y)-lum(cx,Math.min(H-1,y+3)));
+
+  const sorted=q.slice().sort((a,b)=>a.x-b.x);
+  const lo=Math.max(0,Math.round(sorted[0].x*W)), hi=Math.min(W-1,Math.round(sorted[sorted.length-1].x*W));
+  if(hi-lo<2)return null;
+  const guide=cx=>{
+    const fx=cx/W;
+    for(let i=1;i<sorted.length;i++){
+      if(fx<=sorted[i].x){
+        const a=sorted[i-1],b=sorted[i],span=Math.max(b.x-a.x,1e-6);
+        return (a.y+(b.y-a.y)*(fx-a.x)/span)*H;
+      }
+    }
+    return sorted[sorted.length-1].y*H;
+  };
+  const R=+$('snapr').value, LAM=+$('snaplam').value, K=3;
+  const cols=hi-lo+1, span=2*R+1;
+  // Flat arrays indexed [col*span + (y - top)], so the whole search is one
+  // pass over typed memory rather than a map per column.
+  const top=new Int32Array(cols), cost=new Float32Array(cols*span), back=new Int32Array(cols*span);
+  for(let i=0;i<cols;i++) top[i]=Math.round(guide(lo+i))-R;
+  for(let i=0;i<cols;i++){
+    for(let k=0;k<span;k++){
+      const y=top[i]+k, at=i*span+k;
+      if(y<0||y>=H){cost[at]=1e18;back[at]=0;continue;}
+      const e=-edge(lo+i,y);
+      if(i===0){cost[at]=e;back[at]=k;continue;}
+      let best=1e18,bi=k;
+      for(let d=-K;d<=K;d++){
+        const pk=y-top[i-1]+d;
+        if(pk<0||pk>=span)continue;
+        const v=cost[(i-1)*span+pk]+LAM*Math.abs(y-(top[i-1]+pk));
+        if(v<best){best=v;bi=pk;}
+      }
+      cost[at]=(best>=1e18?0:best)+e;back[at]=bi;
+    }
+  }
+  let k=0;
+  for(let j=1;j<span;j++) if(cost[(cols-1)*span+j]<cost[(cols-1)*span+k]) k=j;
+  const ys=new Array(cols);
+  for(let i=cols-1;i>=0;i--){ys[i]=top[i]+k;k=back[i*span+k];}
+  return ys.map((y,i)=>({x:(lo+i)/(W-1),y:(y+1.5)/H,s:1,a:null}));
+}
+$('trace').onclick=()=>{
+  const q=occmode?occ:pts;
+  const found=snapToEdge(q);
+  if(!found){alert('draw a rough line across the edge first, then snap');return;}
+  pushHist();
+  // Simplified with the same epsilon as thinning: a point per column is a
+  // horizon, not something anyone can then edit by hand.
+  const traced=rdp(found,+$('thineps').value);
+  // Per-point scale and angle overrides are worth keeping: the snap moves
+  // where a bar stands, not how it is drawn. Nearest old point wins.
+  if(!occmode&&q.length){
+    for(const t of traced){
+      let best=q[0];
+      for(const p of q) if(Math.abs(p.x-t.x)<Math.abs(best.x-t.x)) best=p;
+      t.s=best.s; t.a=best.a;
+    }
+  }
+  if(occmode)occ=traced;else{cp().pts=traced;pts=cp().pts;}
   sel=-1;showSel();draw();
 };
 $('clearall').onclick=()=>{
