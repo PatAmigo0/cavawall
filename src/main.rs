@@ -1,7 +1,9 @@
 extern crate khronos_egl as egl;
 
 use gl::types::{GLsizei, GLsizeiptr};
-use smithay_client_toolkit::reexports::calloop::EventLoop;
+use smithay_client_toolkit::reexports::calloop::{
+    generic::Generic, EventLoop, Interest, Mode as CalloopMode, PostAction,
+};
 use smithay_client_toolkit::reexports::calloop_wayland_source::WaylandSource;
 use smithay_client_toolkit::registry::ProvidesRegistryState;
 use smithay_client_toolkit::shell::wlr_layer::{
@@ -165,7 +167,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use cavawall::{app_config, curve};
+use cavawall::{app_config, control, curve};
 use cavawall::math::fma;
 use app_config::*;
 use std::collections::HashSet;
@@ -1084,6 +1086,23 @@ fn main() {
     simple_window.startup_settled = true;
     simple_window.retarget(&qh);
 
+    match control::bind() {
+        Ok(listener) => {
+            loop_handle
+                .insert_source(
+                    Generic::new(listener, Interest::READ, CalloopMode::Level),
+                    |_, listener, state: &mut AppState| {
+                        while let Ok((stream, _)) = listener.accept() {
+                            state.serve_control(&stream);
+                        }
+                        Ok(PostAction::Continue)
+                    },
+                )
+                .unwrap();
+        }
+        Err(e) => eprintln!("cavawall: no control socket: {e}"),
+    }
+
     WaylandSource::new(conn.clone(), event_queue)
         .insert(loop_handle)
         .unwrap();
@@ -1242,6 +1261,7 @@ impl AppState {
         // Round-trip so the commit actually reaches the compositor before the
         // process goes away and its objects are destroyed
         let _ = self.conn.roundtrip();
+        control::unbind();
         std::process::exit(0);
     }
 
@@ -1313,6 +1333,44 @@ impl AppState {
         }
         if changed.scheme {
             self.reload_colors();
+        }
+    }
+
+    /// Answer one client. Orders that replace or end the process do not return
+    fn serve_control(&mut self, stream: &std::os::unix::net::UnixStream) {
+        use control::{Request, Response};
+        let Some(req) = control::read_request(stream) else {
+            control::write_response(stream, &Response::err("unparseable request"));
+            return;
+        };
+        match req {
+            Request::Status => {
+                let data = serde_json::json!({
+                    "pid": std::process::id(),
+                    "pinned_output": self.pinned_output,
+                    "placed_on": self.placed_on,
+                    "bars": self.bar_count,
+                    "curve_key": self.curve_key,
+                });
+                control::write_response(stream, &Response::ok(Some(data)));
+            }
+            // Answer before acting: re-exec never comes back to write one
+            Request::Move { output } => {
+                match &output {
+                    Some(name) => env::set_var("CAVAWALL_OUTPUT", name),
+                    None => env::remove_var("CAVAWALL_OUTPUT"),
+                }
+                control::write_response(stream, &Response::ok(None));
+                self.reexec();
+            }
+            Request::Stop => {
+                control::write_response(stream, &Response::ok(None));
+                self.clear_and_exit();
+            }
+            Request::Reload => {
+                self.reload_colors();
+                control::write_response(stream, &Response::ok(None));
+            }
         }
     }
 

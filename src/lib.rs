@@ -5,6 +5,7 @@
 //! whole point of the authoring tool is that it produces exactly what the
 //! renderer consumes
 pub mod app_config;
+pub mod control;
 pub mod curve;
 pub mod math;
 pub mod scheme;
