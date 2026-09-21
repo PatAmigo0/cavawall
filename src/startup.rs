@@ -38,6 +38,12 @@ fn claim_single_instance() -> fs::File {
     };
     // SAFETY: the descriptor is open and owned for the duration of the call
     if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        // The pid goes in the lock itself, so a wedged instance can still be
+        // found when it has stopped answering the socket
+        use std::io::Write as _;
+        let _ = file.set_len(0);
+        let _ = write!(&file, "{}", std::process::id());
+        let _ = (&file).flush();
         return file;
     }
     // Someone else owns the surface. 0, so a launcher reads it as stand-down
