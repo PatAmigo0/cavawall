@@ -73,7 +73,7 @@ gap = 0.1
 # re-download must not silently point it at the wrong picture. A wallpaper
 # with no block here falls back to bars.
 #
-# Author these with `cavawall-curve` rather than by hand - it opens an editor
+# Author these with `cavawall-tune` rather than by hand - it opens an editor
 # on the current wallpaper and writes the block itself.
 #
 # [curves.07cfa6d114ed3a98]

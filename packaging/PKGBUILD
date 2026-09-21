@@ -50,7 +50,7 @@ check() {
 package() {
   cd "$pkgname"
   install -Dm755 target/release/cavawall "$pkgdir/usr/bin/cavawall"
-  install -Dm755 target/release/cavawall-curve "$pkgdir/usr/bin/cavawall-curve"
+  install -Dm755 target/release/cavawall-tune "$pkgdir/usr/bin/cavawall-tune"
   install -Dm755 target/release/cavawallctl "$pkgdir/usr/bin/cavawallctl"
   # Not into /etc: cavawall reads ~/.config/cavawall/config.toml and this is
   # the annotated example to copy from, not a system default it would load.
