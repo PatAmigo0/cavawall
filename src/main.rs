@@ -189,7 +189,8 @@ const FRAGMENT_SHADER_SRC: &str = include_str!("shaders/fragment_shader.glsl");
 const CIRCLE_VERTEX_SHADER_SRC: &str = include_str!("shaders/circle_vertex_shader.glsl");
 const CIRCLE_FRAGMENT_SHADER_SRC: &str = include_str!("shaders/circle_fragment_shader.glsl");
 const CURVE_VERTEX_SHADER_SRC: &str = include_str!("shaders/curve_vertex_shader.glsl");
-const CURVE_FRAGMENT_SHADER_SRC: &str = include_str!("shaders/curve_fragment_shader.glsl");
+const STENCIL_VERTEX_SHADER_SRC: &str = include_str!("shaders/stencil_vertex_shader.glsl");
+const STENCIL_FRAGMENT_SHADER_SRC: &str = include_str!("shaders/stencil_fragment_shader.glsl");
 
 /// Bar width and stride in NDC, both fixed until a re-exec
 ///
@@ -287,9 +288,15 @@ fn build_program(mode: Mode) -> u32 {
         Mode::Circle => (CIRCLE_VERTEX_SHADER_SRC, CIRCLE_FRAGMENT_SHADER_SRC),
         // Curve reuses the circle's fragment stage: "gradient along the bar
         // with an alpha ramp from base to tip" is the same job, and both feed
-        // it the same vRadial
-        Mode::Curve => (CURVE_VERTEX_SHADER_SRC, CURVE_FRAGMENT_SHADER_SRC),
+        // it the same vRadial. The occluder lives in the stencil buffer, so
+        // nothing is left that differed
+        Mode::Curve => (CURVE_VERTEX_SHADER_SRC, CIRCLE_FRAGMENT_SHADER_SRC),
     };
+    link_program(vert_src, frag_src)
+}
+
+/// Compile and link one pair of stages.
+fn link_program(vert_src: &str, frag_src: &str) -> u32 {
     let vert = compile_shader(gl::VERTEX_SHADER, vert_src, "vertex");
     let frag = compile_shader(gl::FRAGMENT_SHADER, frag_src, "fragment");
     // SAFETY: main() has a current EGL context and loaded GL symbols by here
@@ -485,7 +492,21 @@ struct AppState {
     curve_keys: HashSet<String>,
     /// Rewritten on every configure, since the crop it is sampled through
     /// depends on the output
-    occ_ssbo: u32,
+    /// The bar VAO, for the same reason as `program`
+    vao: u32,
+    /// The bar program. Bound at startup; kept so the stencil pass can hand
+    /// the pipeline back after filling the silhouettes
+    program: u32,
+    /// Fills each silhouette into its own stencil bit
+    stencil_program: u32,
+    stencil_scale_location: gl::types::GLint,
+    stencil_offset_location: gl::types::GLint,
+    stencil_vbo: u32,
+    stencil_vao: u32,
+    /// First vertex and count of each occluder's fan, in bit order
+    occ_fans: Box<[(i32, i32)]>,
+    /// Bars are drawn per path, so each run says where it starts
+    instance_offset_location: gl::types::GLint,
     /// The wallpaper's pixel size, when its format could be read
     curve_image: Option<(u32, u32)>,
     /// Where the curve surface sits on the output, in output pixels:
@@ -502,7 +523,6 @@ struct AppState {
     matte_color_location: gl::types::GLint,
     path_scale_location: gl::types::GLint,
     path_offset_location: gl::types::GLint,
-    occ_map_location: gl::types::GLint,
     silent_frames: u32,
     /// Only read to restore the clear colour if a re-exec fails; it is set once
     /// at startup now rather than per frame
@@ -967,8 +987,8 @@ impl AppState {
         }
     }
 
-    /// The lowest the silhouette drops across `x0..x1`, as a height above the
-    /// bottom of the output, or None when there is no silhouette
+    /// The lowest any silhouette drops across `x0..x1`, as a height above the
+    /// bottom of the output, or None when none of them do
     ///
     /// Below this nothing is drawn at any x in the range, so it is a floor
     /// for the surface and not just for one column
@@ -1074,7 +1094,7 @@ impl AppState {
                 self.curve_draws = built.draws.into();
                 self.curve_occluders = built.occluders.into();
                 self.curve_horizon =
-                    curve::horizon(&self.curve_occlude, fit).into_boxed_slice();
+                    curve::occluder_floor(&self.curve_occluders, fit).into_boxed_slice();
                 self.curve_box = self.curve_bbox();
                 match self.curve_box {
                     Some((left, top, w, h)) => {
@@ -1313,10 +1333,53 @@ impl AppState {
                     gl::DYNAMIC_DRAW,
                 );
             }
-            gl::Clear(gl::COLOR_BUFFER_BIT);
+            // Clear honours the stencil mask, so it has to be open first
+            gl::StencilMask(0xFF);
+            gl::Clear(gl::COLOR_BUFFER_BIT | gl::STENCIL_BUFFER_BIT);
+
+            // Each silhouette into its own bit. A fan over the outline with
+            // INVERT fills by parity, which needs no tessellation and copes
+            // with an outline that crosses itself
+            if !self.occ_fans.is_empty() {
+                gl::UseProgram(self.stencil_program);
+                gl::BindVertexArray(self.stencil_vao);
+                gl::Enable(gl::STENCIL_TEST);
+                gl::ColorMask(gl::FALSE, gl::FALSE, gl::FALSE, gl::FALSE);
+                gl::StencilFunc(gl::ALWAYS, 0, 0xFF);
+                gl::StencilOp(gl::KEEP, gl::KEEP, gl::INVERT);
+                for (i, (first, count)) in self.occ_fans.iter().enumerate() {
+                    gl::StencilMask(1 << i);
+                    gl::DrawArrays(gl::TRIANGLE_FAN, *first, *count);
+                }
+                gl::ColorMask(gl::TRUE, gl::TRUE, gl::TRUE, gl::TRUE);
+                gl::StencilOp(gl::KEEP, gl::KEEP, gl::KEEP);
+                gl::UseProgram(self.program);
+                gl::BindVertexArray(self.vao);
+            }
+            // Nothing below writes stencil
+            gl::StencilMask(0);
+
             // Four vertices, once per bar. No index buffer: each instance is
             // its own strip, so there are no shared vertices to index
-            gl::DrawArraysInstanced(gl::TRIANGLE_STRIP, 0, 4, self.bar_count as GLsizei);
+            if self.curve_draws.is_empty() {
+                gl::Disable(gl::STENCIL_TEST);
+                gl::DrawArraysInstanced(gl::TRIANGLE_STRIP, 0, 4, self.bar_count as GLsizei);
+            } else {
+                // One draw per path: the silhouette a run tests against is a
+                // stencil reference, which is per draw and not per instance
+                for d in self.curve_draws.iter() {
+                    match d.occ {
+                        Some(bit) => {
+                            gl::Enable(gl::STENCIL_TEST);
+                            gl::StencilFunc(gl::EQUAL, 0, 1 << bit);
+                        }
+                        None => gl::Disable(gl::STENCIL_TEST),
+                    }
+                    gl::Uniform1i(self.instance_offset_location, d.first as i32);
+                    gl::DrawArraysInstanced(gl::TRIANGLE_STRIP, 0, 4, d.count as GLsizei);
+                }
+                gl::Disable(gl::STENCIL_TEST);
+            }
         }
         // Ask for the next callback BEFORE the swap, never after
         //

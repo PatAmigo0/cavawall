@@ -177,24 +177,32 @@ impl LayerShellHandler for AppState {
         // configure so a move to a differently proportioned monitor re-leans
         // the bars rather than skewing them
         if self.mode == Mode::Curve && !self.curve_bars.is_empty() {
-            let mut blob: Vec<u8> = Vec::with_capacity(4 + self.curve_horizon.len() * 4);
-            blob.extend_from_slice(&(self.curve_horizon.len() as i32).to_ne_bytes());
-            for h in &self.curve_horizon {
-                blob.extend_from_slice(&h.to_ne_bytes());
+            // One fan per silhouette, concatenated. Closed to the bottom edge
+            // and filled by parity, so an outline that doubles back is a shape
+            // rather than an impossible height-per-x
+            let fit = self.fit_for(self.curve_output);
+            let mut verts: Vec<[f32; 2]> = Vec::new();
+            let mut fans: Vec<(i32, i32)> = Vec::with_capacity(self.curve_occluders.len());
+            for outline in &self.curve_occluders {
+                let poly = curve::occluder_outline(outline, fit);
+                let first = i32::try_from(verts.len()).unwrap_or(0);
+                let count = i32::try_from(poly.len()).unwrap_or(0);
+                verts.extend_from_slice(&poly);
+                fans.push((first, count));
             }
+            self.occ_fans = fans.into();
             // SAFETY: a context is current here, and every buffer was created
             // at startup
             unsafe {
                 upload_bars(&self.curve_bars, self.path_ssbo, self.width_ssbo);
-                gl::BindBuffer(gl::SHADER_STORAGE_BUFFER, self.occ_ssbo);
+                gl::BindBuffer(gl::ARRAY_BUFFER, self.stencil_vbo);
                 gl::BufferData(
-                    gl::SHADER_STORAGE_BUFFER,
-                    blob.len() as GLsizeiptr,
-                    blob.as_ptr().cast(),
+                    gl::ARRAY_BUFFER,
+                    std::mem::size_of_val(verts.as_slice()) as GLsizeiptr,
+                    verts.as_ptr().cast(),
                     gl::STATIC_DRAW,
                 );
-                gl::BindBufferBase(gl::SHADER_STORAGE_BUFFER, 2, self.occ_ssbo);
-                gl::BindBuffer(gl::SHADER_STORAGE_BUFFER, 0);
+                gl::BindBuffer(gl::ARRAY_BUFFER, self.height_vbo);
             }
         }
         // The only moment the bar-to-pixel mapping can change
@@ -218,7 +226,7 @@ impl LayerShellHandler for AppState {
                 let (sw, sh) = (self.width as f32, self.height as f32);
                 // Identity when the surface IS the output: output NDC needs
                 // no mapping and the horizon is already in frame
-                let (scale, offset, occ) = match self.curve_box {
+                let (scale, offset, _occ) = match self.curve_box {
                     None => ([1.0, 1.0], [0.0, 0.0], [0.0, 0.0, 1.0, 1.0]),
                     // The compositor is free to hand back a size other than
                     // the one asked for, so the map is built from what this
@@ -230,7 +238,11 @@ impl LayerShellHandler for AppState {
                 };
                 gl::Uniform2f(self.path_scale_location, scale[0], scale[1]);
                 gl::Uniform2f(self.path_offset_location, offset[0], offset[1]);
-                gl::Uniform4f(self.occ_map_location, occ[0], occ[1], occ[2], occ[3]);
+                // The fans are authored in the same output NDC as the bars
+                gl::UseProgram(self.stencil_program);
+                gl::Uniform2f(self.stencil_scale_location, scale[0], scale[1]);
+                gl::Uniform2f(self.stencil_offset_location, offset[0], offset[1]);
+                gl::UseProgram(self.program);
             }
             if self.mode == Mode::Bars {
                 gl::Uniform1f(

@@ -20,18 +20,22 @@ layout(std430, binding = 3) readonly buffer BarGeometry {
 // is computed in the OUTPUT's NDC and mapped in at the end. One affine map
 // covers positions, reach and width alike; identity when the surface is the
 // whole output
+// Bars are drawn one path at a time so each can test its own silhouette, so
+// gl_InstanceID restarts at zero and the run's start is passed in
+uniform int InstanceOffset;
 uniform vec2 PathScale;
 uniform vec2 PathOffset;
 // 0 at the base, 1 at the tip. The fragment stage is the circle's, which
 // indexes the gradient and the alpha ramp by exactly this
 out float vRadial;
 void main() {
-    vec4 s = path[gl_InstanceID];
+    int bar = gl_InstanceID + InstanceOffset;
+    vec4 s = path[bar];
     vec2 n = s.zw;
     // Tangent is the normal turned a quarter turn; no second lookup needed
     vec2 t = vec2(-n.y, n.x);
     // x = width, y = reach, both carrying the point's scale already
-    vec2 g = geom[gl_InstanceID];
+    vec2 g = geom[bar];
     vRadial = corner.y * height;
     vec2 p = s.xy + t * (corner.x - 0.5) * g.x + n * vRadial * g.y;
     gl_Position = vec4(p * PathScale + PathOffset, 0.0, 1.0);
