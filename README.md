@@ -40,7 +40,7 @@ and there is no reason to emit a 2003 baseline and hope. Packagers who need a
 portable binary set `RUSTFLAGS` in the environment, which takes precedence.
 
 That installs two binaries into `~/.local/bin`: `cavawall` itself and
-`cavawall-curve`, the curve editor. Make sure that directory is on your
+`cavawall-tune`, the curve editor. Make sure that directory is on your
 `PATH`.
 
 Then copy the annotated defaults and start it:
@@ -189,7 +189,7 @@ loop.
 ## The curve editor
 
 ```bash
-cavawall-curve
+cavawall-tune
 ```
 
 Serves an editor on localhost and prints the URL. It loads the **current**
