@@ -27,6 +27,29 @@ pub fn round_floats(value: &mut toml::Value) {
     }
 }
 
+/// Per-wallpaper bar overrides; each field optional so one can be set alone.
+#[derive(Serialize, Deserialize, Debug, Default)]
+pub struct BarOverride {
+    pub amount: Option<u32>,
+    pub gap: Option<f32>,
+    pub max_height: Option<f32>,
+    pub opacity: Option<f32>,
+    pub matte: Option<f32>,
+}
+
+impl BarOverride {
+    #[must_use]
+    pub fn apply(&self, base: &BarConfig) -> BarConfig {
+        BarConfig {
+            amount: self.amount.unwrap_or(base.amount),
+            gap: self.gap.unwrap_or(base.gap),
+            max_height: self.max_height.or(base.max_height),
+            opacity: self.opacity.or(base.opacity),
+            matte: self.matte.or(base.matte),
+        }
+    }
+}
+
 /// Per-wallpaper overrides, one file each under `wallpapers/`.
 ///
 /// Named by the wallpaper's content hash, so it survives a rename or a move.
@@ -37,10 +60,26 @@ pub struct WallpaperConfig {
     /// Which figure this wallpaper gets, overriding `general.mode`
     pub mode: Option<Mode>,
     pub circle: Option<CircleConfig>,
+    pub bars: Option<BarOverride>,
     pub curve: Option<CurveConfig>,
 }
 
 impl WallpaperConfig {
+    /// Prepended on write; `toml` cannot emit comments itself.
+    const HEADER: &'static str = "\
+# cavawall settings for one wallpaper, keyed by its content hash so the file
+# survives a rename or a move. Written by cavawall-tune; hand edits are fine.
+#
+#   name    label for you; nothing reads it
+#   mode    bars | circle | curve, overriding general.mode in config.toml
+#   circle  diameter, anchor, inner_radius, inner_alpha, outer_alpha, bars
+#   bars    amount, gap, max_height, opacity, matte - each falls back to [bars]
+#   curve   occlude, bars, and one [[curve.path]] per stretch
+#
+# Delete this file to go back to config.toml's defaults for this wallpaper.
+
+";
+
     #[must_use]
     pub fn path(dir: &std::path::Path, key: &str) -> std::path::PathBuf {
         dir.join("wallpapers").join(format!("{key}.toml"))
@@ -63,7 +102,7 @@ impl WallpaperConfig {
         round_floats(&mut value);
         let body = toml::to_string(&value)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        std::fs::write(path, body)
+        std::fs::write(path, Self::HEADER.to_owned() + &body)
     }
 }
 
@@ -303,7 +342,7 @@ pub struct GeneralConfig {
     pub audio_source: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct BarConfig {
     pub amount: u32,
     pub gap: f32,
