@@ -201,6 +201,8 @@ pub struct PathSpec {
     pub upright: bool,
     /// This path's own silhouette; absent falls back to the curve's
     pub occlude: Option<Box<[Control]>>,
+    /// False is never clipped, whatever silhouettes exist
+    pub clip: bool,
 }
 
 /// One bar, ready for the GPU: base, the normal's angle, and the reach and
@@ -403,13 +405,13 @@ pub fn build(paths: &[PathSpec], shared: &[Control], count: u32, aspect: f32, fi
     let mut out = Vec::with_capacity(count as usize);
     let mut draws = Vec::with_capacity(usable.len());
     for ((spec, a), n) in usable.iter().zip(&arcs).zip(counts) {
-        let occ = match spec.occlude.as_deref() {
+        let occ = if !spec.clip { None } else { match spec.occlude.as_deref() {
             Some(c) if drawn(c) && occluders.len() < MAX_OCCLUDERS => {
                 occluders.push(c.into());
                 u8::try_from(occluders.len() - 1).ok()
             }
             _ => shared_occ,
-        };
+        } };
         let first = u32::try_from(out.len()).unwrap_or(0);
         for (s, scale) in sample_arc(a, n as usize, spec.flip, spec.upright, aspect) {
             out.push(Bar {
@@ -861,7 +863,7 @@ mod tests {
             ]
             .into()
         };
-        let path = |occlude: Option<Box<[Control]>>| PathSpec {
+        let path = |occlude: Option<Box<[Control]>>| PathSpec { clip: true,
             occlude,
             controls: line(0.5),
             bars: Some(4),
@@ -901,8 +903,8 @@ mod tests {
             .into_boxed_slice()
         };
         let paths = vec![
-            PathSpec { occlude: None, controls: line(0.0, 0.6), reach: 0.4, width: 0.01, ..Default::default() },
-            PathSpec { occlude: None, controls: line(0.7, 1.0), reach: 0.1, width: 0.02, ..Default::default() },
+            PathSpec { clip: true, occlude: None, controls: line(0.0, 0.6), reach: 0.4, width: 0.01, ..Default::default() },
+            PathSpec { clip: true, occlude: None, controls: line(0.7, 1.0), reach: 0.1, width: 0.02, ..Default::default() },
         ];
         let bars = build(&paths, &[], 20, 16.0 / 9.0, Fit::STRETCH).bars;
         assert_eq!(bars.len(), 20);
@@ -914,10 +916,36 @@ mod tests {
         // point: one path left means it takes every bar
         let broken = vec![
             paths[0].clone(),
-            PathSpec { occlude: None, controls: Box::new([]), ..Default::default() },
+            PathSpec { clip: true, occlude: None, controls: Box::new([]), ..Default::default() },
         ];
         assert_eq!(build(&broken, &[], 9, 1.0, Fit::STRETCH).bars.len(), 9);
         assert!(build(&[], &[], 9, 1.0, Fit::STRETCH).bars.is_empty());
+    }
+
+    /// Opting a path out has to survive a silhouette being present, since
+    /// that is the only case where the flag does anything
+    #[test]
+    fn clip_false_leaves_a_path_unoccluded() {
+        let line = |x0: f32, x1: f32| {
+            vec![
+                Control { x: x0, y: 0.5, scale: 1.0, angle: None },
+                Control { x: x1, y: 0.5, scale: 1.0, angle: None },
+            ]
+            .into_boxed_slice()
+        };
+        let shared = [
+            Control { x: 0.0, y: 0.4, scale: 1.0, angle: None },
+            Control { x: 1.0, y: 0.4, scale: 1.0, angle: None },
+        ];
+        let paths = vec![
+            PathSpec { clip: true, occlude: None, controls: line(0.0, 0.5), ..Default::default() },
+            PathSpec { clip: false, occlude: None, controls: line(0.5, 1.0), ..Default::default() },
+            PathSpec { clip: false, occlude: Some(line(0.2, 0.8)), controls: line(0.0, 1.0), ..Default::default() },
+        ];
+        let built = build(&paths, &shared, 12, 1.0, Fit::STRETCH);
+        assert!(built.draws[0].occ.is_some(), "the shared silhouette still applies");
+        assert!(built.draws[1].occ.is_none(), "opted out of the shared one");
+        assert!(built.draws[2].occ.is_none(), "opting out beats its own silhouette");
     }
 
     /// The same point in the file has to land on the same feature of the
