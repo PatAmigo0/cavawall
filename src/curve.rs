@@ -444,7 +444,7 @@ pub fn describe(path: &std::path::Path) -> Option<(String, Option<(u32, u32)>)> 
 ///
 /// Header only: the size is needed to work out how the image is cropped onto
 /// the output, and decoding a 3-megapixel JPEG to learn two integers would be
-/// absurd. PNG and JPEG cover what wallpaper daemons are fed; anything else
+/// absurd. PNG, JPEG and WebP cover what wallpaper daemons are fed; anything else
 /// returns None and the caller treats the image as already output-shaped,
 /// which is what every curve authored before this assumed
 #[must_use]
@@ -460,6 +460,26 @@ pub fn size_of_image(b: &[u8]) -> Option<(u32, u32)> {
         let n = |at: usize| u32::from_be_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]]);
         return Some((n(16), n(20)));
     }
+    // WebP: RIFF container, canvas size in the first chunk
+    if b.len() >= 30 && b.starts_with(b"RIFF") && &b[8..12] == b"WEBP" {
+        let le16 = |at: usize| u32::from(u16::from_le_bytes([b[at], b[at + 1]]));
+        let le24 = |at: usize| u32::from_le_bytes([b[at], b[at + 1], b[at + 2], 0]);
+        return match &b[12..16] {
+            // Lossless: signature byte, then 14-bit width-1 and height-1
+            b"VP8L" if b[20] == 0x2f => {
+                let bits = u32::from_le_bytes([b[21], b[22], b[23], b[24]]);
+                Some(((bits & 0x3fff) + 1, ((bits >> 14) & 0x3fff) + 1))
+            }
+            // Extended: flags and reserved, then 24-bit canvas less one
+            b"VP8X" => Some((le24(24) + 1, le24(27) + 1)),
+            // Lossy: frame tag and sync code, then 14-bit width and height
+            b"VP8 " if b[23..26] == [0x9d, 0x01, 0x2a] => {
+                Some((le16(26) & 0x3fff, le16(28) & 0x3fff))
+            }
+            _ => None,
+        };
+    }
+
     if !b.starts_with(&[0xff, 0xd8]) {
         return None;
     }
@@ -788,6 +808,38 @@ mod tests {
         assert!((d.sx / d.sy - 3.0).abs() < 1e-4 || (d.sy - 1.0).abs() < 1e-5);
         // Nonsense in, identity out, rather than a NaN that draws nothing
         assert_eq!(Fit::cover((0, 0), (1920, 1080)), Fit::STRETCH);
+    }
+
+    /// Each WebP encoding stores the canvas differently, and all three must size
+    #[test]
+    fn webp_headers_give_the_canvas_size() {
+        let riff = |fourcc: &[u8], body: &[u8]| {
+            let mut v = b"RIFF\0\0\0\0WEBP".to_vec();
+            v.extend_from_slice(fourcc);
+            v.extend_from_slice(&(body.len() as u32).to_le_bytes());
+            v.extend_from_slice(body);
+            v.resize(v.len().max(30), 0);
+            v
+        };
+
+        let bits: u32 = 3551 | (2245 << 14);
+        let mut lossless = vec![0x2f];
+        lossless.extend_from_slice(&bits.to_le_bytes());
+        assert_eq!(size_of_image(&riff(b"VP8L", &lossless)), Some((3552, 2246)));
+
+        let mut extended = vec![0u8; 4];
+        extended.extend_from_slice(&1919u32.to_le_bytes()[..3]);
+        extended.extend_from_slice(&1079u32.to_le_bytes()[..3]);
+        assert_eq!(size_of_image(&riff(b"VP8X", &extended)), Some((1920, 1080)));
+
+        let mut lossy = vec![0u8; 3];
+        lossy.extend_from_slice(&[0x9d, 0x01, 0x2a]);
+        lossy.extend_from_slice(&640u16.to_le_bytes());
+        lossy.extend_from_slice(&480u16.to_le_bytes());
+        assert_eq!(size_of_image(&riff(b"VP8 ", &lossy)), Some((640, 480)));
+
+        assert_eq!(size_of_image(&riff(b"XXXX", &[0u8; 16])), None);
+        assert_eq!(size_of_image(b"RIFF short"), None);
     }
 
     /// The single walk has to agree with the obvious search-from-the-start
