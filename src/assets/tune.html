@@ -220,8 +220,8 @@ const img=new Image();
 // keeps working on it unchanged.
 // `bn` is a path's own bar count, or null for a share of the total by
 // length - exactly the two forms the config has
-let paths=[{pts:[],h:10,w:4,up:false,fl:false,bn:null}], cur=0, barsTotal=64;
-let pts=paths[0].pts, occ=[], sel=-1, drag=-1, shift=false, hist=[];
+let paths=[{pts:[],occ:[],h:10,w:4,up:false,fl:false,bn:null}], cur=0, barsTotal=64;
+let pts=paths[0].pts, occ=paths[0].occ, sel=-1, drag=-1, shift=false, hist=[];
 const cp=()=>paths[cur];
 // Which modifier does what. Kept in the browser so a choice survives a
 // reload; a blocked or private store just means the defaults every time
@@ -311,11 +311,10 @@ function loadExisting(){
       bn:b.bars??null,
       h:Math.round((b.height??0.10)*100),
       w:Math.round((b.width??0.004)*1000),
-      up:!!b.upright, fl:!!b.flip})).filter(p=>p.pts.length);
-    if(!paths.length)paths=[{pts:[],h:10,w:4,up:false,fl:false,bn:null}];
-    cur=0;pts=cp().pts;
-    occ.length=0;
-    for(const v of (c.occlude||[])) occ.push({x:v[0],y:v[1],s:1,a:null});
+      up:!!b.upright, fl:!!b.flip,
+      occ:(b.occlude||c.occlude||[]).map(v=>({x:v[0],y:v[1],s:1,a:null}))})).filter(p=>p.pts.length);
+    if(!paths.length)paths=[{pts:[],occ:[],h:10,w:4,up:false,fl:false,bn:null}];
+    cur=0;pts=cp().pts;occ=cp().occ;
     barsTotal=Math.round(c.bars??64);
     loadFigure();
     showPath();
@@ -325,7 +324,7 @@ function loadExisting(){
 // Everything that has to follow the active path: the sliders edit it, so they
 // have to be reloaded from it whenever it changes
 function showPath(){
-  pts=cp().pts;
+  pts=cp().pts;occ=cp().occ;
   $('pathlabel').textContent='path '+(cur+1)+'/'+paths.length;
   $('height').value=cp().h; $('width').value=cp().w;
   $('upright').checked=cp().up; $('flip').checked=cp().fl;
@@ -648,7 +647,7 @@ function rdp(list,eps){
 $('thin').onclick=()=>{
   pushHist();
   const eps=+$('thineps').value;
-  if(occmode)occ=rdp(occ,eps);else{cp().pts=rdp(pts,eps);pts=cp().pts;}
+  if(occmode){occ=rdp(occ,eps);cp().occ=occ;}else{cp().pts=rdp(pts,eps);pts=cp().pts;}
   sel=-1;showSel();draw();
 };
 // Snap a roughly traced line onto the edge that is actually in the image
@@ -749,7 +748,7 @@ $('trace').onclick=()=>{
       t.s=best.s; t.a=best.a;
     }
   }
-  if(occmode)occ=traced;else{cp().pts=traced;pts=cp().pts;}
+  if(occmode){occ=traced;cp().occ=occ;}else{cp().pts=traced;pts=cp().pts;}
   sel=-1;showSel();draw();
 };
 $('clearall').onclick=()=>{
@@ -789,7 +788,7 @@ $('addpath').onclick=()=>{
   pushHist();
   // A new path inherits the current one's geometry: a second ridge on the
   // same wallpaper usually wants the same look, not the defaults
-  paths.push({pts:[],h:cp().h,w:cp().w,up:cp().up,fl:cp().fl,bn:cp().bn});
+  paths.push({pts:[],occ:[],h:cp().h,w:cp().w,up:cp().up,fl:cp().fl,bn:cp().bn});
   cur=paths.length-1;occmode=false;syncOcc();showPath();
 };
 // Bars are handed to cava in path order, not left-to-right, so a path drawn
@@ -807,7 +806,7 @@ $('pathdown').onclick=()=>movePath(1);
 $('delpath').onclick=()=>{
   pushHist();
   paths.splice(cur,1);
-  if(!paths.length)paths=[{pts:[],h:10,w:4,up:false,fl:false,bn:null}];
+  if(!paths.length)paths=[{pts:[],occ:[],h:10,w:4,up:false,fl:false,bn:null}];
   cur=Math.min(cur,paths.length-1);showPath();
 };
 function undo(){
@@ -842,7 +841,10 @@ $('occbtn').onclick=()=>{occmode=!occmode;sel=-1;syncOcc();showSel();draw();};
 function emit(){
   const curve={};
   if(!paths.every(P=>P.bn!=null)) curve.bars=barsTotal;
-  if(occ.length>1) curve.occlude=occ.map(p=>[+p.x.toFixed(4),+p.y.toFixed(4)]);
+  const drawn=paths.filter(P=>P.pts.length>=2);
+  const outline=P=>P.occ.map(p=>[+p.x.toFixed(4),+p.y.toFixed(4)]);
+  const same=drawn.length&&drawn.every(P=>JSON.stringify(outline(P))===JSON.stringify(outline(drawn[0])));
+  if(same&&drawn[0].occ.length>1) curve.occlude=outline(drawn[0]);
   curve.path=paths.filter(P=>P.pts.length>=2).map(P=>{
     const o={height:+(P.h/100).toFixed(2),width:+(P.w/1000).toFixed(3),
       points:P.pts.map(p=>{const v=[+p.x.toFixed(4),+p.y.toFixed(4),+p.s.toFixed(2)];
@@ -850,6 +852,7 @@ function emit(){
     if(P.bn!=null)o.bars=P.bn;
     if(P.up)o.upright=true;
     if(P.fl)o.flip=true;
+    if(!same&&P.occ.length>1)o.occlude=outline(P);
     return o;
   });
   W.mode=$('figure').value;
