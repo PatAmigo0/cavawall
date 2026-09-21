@@ -75,6 +75,8 @@ body:not([data-figure=curve]) #notcurve{display:block}
   <button class=curve-only id=nextpath title="next path">&rsaquo;</button>
   <button class=curve-only id=addpath>+ path</button>
   <button class=curve-only id=delpath title="delete this path">&times;</button>
+  <button class=curve-only id=pathup title="earlier in the order: this path takes lower cava bands">&uarr;</button>
+  <button class=curve-only id=pathdown title="later in the order: this path takes higher cava bands">&darr;</button>
   <button class=curve-only id=occbtn>occluder: off</button>
   <button class=curve-only id=paintbtn>paint: off</button>
   <div class="menu curve-only" id=viewmenu>
@@ -790,6 +792,18 @@ $('addpath').onclick=()=>{
   paths.push({pts:[],h:cp().h,w:cp().w,up:cp().up,fl:cp().fl,bn:cp().bn});
   cur=paths.length-1;occmode=false;syncOcc();showPath();
 };
+// Bars are handed to cava in path order, not left-to-right, so a path drawn
+// out of sequence carries the wrong end of the spectrum for where it sits
+function movePath(d){
+  const j=cur+d;
+  if(j<0||j>=paths.length)return;
+  pushHist();
+  [paths[cur],paths[j]]=[paths[j],paths[cur]];
+  cur=j;
+  showPath();
+}
+$('pathup').onclick=()=>movePath(-1);
+$('pathdown').onclick=()=>movePath(1);
 $('delpath').onclick=()=>{
   pushHist();
   paths.splice(cur,1);
