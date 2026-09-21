@@ -11,6 +11,8 @@ path = "src/main.rs"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+# cavawallctl only; the daemon links none of it
+clap = { version = "4", features = ["derive"] }
 gl = "0.14.0"
 libc = "0.2"
 khronos-egl = { version = "6.0.0", features = [
