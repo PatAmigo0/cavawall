@@ -199,6 +199,8 @@ pub struct PathSpec {
     pub width: f32,
     pub flip: bool,
     pub upright: bool,
+    /// This path's own silhouette; absent falls back to the curve's
+    pub occlude: Option<Box<[Control]>>,
 }
 
 /// One bar, ready for the GPU: base, the normal's angle, and the reach and
@@ -213,6 +215,26 @@ pub struct Bar {
     pub normal: [f32; 2],
     pub reach: f32,
     pub width: f32,
+}
+
+/// Stencil bits are eight, so eight distinct silhouettes.
+pub const MAX_OCCLUDERS: usize = 8;
+
+/// One instanced draw: a run of bars and the silhouette they test against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PathDraw {
+    pub first: u32,
+    pub count: u32,
+    /// Which occluder, and so which stencil bit. None is never clipped.
+    pub occ: Option<u8>,
+}
+
+/// Bars, the draws that cover them, and the outlines those draws test.
+pub struct Built {
+    pub bars: Vec<Bar>,
+    pub draws: Vec<PathDraw>,
+    /// Distinct outlines in bit order; index i is stencil bit 1 << i
+    pub occluders: Vec<Box<[Control]>>,
 }
 
 /// Split `count` bars between paths: whatever `fixed` asks for, and the rest
@@ -290,11 +312,18 @@ pub fn allocate(lengths: &[f32], fixed: &[Option<u32>], count: u32) -> Vec<u32> 
 /// One draw call: the shader indexes per instance and has no idea paths
 /// exist, so a second curve costs only its own bars
 #[must_use]
-pub fn build(paths: &[PathSpec], count: u32, aspect: f32, fit: Fit) -> Vec<Bar> {
+pub fn build(paths: &[PathSpec], shared: &[Control], count: u32, aspect: f32, fit: Fit) -> Built {
     let usable: Vec<&PathSpec> = paths.iter().filter(|p| p.controls.len() >= 2).collect();
     if usable.is_empty() {
-        return Vec::new();
+        return Built { bars: Vec::new(), draws: Vec::new(), occluders: Vec::new() };
     }
+    // Shared first, so paths that do not override it all name bit 0
+    let drawn = |c: &[Control]| c.len() >= 2;
+    let mut occluders: Vec<Box<[Control]>> = Vec::new();
+    let shared_occ = drawn(shared).then(|| {
+        occluders.push(shared.into());
+        0u8
+    });
     // Densified once and kept: measuring a path and sampling it are the same
     // walk, and build runs on every configure
     let mapped: Vec<Box<[Control]>> = usable
@@ -316,7 +345,16 @@ pub fn build(paths: &[PathSpec], count: u32, aspect: f32, fit: Fit) -> Vec<Bar> 
         count,
     );
     let mut out = Vec::with_capacity(count as usize);
+    let mut draws = Vec::with_capacity(usable.len());
     for ((spec, a), n) in usable.iter().zip(&arcs).zip(counts) {
+        let occ = match spec.occlude.as_deref() {
+            Some(c) if drawn(c) && occluders.len() < MAX_OCCLUDERS => {
+                occluders.push(c.into());
+                u8::try_from(occluders.len() - 1).ok()
+            }
+            _ => shared_occ,
+        };
+        let first = u32::try_from(out.len()).unwrap_or(0);
         for (s, scale) in sample_arc(a, n as usize, spec.flip, spec.upright, aspect) {
             out.push(Bar {
                 pos: s.pos,
@@ -325,8 +363,9 @@ pub fn build(paths: &[PathSpec], count: u32, aspect: f32, fit: Fit) -> Vec<Bar> 
                 width: spec.width * scale,
             });
         }
+        draws.push(PathDraw { first, count: u32::try_from(out.len()).unwrap_or(0) - first, occ });
     }
-    out
+    Built { bars: out, draws, occluders }
 }
 
 /// NDC bounding box of every bar at full volume: `(min_x, min_y, max_x,
@@ -756,6 +795,46 @@ mod tests {
     /// Two paths share one buffer and one draw call, and each carries its own
     /// reach - which is the whole reason a bar holds reach rather than the
     /// shader holding a uniform
+    /// A path's own silhouette gets its own bit; one without shares the curve's
+    #[test]
+    fn occluders_are_deduplicated_into_bits() {
+        let line = |y: f32| -> Box<[Control]> {
+            vec![
+                Control { x: 0.0, y, scale: 1.0, angle: None },
+                Control { x: 1.0, y, scale: 1.0, angle: None },
+            ]
+            .into()
+        };
+        let path = |occlude: Option<Box<[Control]>>| PathSpec {
+            occlude,
+            controls: line(0.5),
+            bars: Some(4),
+            reach: 0.1,
+            width: 0.01,
+            flip: false,
+            upright: true,
+        };
+        let shared = line(0.9);
+        let built = build(&[path(None), path(Some(line(0.2)))], &shared, 8, 1.0, Fit::STRETCH);
+
+        assert_eq!(built.occluders.len(), 2, "shared plus the one override");
+        assert_eq!(built.draws.len(), 2);
+        assert_eq!(built.draws[0].occ, Some(0), "no override falls back to the shared bit");
+        assert_eq!(built.draws[1].occ, Some(1), "its own silhouette, its own bit");
+        assert_eq!(built.draws[0].first, 0);
+        assert_eq!(built.draws[1].first, built.draws[0].count, "runs are contiguous");
+        assert_eq!(
+            built.draws.iter().map(|d| d.count).sum::<u32>(),
+            built.bars.len() as u32,
+            "every bar belongs to exactly one draw"
+        );
+
+        // No silhouette anywhere means nothing to test against
+        let bare = build(&[path(None)], &[], 4, 1.0, Fit::STRETCH);
+        assert!(bare.occluders.is_empty());
+        assert_eq!(bare.draws[0].occ, None);
+    }
+
     #[test]
     fn build_splits_bars_and_keeps_per_path_reach() {
         let line = |x0: f32, x1: f32| {
@@ -766,10 +845,10 @@ mod tests {
             .into_boxed_slice()
         };
         let paths = vec![
-            PathSpec { controls: line(0.0, 0.6), reach: 0.4, width: 0.01, ..Default::default() },
-            PathSpec { controls: line(0.7, 1.0), reach: 0.1, width: 0.02, ..Default::default() },
+            PathSpec { occlude: None, controls: line(0.0, 0.6), reach: 0.4, width: 0.01, ..Default::default() },
+            PathSpec { occlude: None, controls: line(0.7, 1.0), reach: 0.1, width: 0.02, ..Default::default() },
         ];
-        let bars = build(&paths, 20, 16.0 / 9.0, Fit::STRETCH);
+        let bars = build(&paths, &[], 20, 16.0 / 9.0, Fit::STRETCH).bars;
         assert_eq!(bars.len(), 20);
         // Twice the length, twice the bars
         let long = bars.iter().filter(|b| (b.reach - 0.4).abs() < 1e-6).count();
@@ -779,10 +858,10 @@ mod tests {
         // point: one path left means it takes every bar
         let broken = vec![
             paths[0].clone(),
-            PathSpec { controls: Box::new([]), ..Default::default() },
+            PathSpec { occlude: None, controls: Box::new([]), ..Default::default() },
         ];
-        assert_eq!(build(&broken, 9, 1.0, Fit::STRETCH).len(), 9);
-        assert!(build(&[], 9, 1.0, Fit::STRETCH).is_empty());
+        assert_eq!(build(&broken, &[], 9, 1.0, Fit::STRETCH).bars.len(), 9);
+        assert!(build(&[], &[], 9, 1.0, Fit::STRETCH).bars.is_empty());
     }
 
     /// The same point in the file has to land on the same feature of the
