@@ -1,5 +1,5 @@
 <!doctype html><meta charset=utf8>
-<title>cavawall - curve editor</title>
+<title>cavawall - tune</title>
 <style>
 :root{color-scheme:dark}
 *{box-sizing:border-box}
@@ -56,7 +56,7 @@ select{background:#1e1e26;color:#e6e6ea;border:1px solid #33333f;border-radius:6
 .pop input[type=range]{width:96px}
 </style>
 <header>
-  <h1>curve editor</h1>
+  <h1>cavawall tune</h1>
   <span class=key id=wpkey>__KEY__</span>
   <span class=pill id=count>0 points</span>
   <span class=spacer></span>
@@ -238,7 +238,7 @@ function loadExisting(){
     }).filter(p=>p.pts.length);
     if(!paths.length)paths=[{pts:[],h:10,w:4,up:false,fl:false,bn:null}];
     cur=0;pts=cp().pts;
-    const o=t.match(/occlude\s*=\s*\[([\s\S]*?)\n\]/);
+    const o=t.match(/occlude\s*=\s*\[([\s\S]*?)\n\]/)||t.match(/occlude\s*=\s*\[([\s\S]*?)\]\s*$/m);
     if(o) for(const row of o[1].matchAll(/\[([^\]]+)\]/g)){
       const v=row[1].split(',').map(s=>parseFloat(s.trim()));
       if(v.length>=2) occ.push({x:v[0],y:v[1],s:1,a:null});
