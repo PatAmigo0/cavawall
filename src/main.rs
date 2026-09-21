@@ -452,6 +452,8 @@ struct AppState {
     /// Startup-only, like the bar count: the two modes are different programs
     /// with different uniforms and different surface geometry
     mode: Mode,
+    /// Which config file this instance read, for `status`
+    config_path: PathBuf,
     circle: CircleGeom,
     /// Curve mode only. Kept so the bars can be rebuilt in configure: normals
     /// are perpendicular in PIXEL space, which depends on the output's aspect
@@ -629,6 +631,10 @@ impl AppState {
             Request::Status => {
                 let data = serde_json::json!({
                     "pid": std::process::id(),
+                    "version": env!("CARGO_PKG_VERSION"),
+                    "exe": std::env::current_exe().ok().map(|p| p.display().to_string()),
+                    "config": self.config_path.display().to_string(),
+                    "mode": self.mode,
                     "pinned_output": self.pinned_output,
                     "placed_on": self.placed_on,
                     "bars": self.bar_count,
@@ -649,9 +655,11 @@ impl AppState {
                 control::write_response(stream, &Response::ok(None));
                 self.clear_and_exit();
             }
+            // Bars, mode and curve are all sampled at startup, so re-reading
+            // config means running again - the same file, never PATH
             Request::Reload => {
-                self.reload_colors();
                 control::write_response(stream, &Response::ok(None));
+                self.reexec();
             }
         }
     }
