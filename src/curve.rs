@@ -403,7 +403,7 @@ pub fn build(paths: &[PathSpec], shared: &[Control], count: u32, aspect: f32, fi
         count,
     );
     let mut out = Vec::with_capacity(count as usize);
-    let mut draws = Vec::with_capacity(usable.len());
+    let mut draws: Vec<PathDraw> = Vec::with_capacity(usable.len());
     for ((spec, a), n) in usable.iter().zip(&arcs).zip(counts) {
         let occ = if !spec.clip { None } else { match spec.occlude.as_deref() {
             Some(c) if drawn(c) && occluders.len() < MAX_OCCLUDERS => {
@@ -421,7 +421,13 @@ pub fn build(paths: &[PathSpec], shared: &[Control], count: u32, aspect: f32, fi
                 width: spec.width * scale,
             });
         }
-        draws.push(PathDraw { first, count: u32::try_from(out.len()).unwrap_or(0) - first, occ });
+        // Bars are contiguous, so neighbours wanting the same stencil bit are
+        // one range and one draw
+        let len = u32::try_from(out.len()).unwrap_or(0) - first;
+        match draws.last_mut() {
+            Some(prev) if prev.occ == occ => prev.count += len,
+            _ => draws.push(PathDraw { first, count: len, occ }),
+        }
     }
     Built { bars: out, draws, occluders }
 }
@@ -454,63 +460,11 @@ pub fn bounds(bars: &[Bar]) -> (f32, f32, f32, f32) {
     if x0 > x1 { (-1.0, -1.0, 1.0, 1.0) } else { (x0, y0, x1, y1) }
 }
 
-/// Resolution of the sampled horizon
+/// Resolution of the sampled occluder floor
 ///
-/// 2048 is about one output pixel per bucket at 1920, fine enough to hold a
-/// steep stretch of ridge and to agree with the editor's preview to the pixel.
-/// The buffer is 8KB and the fragment does one lookup
+/// 2048 is about one output pixel per bucket at 1920, fine enough to follow a
+/// steep stretch of outline when the surface is sized to it
 pub const HORIZON_BUCKETS: usize = 2048;
-
-/// A polyline in normalised coordinates, resampled into a height-above-bottom
-/// per x bucket
-///
-/// Points need not be sorted or span the full width: the ends extend flat, so
-/// a silhouette drawn across the middle still occludes correctly at the edges
-#[must_use]
-pub fn horizon(points: &[Control], fit: Fit) -> Vec<f32> {
-    if points.len() < 2 {
-        return Vec::new();
-    }
-    let mut pts: Vec<(f32, f32)> = points
-        .iter()
-        .map(|c| {
-            let m = fit.map([c.x, c.y]);
-            Control { x: m[0], y: m[1], ..*c }
-        })
-        .collect::<Vec<_>>()
-        .iter()
-        // Stored counting UP from the bottom, which is the direction
-        // gl_FragCoord.y runs, so the shader flips neither
-        .map(|c| (c.x.clamp(0.0, 1.0), 1.0 - c.y.clamp(0.0, 1.0)))
-        .collect();
-    pts.sort_by(|a, b| a.0.total_cmp(&b.0));
-
-    // One walk, not a search per bucket: both sequences are sorted by x, so
-    // the segment for bucket i+1 is at or after the segment for bucket i.
-    // Searching from the start each time is O(buckets * points) - 268k
-    // comparisons for a 131-point silhouette - against O(buckets + points)
-    let mut out = Vec::with_capacity(HORIZON_BUCKETS);
-    let last = pts.len() - 1;
-    let mut k = 0usize;
-    for i in 0..HORIZON_BUCKETS {
-        let x = i as f32 / (HORIZON_BUCKETS - 1) as f32;
-        while k < last && pts[k].0 < x {
-            k += 1;
-        }
-        out.push(if pts[k].0 < x {
-            // Past the last point: the horizon holds flat
-            pts[last].1
-        } else if k == 0 {
-            // Before the first: flat the other way
-            pts[0].1
-        } else {
-            let (a, b) = (pts[k - 1], pts[k]);
-            let span = (b.0 - a.0).max(f32::EPSILON);
-            fma(b.1 - a.1, (x - a.0) / span, a.1)
-        });
-    }
-    out
-}
 
 /// FNV-1a over a file's bytes, hex
 ///
@@ -943,9 +897,53 @@ mod tests {
             PathSpec { clip: false, occlude: Some(line(0.2, 0.8)), controls: line(0.0, 1.0), ..Default::default() },
         ];
         let built = build(&paths, &shared, 12, 1.0, Fit::STRETCH);
+        // The two opted-out paths share a bit, so they share a draw
+        assert_eq!(built.draws.len(), 2);
         assert!(built.draws[0].occ.is_some(), "the shared silhouette still applies");
-        assert!(built.draws[1].occ.is_none(), "opted out of the shared one");
-        assert!(built.draws[2].occ.is_none(), "opting out beats its own silhouette");
+        assert!(built.draws[1].occ.is_none(), "opting out beats its own silhouette");
+    }
+
+    /// Paths only need a draw of their own when the stencil bit changes, so
+    /// a run sharing one silhouette collapses to a single range
+    #[test]
+    fn draws_coalesce_while_the_occluder_holds() {
+        let line = |x0: f32, x1: f32| {
+            vec![
+                Control { x: x0, y: 0.5, scale: 1.0, angle: None },
+                Control { x: x1, y: 0.5, scale: 1.0, angle: None },
+            ]
+            .into_boxed_slice()
+        };
+        let shared = [
+            Control { x: 0.0, y: 0.4, scale: 1.0, angle: None },
+            Control { x: 1.0, y: 0.4, scale: 1.0, angle: None },
+        ];
+        let shares = |n| {
+            (0..n)
+                .map(|i| PathSpec {
+                    clip: true,
+                    occlude: None,
+                    controls: line(i as f32 / n as f32, (i + 1) as f32 / n as f32),
+                    ..Default::default()
+                })
+                .collect::<Vec<_>>()
+        };
+        let built = build(&shares(3), &shared, 30, 1.0, Fit::STRETCH);
+        assert_eq!(built.draws.len(), 1, "three paths, one silhouette, one draw");
+        assert_eq!(built.draws[0].first, 0);
+        assert_eq!(built.draws[0].count, built.bars.len() as u32, "the whole range");
+
+        // An opted-out path in the middle breaks the run into three
+        let mut split = shares(3);
+        split[1].clip = false;
+        let built = build(&split, &shared, 30, 1.0, Fit::STRETCH);
+        assert_eq!(built.draws.len(), 3);
+        assert!(built.draws[1].occ.is_none());
+        let total: u32 = built.draws.iter().map(|d| d.count).sum();
+        assert_eq!(total, built.bars.len() as u32, "every bar still drawn once");
+        for w in built.draws.windows(2) {
+            assert_eq!(w[0].first + w[0].count, w[1].first, "ranges stay contiguous");
+        }
     }
 
     /// The same point in the file has to land on the same feature of the
@@ -1003,91 +1001,6 @@ mod tests {
 
         assert_eq!(size_of_image(&riff(b"XXXX", &[0u8; 16])), None);
         assert_eq!(size_of_image(b"RIFF short"), None);
-    }
-
-    /// The single walk has to agree with the obvious search-from-the-start
-    /// version at every bucket, for silhouettes of every shape: sorted or not,
-    /// duplicated x, spanning the width or a sliver of it
-    #[test]
-    fn the_horizon_walk_matches_a_brute_force_search() {
-        fn brute(points: &[Control]) -> Vec<f32> {
-            let mut pts: Vec<(f32, f32)> = points
-                .iter()
-                .map(|c| (c.x.clamp(0.0, 1.0), 1.0 - c.y.clamp(0.0, 1.0)))
-                .collect();
-            pts.sort_by(|a, b| a.0.total_cmp(&b.0));
-            (0..HORIZON_BUCKETS)
-                .map(|i| {
-                    let x = i as f32 / (HORIZON_BUCKETS - 1) as f32;
-                    match pts.iter().position(|p| p.0 >= x) {
-                        None => pts[pts.len() - 1].1,
-                        Some(0) => pts[0].1,
-                        Some(k) => {
-                            let (a, b) = (pts[k - 1], pts[k]);
-                            let span = (b.0 - a.0).max(f32::EPSILON);
-                            a.1 + (b.1 - a.1) * ((x - a.0) / span)
-                        }
-                    }
-                })
-                .collect()
-        }
-        // A deterministic spread of shapes, including ones that break naive
-        // indexing: reversed input, repeated x, a sliver, the full width
-        let mut seed = 0x2545_f491_4f6c_dd1du64;
-        let mut rand = || {
-            seed ^= seed << 13;
-            seed ^= seed >> 7;
-            seed ^= seed << 17;
-            (seed >> 40) as f32 / 16_777_216.0
-        };
-        for case in 0..40 {
-            let n = 2 + case % 17;
-            let (lo, hi) = match case % 4 {
-                0 => (0.0, 1.0),
-                1 => (0.4, 0.45),
-                2 => (0.0, 0.3),
-                _ => (0.7, 1.0),
-            };
-            let pts: Vec<Control> = (0..n)
-                .map(|i| Control {
-                    x: lo + (hi - lo) * (i as f32 / (n - 1) as f32),
-                    y: rand(),
-                    scale: 1.0,
-                    angle: None,
-                })
-                .collect();
-            let (walk, slow) = (horizon(&pts, Fit::STRETCH), brute(&pts));
-            assert_eq!(walk.len(), slow.len(), "case {case}");
-            for (i, (w, b)) in walk.iter().zip(&slow).enumerate() {
-                assert!((w - b).abs() < 1e-5, "case {case} bucket {i}: {w} vs {b}");
-            }
-        }
-    }
-
-    /// A flat silhouette occludes at a constant height, and one drawn across
-    /// only part of the width extends flat to both edges rather than dropping
-    /// to zero and letting bars show through at the sides
-    #[test]
-    fn horizon_samples_and_extends_flat() {
-        let pts = vec![
-            Control { x: 0.3, y: 0.6, scale: 1.0, angle: None },
-            Control { x: 0.7, y: 0.6, scale: 1.0, angle: None },
-        ];
-        let h = horizon(&pts, Fit::STRETCH);
-        assert_eq!(h.len(), HORIZON_BUCKETS);
-        // y 0.6 from the top is 0.4 from the bottom, everywhere
-        for v in &h {
-            assert!((v - 0.4).abs() < 1e-3, "got {v}");
-        }
-        assert!(horizon(&pts[..1], Fit::STRETCH).is_empty(), "one point cannot be a horizon");
-        // A slope interpolates rather than stepping
-        let slope = vec![
-            Control { x: 0.0, y: 1.0, scale: 1.0, angle: None },
-            Control { x: 1.0, y: 0.0, scale: 1.0, angle: None },
-        ];
-        let h = horizon(&slope, Fit::STRETCH);
-        assert!(h[0] < 0.01 && h[HORIZON_BUCKETS - 1] > 0.99);
-        assert!((h[HORIZON_BUCKETS / 2] - 0.5).abs() < 0.01);
     }
 
     /// A normal has to be perpendicular ON SCREEN, not in NDC. NDC is square
