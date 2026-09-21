@@ -291,7 +291,13 @@ function loadFigure(){
   $('bmaxh').value=b.max_height??''; $('bopac').value=b.opacity??'';
 }
 
-document.addEventListener('change',e=>{if(e.target.id==='figure'){applyFigure();emit();}});
+// Any figure field, not just the selector: save posts the emitted JSON, so a
+// field that never re-emits is a field that never gets written
+document.addEventListener('input',e=>{
+  if(!e.target.closest||!e.target.closest('#figbody'))return;
+  if(e.target.id==='figure')applyFigure();
+  emit();
+});
 
 function loadExisting(){
   fetch('/existing').then(r=>r.json()).then(w=>{
@@ -311,6 +317,7 @@ function loadExisting(){
     barsTotal=Math.round(c.bars??64);
     loadFigure();
     showPath();
+    emit();
   }).catch(draw);
 }
 // Everything that has to follow the active path: the sliders edit it, so they
