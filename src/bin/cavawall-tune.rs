@@ -13,7 +13,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 
-use cavawall::app_config::{CurveConfig, Mode, WallpaperConfig};
+use cavawall::app_config::WallpaperConfig;
 use cavawall::curve;
 
 const PAGE: &str = include_str!("../assets/tune.html");
@@ -98,8 +98,11 @@ fn handle(mut s: TcpStream, wallpaper: &PathBuf, key: &str) -> std::ops::Control
         ("GET", "/existing") => {
             // Hand back whatever block is already in the config so an edit
             // starts from the current curve rather than a blank image
-            let body = existing_block(key).unwrap_or_default();
-            reply(&mut s, "200 OK", "text/plain; charset=utf-8", body.as_bytes());
+            let body = WallpaperConfig::load(&config_dir(), key)
+                .as_ref()
+                .and_then(|w| serde_json::to_string(w).ok())
+                .unwrap_or_else(|| "{}".to_string());
+            reply(&mut s, "200 OK", "application/json; charset=utf-8", body.as_bytes());
         }
         ("POST", "/save") => {
             let mut body = vec![0u8; len];
@@ -107,10 +110,10 @@ fn handle(mut s: TcpStream, wallpaper: &PathBuf, key: &str) -> std::ops::Control
                 reply(&mut s, "400 Bad Request", "text/plain", b"short body");
                 return std::ops::ControlFlow::Continue(());
             }
-            let toml = String::from_utf8_lossy(&body).to_string();
-            match write_block(key, &toml) {
+            let incoming = String::from_utf8_lossy(&body).to_string();
+            match write_config(key, &incoming) {
                 Ok(p) => {
-                    println!("cavawall-tune: wrote {} bytes to {}", toml.len(), p.display());
+                    println!("cavawall-tune: wrote {} bytes to {}", incoming.len(), p.display());
                     // The path is sampled into an SSBO at startup and never
                     // re-read, so a saved curve does nothing until cavawall
                     // restarts. Through the launcher, never the binary: it
@@ -156,41 +159,10 @@ fn config_dir() -> PathBuf {
         .join("cavawall")
 }
 
-/// This wallpaper's curve, in the block shape the page speaks
-fn existing_block(key: &str) -> Option<String> {
-    #[derive(serde::Serialize)]
-    struct Wrap<'a> {
-        curves: std::collections::HashMap<&'a str, &'a CurveConfig>,
-    }
-    let stored = WallpaperConfig::load(&config_dir(), key)?;
-    let curve = stored.curve.as_ref()?;
-    let mut value = toml::Value::try_from(Wrap {
-        curves: std::iter::once((key, curve)).collect(),
-    })
-    .ok()?;
-    cavawall::app_config::round_floats(&mut value);
-    let text = toml::to_string(&value).ok()?;
-    let header = format!("[curves.{key}]");
-    let at = text.find(&header)?;
-    Some(text[at + header.len()..].to_string())
-}
-
-/// Store this key's curve, leaving anything else in its file alone.
-fn write_block(key: &str, block: &str) -> Result<PathBuf, String> {
+/// Store this wallpaper's settings, replacing its file.
+fn write_config(key: &str, json: &str) -> Result<PathBuf, String> {
+    let incoming: WallpaperConfig = serde_json::from_str(json).map_err(|e| e.to_string())?;
     let dir = config_dir();
-    let wrapped = format!("[curves.{key}]\n{block}");
-    let parsed: toml::Value = toml::from_str(&wrapped).map_err(|e| e.to_string())?;
-    let curve: CurveConfig = parsed
-        .get("curves")
-        .and_then(|c| c.get(key))
-        .ok_or_else(|| "no curve in block".to_string())?
-        .clone()
-        .try_into()
-        .map_err(|e: toml::de::Error| e.to_string())?;
-
-    let mut stored = WallpaperConfig::load(&dir, key).unwrap_or_default();
-    stored.mode = stored.mode.or(Some(Mode::Curve));
-    stored.curve = Some(curve);
-    stored.save(&dir, key).map_err(|e| e.to_string())?;
+    incoming.save(&dir, key).map_err(|e| e.to_string())?;
     Ok(WallpaperConfig::path(&dir, key))
 }

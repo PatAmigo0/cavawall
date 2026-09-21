@@ -54,21 +54,26 @@ select{background:#1e1e26;color:#e6e6ea;border:1px solid #33333f;border-radius:6
 .pop button{width:100%;text-align:left}
 .pop hr{border:0;border-top:1px solid #26262e;margin:2px 0;width:100%}
 .pop input[type=range]{width:96px}
+body:not([data-figure=curve]) .curve-only{display:none!important}
+body:not([data-figure=curve]) #wrap,body:not([data-figure=curve]) #panel{display:none}
+#notcurve{display:none;padding:56px 24px;text-align:center;color:#9a9aa8;font:14px/1.6 system-ui}
+#notcurve b{color:#d8d8e4}
+body:not([data-figure=curve]) #notcurve{display:block}
 </style>
 <header>
   <h1>cavawall tune</h1>
   <span class=key id=wpkey>__KEY__</span>
-  <span class=pill id=count>0 points</span>
+  <span class="pill curve-only" id=count>0 points</span>
   <span class=spacer></span>
-  <span class=hint>click add &middot; drag move &middot; right-click delete &middot; paint: drag to trace &middot; wheel zoom &middot; middle-drag pan &middot; see keys</span>
-  <span class=pill id=pathlabel>path 1/1</span>
-  <button id=prevpath title="previous path">&lsaquo;</button>
-  <button id=nextpath title="next path">&rsaquo;</button>
-  <button id=addpath>+ path</button>
-  <button id=delpath title="delete this path">&times;</button>
-  <button id=occbtn>occluder: off</button>
-  <button id=paintbtn>paint: off</button>
-  <div class=menu id=viewmenu>
+  <span class="hint curve-only">click add &middot; drag move &middot; right-click delete &middot; paint: drag to trace &middot; wheel zoom &middot; middle-drag pan &middot; see keys</span>
+  <span class="pill curve-only" id=pathlabel>path 1/1</span>
+  <button class=curve-only id=prevpath title="previous path">&lsaquo;</button>
+  <button class=curve-only id=nextpath title="next path">&rsaquo;</button>
+  <button class=curve-only id=addpath>+ path</button>
+  <button class=curve-only id=delpath title="delete this path">&times;</button>
+  <button class=curve-only id=occbtn>occluder: off</button>
+  <button class=curve-only id=paintbtn>paint: off</button>
+  <div class="menu curve-only" id=viewmenu>
     <button data-pop>view &#9662;</button>
     <div class=pop>
       <label><input type=checkbox id=showdots checked> handles</label>
@@ -83,7 +88,7 @@ select{background:#1e1e26;color:#e6e6ea;border:1px solid #33333f;border-radius:6
       <button id=reset>reset view</button>
     </div>
   </div>
-  <div class=menu id=editmenu>
+  <div class="menu curve-only" id=editmenu>
     <button data-pop>edit &#9662;</button>
     <div class=pop>
       <button id=undo>undo &nbsp;<span class=key>ctrl+z</span></button>
@@ -100,7 +105,7 @@ select{background:#1e1e26;color:#e6e6ea;border:1px solid #33333f;border-radius:6
       <button id=clearall>clear everything</button>
     </div>
   </div>
-  <div class=menu id=keysmenu>
+  <div class="menu curve-only" id=keysmenu>
     <button data-pop>keys &#9662;</button>
     <div class=pop>
       <label>force new point
@@ -114,9 +119,48 @@ select{background:#1e1e26;color:#e6e6ea;border:1px solid #33333f;border-radius:6
       <span class=hint2>middle-drag pans &middot; wheel zooms &middot; ctrl+z undoes</span>
     </div>
   </div>
+  <div class=menu id=figmenu>
+    <button data-pop>figure &#9662;</button>
+    <div class=pop>
+      <label>figure
+        <select id=figure>
+          <option value=curve>curve</option>
+          <option value=bars>bars</option>
+          <option value=circle>circle</option>
+        </select>
+      </label>
+      <hr>
+      <span class=hint2>circle</span>
+      <label>diameter <input type=number id=cdiam min=40 max=4000 step=10 placeholder=default></label>
+      <label>anchor
+        <select id=canchor>
+          <option value="">default</option>
+          <option value=top-left>top-left</option>
+          <option value=top-right>top-right</option>
+          <option value=bottom-left>bottom-left</option>
+          <option value=bottom-right>bottom-right</option>
+          <option value=center>center</option>
+        </select>
+      </label>
+      <label>inner radius <input type=number id=cinner min=0 max=0.95 step=0.05 placeholder=default></label>
+      <label>bars <input type=number id=cbars min=1 max=512 step=1 placeholder=default></label>
+      <hr>
+      <span class=hint2>bars (any figure)</span>
+      <label>count <input type=number id=bamount min=1 max=512 step=1 placeholder=default></label>
+      <label>gap <input type=number id=bgap min=0 max=2 step=0.05 placeholder=default></label>
+      <label>max height <input type=number id=bmaxh min=0.05 max=1 step=0.05 placeholder=default></label>
+      <label>opacity <input type=number id=bopac min=0 max=1 step=0.05 placeholder=default></label>
+    </div>
+  </div>
   <button class=primary id=save>save to config</button>
 </header>
 <div id=wrap><canvas id=c></canvas></div>
+<div id=notcurve>
+  <p><b>This wallpaper is set to <span id=figname>bars</span>.</b></p>
+  <p>The path editor only applies to <b>curve</b>. Set this wallpaper's geometry under <b>figure &#9662;</b>, then save.</p>
+  <p>Any curve already saved is kept, and comes back if you switch this wallpaper to curve again.</p>
+</div>
+
 <div id=panel>
   <label>bars <input type=range id=bars min=1 max=200 step=1 value=64><span class=val id=barsv>64</span>
     <input type=checkbox id=ownbars> <span class=hint>own</span></label>
@@ -213,37 +257,44 @@ function pushHist(){hist.push(JSON.stringify({p:paths,o:occ,c:cur}));if(hist.len
 img.onload=()=>{c.width=img.naturalWidth;c.height=img.naturalHeight;loadExisting();};
 img.src='/wallpaper';
 
+let W={};
+const numOrNull=id=>{const v=$(id).value.trim();return v===''?null:parseFloat(v);};
+const intOrNull=id=>{const v=numOrNull(id);return v==null?null:Math.round(v);};
+function prune(o){for(const k of Object.keys(o))if(o[k]==null)delete o[k];return Object.keys(o).length?o:null;}
+const readCircle=()=>prune({diameter:intOrNull('cdiam'),anchor:$('canchor').value||null,
+                            inner_radius:numOrNull('cinner'),bars:intOrNull('cbars')});
+const readBars=()=>prune({amount:intOrNull('bamount'),gap:numOrNull('bgap'),
+                          max_height:numOrNull('bmaxh'),opacity:numOrNull('bopac')});
+function applyFigure(){const m=$('figure').value;document.body.dataset.figure=m;$('figname').textContent=m;}
+function loadFigure(){
+  $('figure').value=W.mode||'curve';
+  applyFigure();
+  const c=W.circle||{}, b=W.bars||{};
+  $('cdiam').value=c.diameter??''; $('canchor').value=c.anchor??'';
+  $('cinner').value=c.inner_radius??''; $('cbars').value=c.bars??'';
+  $('bamount').value=b.amount??''; $('bgap').value=b.gap??'';
+  $('bmaxh').value=b.max_height??''; $('bopac').value=b.opacity??'';
+}
+
+document.addEventListener('change',e=>{if(e.target.id==='figure'){applyFigure();emit();}});
+
 function loadExisting(){
-  fetch('/existing').then(r=>r.text()).then(t=>{
-    const pointsIn=(block,into)=>{
-      const m=block.match(/points\s*=\s*\[([\s\S]*?)\n\]/)||block.match(/points\s*=\s*\[([\s\S]*?)\]\s*$/m);
-      if(!m)return;
-      for(const row of m[1].matchAll(/\[([^\]]+)\]/g)){
-        const v=row[1].split(',').map(s=>parseFloat(s.trim()));
-        if(v.length>=2) into.push({x:v[0],y:v[1],s:v[2]??1,a:v.length>3?v[3]:null});
-      }
-    };
-    const num=(block,k,d)=>{const r=block.match(new RegExp(k+'\\s*=\\s*([0-9.]+)'));return r?parseFloat(r[1]):d;};
-    const blocks=t.split(/\[\[curves\.[^\]]+\.path\]\]/).slice(1);
-    // The shorthand and the path blocks are the same thing written two ways,
-    // so the head of the file is just another block when there are none
-    const sources=blocks.length?blocks:[t];
-    paths=sources.map(b=>{
-      const p={pts:[],bn:blocks.length?(/bars\s*=/.test(b)?Math.round(num(b,'bars',0)):null):null,
-               h:Math.round(num(b,'height',num(t,'height',0.10))*100),
-               w:Math.round(num(b,'width',num(t,'width',0.004))*1000),
-               up:/upright\s*=\s*true/.test(b),fl:/flip\s*=\s*true/.test(b)};
-      pointsIn(b,p.pts);
-      return p;
-    }).filter(p=>p.pts.length);
+  fetch('/existing').then(r=>r.json()).then(w=>{
+    W=w||{};
+    const c=W.curve||{};
+    const src=(c.path&&c.path.length)?c.path:(c.points?[c]:[]);
+    paths=src.map(b=>({
+      pts:(b.points||[]).map(v=>({x:v[0],y:v[1],s:v[2]??1,a:v.length>3?v[3]:null})),
+      bn:b.bars??null,
+      h:Math.round((b.height??0.10)*100),
+      w:Math.round((b.width??0.004)*1000),
+      up:!!b.upright, fl:!!b.flip})).filter(p=>p.pts.length);
     if(!paths.length)paths=[{pts:[],h:10,w:4,up:false,fl:false,bn:null}];
     cur=0;pts=cp().pts;
-    const o=t.match(/occlude\s*=\s*\[([\s\S]*?)\n\]/)||t.match(/occlude\s*=\s*\[([\s\S]*?)\]\s*$/m);
-    if(o) for(const row of o[1].matchAll(/\[([^\]]+)\]/g)){
-      const v=row[1].split(',').map(s=>parseFloat(s.trim()));
-      if(v.length>=2) occ.push({x:v[0],y:v[1],s:1,a:null});
-    }
-    barsTotal=Math.round(num(t,'bars',64));
+    occ.length=0;
+    for(const v of (c.occlude||[])) occ.push({x:v[0],y:v[1],s:1,a:null});
+    barsTotal=Math.round(c.bars??64);
+    loadFigure();
     showPath();
   }).catch(draw);
 }
@@ -753,31 +804,27 @@ function syncOcc(){
 }
 $('occbtn').onclick=()=>{occmode=!occmode;sel=-1;syncOcc();showSel();draw();};
 function emit(){
-  const rows=q=>q.map(p=>{
-    const v=[p.x.toFixed(4),p.y.toFixed(4),p.s.toFixed(2)];
-    if(p.a!=null)v.push(p.a.toFixed(0));
-    return '  ['+v.join(', ')+'],';
-  }).join('\n');
-  // Only written when some path is sharing: when every path names its own
-  // count, the total is their sum and saying it twice invites them to differ
-  let out=paths.every(P=>P.bn!=null)?'':'bars = '+barsTotal+'\n';
-  // One silhouette for the whole curve: it is the wallpaper's skyline, and
-  // every path on it hides behind the same one
-  if(occ.length>1) out+='occlude = [\n'+occ.map(p=>'  ['+p.x.toFixed(4)+', '+p.y.toFixed(4)+'],').join('\n')+'\n]\n';
-  for(const P of paths){
-    if(P.pts.length<2)continue;
-    out+='\n[[curves.'+KEY+'.path]]\n'
-       +(P.bn!=null?'bars = '+P.bn+'\n':'')
-       +'height = '+(P.h/100).toFixed(2)+'\n'
-       +'width = '+(P.w/1000).toFixed(3)+'\n'
-       +(P.up?'upright = true\n':'')
-       +(P.fl?'flip = true\n':'')
-       +'points = [\n'+rows(P.pts)+'\n]\n';
-  }
-  $('out').value=out;
+  const curve={};
+  if(!paths.every(P=>P.bn!=null)) curve.bars=barsTotal;
+  if(occ.length>1) curve.occlude=occ.map(p=>[+p.x.toFixed(4),+p.y.toFixed(4)]);
+  curve.path=paths.filter(P=>P.pts.length>=2).map(P=>{
+    const o={height:+(P.h/100).toFixed(2),width:+(P.w/1000).toFixed(3),
+      points:P.pts.map(p=>{const v=[+p.x.toFixed(4),+p.y.toFixed(4),+p.s.toFixed(2)];
+                           if(p.a!=null)v.push(+p.a.toFixed(0));return v;})};
+    if(P.bn!=null)o.bars=P.bn;
+    if(P.up)o.upright=true;
+    if(P.fl)o.flip=true;
+    return o;
+  });
+  W.mode=$('figure').value;
+  W.curve=curve.path.length?curve:null;
+  W.circle=readCircle();
+  W.bars=readBars();
+  prune(W);
+  $('out').value=JSON.stringify(W,null,1);
 }
 $('save').onclick=()=>{
-  if(!paths.some(P=>P.pts.length>=2)){alert('need a path with at least two points');return;}
+  if($('figure').value==='curve'&&!paths.some(P=>P.pts.length>=2)){alert('curve mode needs a path with at least two points');return;}
   const btn=$('save'); btn.textContent='saving...';
   fetch('/save',{method:'POST',body:$('out').value})
     .then(r=>r.text().then(t=>({ok:r.ok,t})))
