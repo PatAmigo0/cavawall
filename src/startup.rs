@@ -763,6 +763,7 @@ pub(crate) fn run() {
         occ_map_location,
         silent_frames: 0,
         background_color,
+        config_path: config_filename.clone(),
         pinned_output,
         placed_on: None,
         placed_size: None,
