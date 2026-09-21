@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use cavawall::app_config::{CurveConfig, Mode, WallpaperConfig};
 use cavawall::curve;
 
-const PAGE: &str = include_str!("../assets/curve_editor.html");
+const PAGE: &str = include_str!("../assets/tune.html");
 
 fn main() {
     let Some(wallpaper) = curve::current_wallpaper().filter(|p| p.is_file()) else {
