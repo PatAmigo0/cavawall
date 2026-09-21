@@ -29,8 +29,23 @@ enum Command {
     Reload,
     /// Start one if none is running
     Start,
+    /// Stop whatever is running and start again, picking up a new binary
+    Restart,
+    /// SIGKILL the instance named by the lock, for one that stopped answering
+    Kill,
     /// Print a shell completion script
     Completions { shell: Shell },
+}
+
+/// The lock names the running instance even when its socket is wedged, which
+/// is the only case this is for. The exe is checked before signalling, so a
+/// recycled pid belonging to something else is left alone.
+fn locked_pid() -> Option<i32> {
+    let dir = std::env::var_os("XDG_RUNTIME_DIR")
+        .map_or_else(|| std::path::PathBuf::from("/tmp"), std::path::PathBuf::from);
+    let pid: i32 = std::fs::read_to_string(dir.join("cavawall.lock")).ok()?.trim().parse().ok()?;
+    let exe = std::fs::read_link(format!("/proc/{pid}/exe")).ok()?;
+    exe.file_name()?.to_str()?.starts_with("cavawall").then_some(pid)
 }
 
 /// Detached, so it outlives the shell that asked for it.
@@ -56,6 +71,52 @@ fn main() {
     match &cli.command {
         Command::Completions { shell } => {
             clap_complete::generate(*shell, &mut Cli::command(), "cavawallctl", &mut std::io::stdout());
+            return;
+        }
+        Command::Kill => {
+            match locked_pid() {
+                Some(pid) => {
+                    // SAFETY: a plain signal to a pid this process just resolved
+                    if unsafe { libc::kill(pid, libc::SIGKILL) } == 0 {
+                        if !cli.json {
+                            println!("killed {pid}");
+                        }
+                    } else {
+                        eprintln!("cavawallctl: cannot kill {pid}: {}", std::io::Error::last_os_error());
+                        exit(1);
+                    }
+                }
+                None => {
+                    eprintln!("cavawallctl: no locked instance to kill");
+                    exit(1);
+                }
+            }
+            return;
+        }
+        Command::Restart => {
+            // Reload re-execs the same image, so a rebuilt binary needs the
+            // process replaced rather than refreshed
+            if request(&Request::Stop).is_ok() {
+                let gone = (0..50).any(|_| {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    request(&Request::Status).is_err()
+                });
+                if !gone {
+                    eprintln!("cavawallctl: the running instance did not stop");
+                    exit(1);
+                }
+            }
+            match spawn_launcher() {
+                Ok(()) => {
+                    if !cli.json {
+                        println!("restarted");
+                    }
+                }
+                Err(e) => {
+                    eprintln!("cavawallctl: cannot start: {e}");
+                    exit(1);
+                }
+            }
             return;
         }
         Command::Start => {
@@ -86,7 +147,7 @@ fn main() {
         Command::Move { output } => Request::Move { output: output.clone() },
         Command::Stop => Request::Stop,
         Command::Reload => Request::Reload,
-        Command::Start | Command::Completions { .. } => unreachable!("handled above"),
+        Command::Start | Command::Restart | Command::Kill | Command::Completions { .. } => unreachable!("handled above"),
     };
 
     let response = match request(&req) {
