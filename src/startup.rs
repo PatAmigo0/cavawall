@@ -178,6 +178,10 @@ pub(crate) fn run() {
         .and_then(|w| w.mode)
         .or(config.general.mode)
         .unwrap_or_default();
+    let bars_config = per_wallpaper
+        .as_ref()
+        .and_then(|w| w.bars.as_ref())
+        .map_or_else(|| config.bars.clone(), |o| o.apply(&config.bars));
     let circle_config = per_wallpaper
         .as_ref()
         .and_then(|w| w.circle.as_ref())
@@ -207,9 +211,9 @@ pub(crate) fn run() {
         Mode::Bars => None,
     }
     .unwrap_or(if follow_bars {
-        scheme::bar_count().unwrap_or(config.bars.amount)
+        scheme::bar_count().unwrap_or(bars_config.amount)
     } else {
-        config.bars.amount
+        bars_config.amount
     });
     // Zero divides by zero in the bar-width maths. The ceiling is a sanity
     // bound: 4096 bars is already sub-pixel on any real monitor
@@ -478,7 +482,7 @@ pub(crate) fn run() {
     let cava_buffer = vec![0u8; bar_count as usize * 2].into_boxed_slice();
     let prev_frame = cava_buffer.clone();
     let frame_bytes = std::mem::size_of_val(&*cava_buffer) as GLsizeiptr;
-    let (bar_width, bar_stride) = bar_geometry(bar_count, config.bars.gap);
+    let (bar_width, bar_stride) = bar_geometry(bar_count, bars_config.gap);
     let background_color = array_from_config_color(&config.general.background_color);
 
     let gradient_scale_name = CString::new("GradientScale").unwrap();
@@ -627,7 +631,7 @@ pub(crate) fn run() {
                 );
                 gl::Uniform1f(
                     gl::GetUniformLocation(shader_program, c"AngularHalf".as_ptr()),
-                    step / (1.0 + config.bars.gap) * 0.5,
+                    step / (1.0 + bars_config.gap) * 0.5,
                 );
                 gl::Uniform1f(
                     gl::GetUniformLocation(shader_program, c"InnerRadius".as_ptr()),
@@ -665,10 +669,10 @@ pub(crate) fn run() {
     unsafe {
         let mean = palette_mean(&initial_rgba);
         gl::Uniform3f(matte_color_location, mean[0], mean[1], mean[2]);
-        gl::Uniform1f(matte_location, config.bars.matte.unwrap_or(0.0).clamp(0.0, 1.0));
+        gl::Uniform1f(matte_location, bars_config.matte.unwrap_or(0.0).clamp(0.0, 1.0));
         gl::Uniform1f(
             gl::GetUniformLocation(shader_program, c"Opacity".as_ptr()),
-            config.bars.opacity.unwrap_or(1.0).clamp(0.0, 1.0),
+            bars_config.opacity.unwrap_or(1.0).clamp(0.0, 1.0),
         );
     }
     // Direct state access is core from 4.5. The driver decides that, not the
@@ -735,7 +739,7 @@ pub(crate) fn run() {
         frame_bytes,
         swap_damage,
         force_full_damage: true,
-        max_height: config.bars.max_height.unwrap_or(1.0),
+        max_height: bars_config.max_height.unwrap_or(1.0),
         mode,
         circle,
         curve_paths: curve_paths.into_boxed_slice(),
