@@ -1,4 +1,4 @@
-# Maintainer: PatAmigo0 <arseni.kuskou@innowise.com>
+# Maintainer: PatAmigo0
 pkgname=cavawall-git
 pkgver=r1.0000000
 pkgrel=1
@@ -57,6 +57,5 @@ package() {
   install -Dm644 config.toml "$pkgdir/usr/share/cavawall/config.toml"
   install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
-  # Upstream's notice travels with the code it covers, so it ships too.
   install -Dm644 LICENSE.MIT "$pkgdir/usr/share/licenses/$pkgname/LICENSE.MIT"
 }
