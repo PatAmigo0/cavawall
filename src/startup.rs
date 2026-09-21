@@ -577,6 +577,7 @@ pub(crate) fn run() {
                         // NDC spans 2.0, so a fraction of the output is twice
                         // that. Per path, because two ridges at different
                         // distances want different reaches
+                        clip: path.clip.unwrap_or(true),
                         occlude: path.occlude.as_deref().map(|pts| {
                             pts.iter()
                                 .filter(|p| p.len() >= 2)
