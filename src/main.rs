@@ -168,6 +168,7 @@ use std::{
 };
 
 use cavawall::{app_config, control, curve};
+use app_config::WallpaperConfig;
 use cavawall::math::fma;
 use app_config::*;
 use std::collections::HashSet;
@@ -379,6 +380,50 @@ fn debug_palette(what: &str, rgba: &[[f32; 4]]) {
 
 /// Config path when no `--config` was given. The inherited path is now built
 /// only once the preferred one is ruled out, not unconditionally
+/// Give each curve still living in config.toml its own file.
+///
+/// Writes only what is missing, so it is a no-op once done and safe to repeat.
+fn migrate_curves(dir: &std::path::Path, config: &app_config::Config) {
+    #[derive(serde::Serialize)]
+    struct Migrated<'a> {
+        mode: &'static str,
+        curve: &'a app_config::CurveConfig,
+    }
+    let Some(curves) = config.curves.as_ref() else { return };
+    for (key, curve) in curves {
+        let path = WallpaperConfig::path(dir, key);
+        if path.exists() {
+            continue;
+        }
+        let Ok(mut value) = toml::Value::try_from(Migrated { mode: "curve", curve }) else {
+            continue;
+        };
+        app_config::round_floats(&mut value);
+        let Ok(body) = toml::to_string(&value) else {
+            continue;
+        };
+        if path.parent().is_some_and(|p| std::fs::create_dir_all(p).is_ok())
+            && std::fs::write(&path, body).is_ok()
+        {
+            eprintln!("cavawall: migrated curve {key} to {}", path.display());
+        }
+    }
+}
+
+/// Wallpaper keys that have a per-wallpaper file.
+fn known_wallpapers(dir: &std::path::Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(dir.join("wallpapers")) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|e| {
+            let p = e.path();
+            (p.extension()? == "toml").then(|| p.file_stem()?.to_str().map(str::to_owned))?
+        })
+        .collect()
+}
+
 fn default_config_path() -> PathBuf {
     let home = PathBuf::from(env::var_os("HOME").expect("Unable to get home directory"));
     let own = home.join(".config/cavawall/config.toml");
@@ -487,23 +532,45 @@ fn main() {
     // Resolved before bar_count because each mode may override it: a ridge
     // wants a different density from a bottom row, and `[bars] amount` is
     // shared by all three
-    let configured_mode = config.general.mode.unwrap_or_default();
+
     // Resolved here, not at the curve setup below, because the bar count
     // comes out of it. It has to be the curve for the CURRENT wallpaper:
     // HashMap order is undefined, so any other choice is arbitrary
     // One read of the wallpaper answers both questions it is asked: which
     // curve this is, and how the image crops onto the output
-    let wallpaper = (configured_mode == Mode::Curve)
-        .then(curve::current_wallpaper)
-        .flatten()
-        .and_then(|w| curve::describe(&w));
+    let config_dir = config_filename
+        .parent()
+        .map_or_else(|| PathBuf::from("."), std::path::Path::to_path_buf);
+    // Read unconditionally: a per-wallpaper file may choose the figure, so the
+    // key is needed before the mode is
+    let wallpaper = curve::current_wallpaper().and_then(|w| curve::describe(&w));
     let curve_key = wallpaper.as_ref().map(|(key, _)| key.clone());
-    let curve_keys: HashSet<String> =
-        config.curves.iter().flat_map(|m| m.keys().cloned()).collect();
+    migrate_curves(&config_dir, &config);
+    let per_wallpaper = curve_key
+        .as_ref()
+        .and_then(|key| WallpaperConfig::load(&config_dir, key));
+    let configured_mode = per_wallpaper
+        .as_ref()
+        .and_then(|w| w.mode)
+        .or(config.general.mode)
+        .unwrap_or_default();
+    let circle_config = per_wallpaper
+        .as_ref()
+        .and_then(|w| w.circle.as_ref())
+        .or(config.circle.as_ref());
+    let curve_keys: HashSet<String> = config
+        .curves
+        .iter()
+        .flat_map(|m| m.keys().cloned())
+        .chain(known_wallpapers(&config_dir))
+        .collect();
     let active_curve = (configured_mode == Mode::Curve)
         .then(|| {
             let key = curve_key.clone()?;
-            let found = config.curves.as_ref()?.get(&key);
+            let found = per_wallpaper
+                .as_ref()
+                .and_then(|w| w.curve.as_ref())
+                .or_else(|| config.curves.as_ref()?.get(&key));
             if found.is_none() && debug_enabled() {
                 eprintln!("cavawall: no curve for wallpaper {key}, falling back to bars");
             }
@@ -511,7 +578,7 @@ fn main() {
         })
         .flatten();
     let bar_count = match configured_mode {
-        Mode::Circle => config.circle.as_ref().and_then(|c| c.bars),
+        Mode::Circle => circle_config.and_then(|c| c.bars),
         Mode::Curve => active_curve.and_then(CurveConfig::total_bars),
         Mode::Bars => None,
     }
@@ -743,7 +810,7 @@ fn main() {
     if mode == Mode::Curve && active_curve.is_none() {
         mode = Mode::Bars;
     }
-    let circle = CircleGeom::from_config(config.circle.as_ref());
+    let circle = CircleGeom::from_config(circle_config);
     let shader_program = build_program(mode);
     let mut quad_vbo = 0;
     let mut height_vbo = 0;

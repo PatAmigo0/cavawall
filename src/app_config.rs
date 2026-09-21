@@ -17,6 +17,56 @@ pub struct Config {
     pub curves: Option<HashMap<String, CurveConfig>>,
 }
 
+/// Coordinates are authored to four places; f32 widened to f64 is not.
+pub fn round_floats(value: &mut toml::Value) {
+    match value {
+        toml::Value::Float(f) => *f = (*f * 1e4).round() / 1e4,
+        toml::Value::Array(a) => a.iter_mut().for_each(round_floats),
+        toml::Value::Table(t) => t.iter_mut().for_each(|(_, v)| round_floats(v)),
+        _ => {}
+    }
+}
+
+/// Per-wallpaper overrides, one file each under `wallpapers/`.
+///
+/// Named by the wallpaper's content hash, so it survives a rename or a move.
+#[derive(Serialize, Deserialize, Debug, Default)]
+pub struct WallpaperConfig {
+    /// Human label; the filename is a hash and says nothing on its own
+    pub name: Option<String>,
+    /// Which figure this wallpaper gets, overriding `general.mode`
+    pub mode: Option<Mode>,
+    pub circle: Option<CircleConfig>,
+    pub curve: Option<CurveConfig>,
+}
+
+impl WallpaperConfig {
+    #[must_use]
+    pub fn path(dir: &std::path::Path, key: &str) -> std::path::PathBuf {
+        dir.join("wallpapers").join(format!("{key}.toml"))
+    }
+
+    #[must_use]
+    pub fn load(dir: &std::path::Path, key: &str) -> Option<Self> {
+        toml::from_str(&std::fs::read_to_string(Self::path(dir, key)).ok()?).ok()
+    }
+
+    /// # Errors
+    /// Serialisation or filesystem failure.
+    pub fn save(&self, dir: &std::path::Path, key: &str) -> std::io::Result<()> {
+        let path = Self::path(dir, key);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut value = toml::Value::try_from(self)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        round_floats(&mut value);
+        let body = toml::to_string(&value)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        std::fs::write(path, body)
+    }
+}
+
 /// Which shape the bars are arranged into
 ///
 /// Startup-only, like the bar count: each mode is its own GL program with its
