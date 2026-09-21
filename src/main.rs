@@ -470,6 +470,10 @@ struct AppState {
     /// horizon only once an output is known, since where it lands depends on
     /// how the wallpaper is cropped onto that output
     curve_occlude: Box<[curve::Control]>,
+    /// One instanced draw per path, in bar order
+    curve_draws: Box<[curve::PathDraw]>,
+    /// Distinct silhouettes; index i is stencil bit 1 << i
+    curve_occluders: Box<[Box<[curve::Control]>]>,
     /// The sampled silhouette, in output coordinates. Kept so the bounding box
     /// can be cut down to what is visible above it. Empty when there is none
     curve_horizon: Box<[f32]>,
@@ -1064,8 +1068,11 @@ impl AppState {
                 // ridge it was drawn on
                 let fit = self.fit_for(self.curve_output);
                 let aspect = self.width as f32 / self.height.max(1) as f32;
-                self.curve_bars =
-                    curve::build(&self.curve_paths, self.bar_count, aspect, fit).into();
+                let built =
+                    curve::build(&self.curve_paths, &self.curve_occlude, self.bar_count, aspect, fit);
+                self.curve_bars = built.bars.into();
+                self.curve_draws = built.draws.into();
+                self.curve_occluders = built.occluders.into();
                 self.curve_horizon =
                     curve::horizon(&self.curve_occlude, fit).into_boxed_slice();
                 self.curve_box = self.curve_bbox();

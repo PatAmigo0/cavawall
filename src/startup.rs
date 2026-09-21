@@ -572,6 +572,17 @@ pub(crate) fn run() {
                         // NDC spans 2.0, so a fraction of the output is twice
                         // that. Per path, because two ridges at different
                         // distances want different reaches
+                        occlude: path.occlude.as_deref().map(|pts| {
+                            pts.iter()
+                                .filter(|p| p.len() >= 2)
+                                .map(|p| curve::Control {
+                                    x: p[0],
+                                    y: p[1],
+                                    scale: 1.0,
+                                    angle: None,
+                                })
+                                .collect()
+                        }),
                         bars: path.bars,
                         reach: path.height.or(cfg.height).unwrap_or(0.18).clamp(0.0, 1.0) * 2.0,
                         width: path.width.or(cfg.width).unwrap_or(0.006).clamp(0.0, 1.0) * 2.0,
@@ -747,6 +758,8 @@ pub(crate) fn run() {
         width_ssbo,
         curve_bars: Box::new([]),
         curve_occlude: curve_occlude.into_boxed_slice(),
+        curve_draws: Box::new([]),
+        curve_occluders: Box::new([]),
         curve_horizon: Box::new([]),
         curve_fit,
         curve_key,
