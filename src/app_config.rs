@@ -74,7 +74,8 @@ impl WallpaperConfig {
 #   mode    bars | circle | curve, overriding general.mode in config.toml
 #   circle  diameter, anchor, inner_radius, inner_alpha, outer_alpha, bars
 #   bars    amount, gap, max_height, opacity, matte - each falls back to [bars]
-#   curve   occlude, bars, and one [[curve.path]] per stretch
+#   curve   occlude, bars, and one [[curve.path]] per stretch, each of
+#           which may carry its own occlude
 #
 # Delete this file to go back to config.toml's defaults for this wallpaper.
 
@@ -194,6 +195,8 @@ pub struct PathConfig {
     pub width: Option<f32>,
     pub flip: Option<bool>,
     pub upright: Option<bool>,
+    /// This path's own silhouette; absent falls back to the curve's
+    pub occlude: Option<Vec<Vec<f32>>>,
 }
 
 impl CurveConfig {
@@ -229,6 +232,8 @@ impl CurveConfig {
                 width: self.width,
                 flip: self.flip,
                 upright: self.upright,
+                // The shorthand is one path; its silhouette is the curve's
+                occlude: None,
             }]),
         }
     }
