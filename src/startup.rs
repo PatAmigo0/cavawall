@@ -332,7 +332,10 @@ pub(crate) fn run() {
             .unwrap()
     };
     egl.initialize(egl_display).unwrap();
-    const ATTRIBUTES: [i32; 9] = [
+    // Stencil carries the occluders: a silhouette is filled by parity into its
+    // own bit, and bars test it before the fragment shader runs. No config here
+    // offers stencil without depth, so a depth buffer comes along unused
+    const ATTRIBUTES: [i32; 11] = [
         egl::RED_SIZE,
         8,
         egl::GREEN_SIZE,
@@ -340,6 +343,8 @@ pub(crate) fn run() {
         egl::BLUE_SIZE,
         8,
         egl::ALPHA_SIZE,
+        8,
+        egl::STENCIL_SIZE,
         8,
         egl::NONE,
     ];
@@ -704,7 +709,27 @@ pub(crate) fn run() {
         unsafe { gl::GetUniformLocation(shader_program, c"PathScale".as_ptr()) };
     let path_offset_location =
         unsafe { gl::GetUniformLocation(shader_program, c"PathOffset".as_ptr()) };
-    let occ_map_location = unsafe { gl::GetUniformLocation(shader_program, c"OccMap".as_ptr()) };
+    let instance_offset_location =
+        unsafe { gl::GetUniformLocation(shader_program, c"InstanceOffset".as_ptr()) };
+    // Its own VAO: the main one carries the quad and the per-bar heights, and
+    // a fan wants neither
+    let (stencil_program, stencil_scale_location, stencil_offset_location, stencil_vbo, stencil_vao) = unsafe {
+        let program = link_program(STENCIL_VERTEX_SHADER_SRC, STENCIL_FRAGMENT_SHADER_SRC);
+        let scale = gl::GetUniformLocation(program, c"PathScale".as_ptr());
+        let offset = gl::GetUniformLocation(program, c"PathOffset".as_ptr());
+        let (mut fan_vbo, mut fan_vao) = (0u32, 0u32);
+        gl::GenBuffers(1, &mut fan_vbo);
+        gl::GenVertexArrays(1, &mut fan_vao);
+        gl::BindVertexArray(fan_vao);
+        gl::BindBuffer(gl::ARRAY_BUFFER, fan_vbo);
+        gl::EnableVertexAttribArray(0);
+        gl::VertexAttribPointer(0, 2, gl::FLOAT, gl::FALSE, 8, std::ptr::null());
+        // Back to the one the draw loop assumes is bound: this program sets GL
+        // state once at startup and never rebinds per frame
+        gl::BindVertexArray(vao);
+        gl::BindBuffer(gl::ARRAY_BUFFER, height_vbo);
+        (program, scale, offset, fan_vbo, fan_vao)
+    };
     let gradient_scale_location =
         unsafe { gl::GetUniformLocation(shader_program, gradient_scale_name.as_ptr()) };
 
@@ -764,7 +789,6 @@ pub(crate) fn run() {
         curve_fit,
         curve_key,
         curve_keys,
-        occ_ssbo,
         curve_image,
         curve_box: None,
         curve_output: (1, 1),
@@ -773,7 +797,15 @@ pub(crate) fn run() {
         matte_color_location,
         path_scale_location,
         path_offset_location,
-        occ_map_location,
+        vao,
+        program: shader_program,
+        instance_offset_location,
+        stencil_program,
+        stencil_scale_location,
+        stencil_offset_location,
+        stencil_vbo,
+        stencil_vao,
+        occ_fans: Box::new([]),
         silent_frames: 0,
         background_color,
         config_path: config_filename.clone(),

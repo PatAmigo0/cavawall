@@ -33,7 +33,7 @@ pub struct Control {
 
 impl Control {
     /// NDC has y running the other way and both axes spanning -1..1
-    fn to_ndc(self) -> [f32; 2] {
+    pub(crate) fn to_ndc(self) -> [f32; 2] {
         [self.x * 2.0 - 1.0, 1.0 - self.y * 2.0]
     }
 }
@@ -215,6 +215,62 @@ pub struct Bar {
     pub normal: [f32; 2],
     pub reach: f32,
     pub width: f32,
+}
+
+/// The lowest any silhouette reaches, per x bucket, as a height above the
+/// bottom. Zero where none of them reach.
+///
+/// Sound because every outline is closed down to the bottom edge, so below its
+/// lowest point is inside the shape. The minimum ACROSS outlines, because a
+/// path clipped high does not stop another path drawing lower.
+#[must_use]
+pub fn occluder_floor(outlines: &[Box<[Control]>], fit: Fit) -> Vec<f32> {
+    let mut floor = vec![0.0f32; HORIZON_BUCKETS];
+    let mut seen = vec![false; HORIZON_BUCKETS];
+    let last = (HORIZON_BUCKETS - 1) as f32;
+    for outline in outlines {
+        let pts: Vec<(f32, f32)> = outline
+            .iter()
+            .map(|c| {
+                let m = fit.map([c.x, c.y]);
+                (m[0].clamp(0.0, 1.0), 1.0 - m[1].clamp(0.0, 1.0))
+            })
+            .collect();
+        for w in pts.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            let lo = (a.0.min(b.0) * last).floor() as usize;
+            let hi = (a.0.max(b.0) * last).ceil() as usize;
+            let low = a.1.min(b.1);
+            for i in lo.min(HORIZON_BUCKETS - 1)..=hi.min(HORIZON_BUCKETS - 1) {
+                floor[i] = if seen[i] { floor[i].min(low) } else { low };
+                seen[i] = true;
+            }
+        }
+    }
+    floor
+}
+
+/// An occluder as a closed outline in the output's NDC, ready for a fan.
+///
+/// The line is closed down to the bottom edge, so a skyline covers everything
+/// beneath it. Parity fill then handles one that doubles back on itself, which
+/// a height-per-x array could not represent at all.
+#[must_use]
+pub fn occluder_outline(points: &[Control], fit: Fit) -> Vec<[f32; 2]> {
+    if points.len() < 2 {
+        return Vec::new();
+    }
+    let mut out: Vec<[f32; 2]> = points
+        .iter()
+        .map(|c| {
+            let m = fit.map([c.x, c.y]);
+            Control { x: m[0], y: m[1], ..*c }.to_ndc()
+        })
+        .collect();
+    let (first, last) = (out[0][0], out[out.len() - 1][0]);
+    out.push([last, -1.0]);
+    out.push([first, -1.0]);
+    out
 }
 
 /// Stencil bits are eight, so eight distinct silhouettes.
