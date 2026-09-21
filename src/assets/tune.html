@@ -58,6 +58,10 @@ body:not([data-figure=curve]) .curve-only{display:none!important}
 body:not([data-figure=curve]) #wrap,body:not([data-figure=curve]) #panel{display:none}
 #notcurve{display:none;padding:56px 24px;text-align:center;color:#9a9aa8;font:14px/1.6 system-ui}
 #notcurve b{color:#d8d8e4}
+#fighere{display:inline-flex;flex-direction:column;gap:9px;margin-top:22px;text-align:left;
+  background:#16161c;border:1px solid #26262e;border-radius:10px;padding:16px 18px;min-width:280px}
+#fighere label{display:flex;justify-content:space-between;gap:14px;align-items:center}
+#fighere hr{border:0;border-top:1px solid #26262e;margin:2px 0;width:100%}
 body:not([data-figure=curve]) #notcurve{display:block}
 </style>
 <header>
@@ -122,6 +126,7 @@ body:not([data-figure=curve]) #notcurve{display:block}
   <div class=menu id=figmenu>
     <button data-pop>figure &#9662;</button>
     <div class=pop>
+     <div id=figbody>
       <label>figure
         <select id=figure>
           <option value=curve>curve</option>
@@ -150,6 +155,7 @@ body:not([data-figure=curve]) #notcurve{display:block}
       <label>gap <input type=number id=bgap min=0 max=2 step=0.05 placeholder=default></label>
       <label>max height <input type=number id=bmaxh min=0.05 max=1 step=0.05 placeholder=default></label>
       <label>opacity <input type=number id=bopac min=0 max=1 step=0.05 placeholder=default></label>
+     </div>
     </div>
   </div>
   <button class=primary id=save>save to config</button>
@@ -159,6 +165,7 @@ body:not([data-figure=curve]) #notcurve{display:block}
   <p><b>This wallpaper is set to <span id=figname>bars</span>.</b></p>
   <p>The path editor only applies to <b>curve</b>. Set this wallpaper's geometry under <b>figure &#9662;</b>, then save.</p>
   <p>Any curve already saved is kept, and comes back if you switch this wallpaper to curve again.</p>
+  <div id=fighere></div>
 </div>
 
 <div id=panel>
@@ -265,7 +272,15 @@ const readCircle=()=>prune({diameter:intOrNull('cdiam'),anchor:$('canchor').valu
                             inner_radius:numOrNull('cinner'),bars:intOrNull('cbars')});
 const readBars=()=>prune({amount:intOrNull('bamount'),gap:numOrNull('bgap'),
                           max_height:numOrNull('bmaxh'),opacity:numOrNull('bopac')});
-function applyFigure(){const m=$('figure').value;document.body.dataset.figure=m;$('figname').textContent=m;}
+function applyFigure(){
+  const m=$('figure').value;
+  document.body.dataset.figure=m;
+  $('figname').textContent=m;
+  // The dropdown is the right home while the canvas owns the screen; when it
+  // is hidden the fields are the only thing to look at, so show them inline
+  const body=$('figbody');
+  (m==='curve'?document.querySelector('#figmenu .pop'):$('fighere')).appendChild(body);
+}
 function loadFigure(){
   $('figure').value=W.mode||'curve';
   applyFigure();
