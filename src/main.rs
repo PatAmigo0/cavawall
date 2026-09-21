@@ -19,9 +19,9 @@ use smithay_client_toolkit::{
 use wayland_client::protocol::wl_surface::WlSurface;
 use wayland_client::Proxy;
 use wayland_client::{
-    globals::registry_queue_init,
+    globals::{registry_queue_init, GlobalList},
     protocol::{wl_output, wl_surface},
-    Connection, QueueHandle,
+    Connection, EventQueue, QueueHandle,
 };
 use wayland_egl::WlEglSurface;
 
@@ -161,7 +161,8 @@ use std::{env, fs, ptr};
 use std::{
     io::{BufReader, Read},
     process::{Command, Stdio},
-    time::Duration,
+    thread::sleep,
+    time::{Duration, Instant},
 };
 
 use cavawall::{app_config, curve};
@@ -396,6 +397,58 @@ fn default_config_path() -> PathBuf {
     PathBuf::from("config.toml")
 }
 
+/// Hold an exclusive lock for the process lifetime, or stand down
+///
+/// The lock lives on the descriptor, so the returned file must outlive the
+/// process; closing it, including at exit, is what releases it
+fn claim_single_instance() -> fs::File {
+    let dir = env::var_os("XDG_RUNTIME_DIR").map_or_else(|| PathBuf::from("/tmp"), PathBuf::from);
+    let path = dir.join("cavawall.lock");
+    let file = match fs::OpenOptions::new().create(true).write(true).truncate(false).open(&path) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("cavawall: {}: {e}", path.display());
+            exit(1);
+        }
+    };
+    // SAFETY: the descriptor is open and owned for the duration of the call
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        return file;
+    }
+    // Someone else owns the surface. 0, so a launcher reads it as stand-down
+    if std::io::Error::last_os_error().kind() == std::io::ErrorKind::WouldBlock {
+        exit(0);
+    }
+    eprintln!("cavawall: cannot lock {}", path.display());
+    exit(1);
+}
+
+/// Bind the globals a wallpaper surface needs, waiting out a starting compositor
+///
+/// `registry_queue_init` snapshots the global list, so a late advertisement is
+/// invisible until the registry is polled again
+fn bind_shell(conn: &Connection) -> (GlobalList, EventQueue<AppState>, CompositorState, LayerShell) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let (globals, queue) = registry_queue_init::<AppState>(conn).unwrap();
+        let qh = queue.handle();
+        match (
+            CompositorState::bind(&globals, &qh),
+            LayerShell::bind(&globals, &qh),
+        ) {
+            (Ok(compositor), Ok(layer_shell)) => {
+                return (globals, queue, compositor, layer_shell)
+            }
+            _ if Instant::now() < deadline => sleep(Duration::from_millis(50)),
+            (compositor, _) => {
+                let missing = if compositor.is_err() { "wl_compositor" } else { "layer shell" };
+                eprintln!("cavawall: {missing} not available");
+                exit(1);
+            }
+        }
+    }
+}
+
 fn main() {
     let mut args = env::args_os().skip(1);
     let config_filename = match (args.next(), args.next(), args.next()) {
@@ -406,6 +459,8 @@ fn main() {
             exit(0);
         }
     };
+    // Before cava is spawned, so a duplicate costs nothing
+    let _instance = claim_single_instance();
     // Shut down cleanly on SIGTERM so the surface can be cleared first. A hard
     // kill leaves the last frame burnt into the background: the layer surface
     // goes away, but Hyprland does not reliably repaint underneath it, so a
@@ -533,7 +588,7 @@ fn main() {
     let cava_stdout = cava_process.stdout.unwrap();
     let cava_reader = BufReader::new(cava_stdout);
     let conn = Connection::connect_to_env().unwrap();
-    let (globals, mut event_queue) = registry_queue_init(&conn).unwrap();
+    let (globals, mut event_queue, compositor, layer_shell) = bind_shell(&conn);
     let qh = event_queue.handle();
     let mut event_loop: EventLoop<AppState> =
         EventLoop::try_new().expect("Failed to initialize the event loop!");
@@ -541,9 +596,7 @@ fn main() {
     // WaylandSource is inserted further down, AFTER the output list has been
     // settled with an explicit roundtrip - see the note there
     let frame_duration = Duration::from_secs(1) / config.general.framerate;
-    let compositor = CompositorState::bind(&globals, &qh).expect("wl_compositor not available");
     let surface = compositor.create_surface(&qh);
-    let layer_shell = LayerShell::bind(&globals, &qh).expect("layer shell not available");
     let layer_surface = layer_shell.create_layer_surface(
         &qh,
         surface.clone(),
