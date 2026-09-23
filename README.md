@@ -3,6 +3,8 @@
 A Wayland audio visualiser that draws [cava](https://github.com/karlstav/cava)
 over your wallpaper, as a layer-shell surface behind your windows.
 
+https://github.com/user-attachments/assets/704e83af-b01e-4eb2-801c-aa29ee735d7c
+
 A fork of [rs-pro0/wallpaper-cava](https://github.com/rs-pro0/wallpaper-cava),
 which did all the hard work. Original by
 [rs-pro0](https://github.com/rs-pro0).
