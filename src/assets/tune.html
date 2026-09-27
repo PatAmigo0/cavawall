@@ -191,7 +191,7 @@ footer #status{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
     <aside class="dock glass" id=dock>
       <div class=tabs role=tablist aria-label=Settings>
         <button class="btn ghost icon" id=dockFold title="Fold the panel" aria-label="Fold the panel">⟩</button>
-        <button role=tab data-tab=shape aria-selected=true>Shape</button><button role=tab data-tab=look aria-selected=false>Look</button><button role=tab data-tab=sound aria-selected=false>Sound</button>
+        <button role=tab data-tab=shape aria-selected=true>Shape</button><button role=tab data-tab=look aria-selected=false>Look</button><button role=tab data-tab=sound aria-selected=false>Cava</button>
       </div>
       <div class=pane id=paneShape></div><div class=pane id=paneLook hidden></div><div class=pane id=paneSound hidden></div>
     </aside>
@@ -945,7 +945,7 @@ function buildSound() {
   gRow(s, {t: 'smoothing', k: 'monstercat', label: 'Monstercat', min: 0, max: 3, step: 0.1, dflt: 0, hint: 'bars lean on their neighbours'});
   gRow(s, {t: 'smoothing', k: 'noise_reduction', label: 'Noise cut', min: 0, max: 100, step: 1, int: true, dflt: 77, hint: 'higher is smoother and slower'});
   chip(s, 'Waves', () => !!gVal('smoothing', 'waves', 0), on => gSet('smoothing', 'waves', on ? 1 : null), 'Monstercat as waves');
-  s.insertAdjacentHTML('beforeend', '<p class=note>Sound settings restart cava when saved.</p>');
+  s.insertAdjacentHTML('beforeend', '<p class=note>Saving restarts cava with these settings.</p>');
 }
 
 // ---------------------------------------------------------------- panels
