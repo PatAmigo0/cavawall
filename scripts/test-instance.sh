@@ -3,8 +3,8 @@
 #
 #   scripts/test-instance.sh <config.toml> [command...]
 #
-# The instance gets a runtime dir of its own - its own lock and control
-# socket - so the real one is never touched, and scripts/fake-cava in place of
+# The instance gets a runtime dir of its own - its own lock, control
+# socket and log - so the real one is never touched, and scripts/fake-cava in place of
 # cava, so nothing has to play sound. The command runs with these set:
 #
 #   PID     the test instance
@@ -44,7 +44,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-env XDG_RUNTIME_DIR="$RT" WAYLAND_DISPLAY="$display" PATH="$RT/bin:$PATH" \
+env XDG_RUNTIME_DIR="$RT" XDG_STATE_HOME="$RT/state" WAYLAND_DISPLAY="$display" PATH="$RT/bin:$PATH" \
     FAKE_CAVA_SILENT="$SILENT" ${TEST_ENV:-} setsid "$bin" --config "$cfg" >"$RT/log" 2>&1 </dev/null &
 sleep "${WARMUP:-2}"
 PID=$(pgrep -f "^$bin --config $cfg$" | head -1)
