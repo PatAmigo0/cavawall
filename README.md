@@ -1,253 +1,188 @@
-# cavawall
+<h1 align="center">cavawall</h1>
 
-A Wayland audio visualiser that draws [cava](https://github.com/karlstav/cava)
-over your wallpaper, as a layer-shell surface behind your windows.
+<p align="center">A Wayland audio visualiser that draws <a href="https://github.com/karlstav/cava">cava</a> onto your wallpaper, behind your windows.</p>
 
-https://github.com/user-attachments/assets/704e83af-b01e-4eb2-801c-aa29ee735d7c
+<p align="center">
+  <img src="media/hero.gif" width="100%" alt="Bars standing along a mountain ridge, hidden behind the peak">
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/Rust-2021-orange.svg" alt="Rust">
+  <img src="https://img.shields.io/badge/Wayland-layer--shell-green.svg" alt="Wayland">
+  <img src="https://img.shields.io/badge/OpenGL-4.3%2B-blue.svg" alt="OpenGL">
+  <img src="https://img.shields.io/badge/license-GPL--3.0-lightgrey.svg" alt="GPL-3.0">
+</p>
 
 A fork of [rs-pro0/wallpaper-cava](https://github.com/rs-pro0/wallpaper-cava),
-which did all the hard work. Original by
-[rs-pro0](https://github.com/rs-pro0).
+which did the hard work.
 
-## License
+## Features
 
-GPL-3.0-or-later ([`LICENSE`](LICENSE)). Use it, change it, sell it; ship the
-source under the same terms if you pass it on, so it cannot be folded into
-something closed.
+### Bars that belong to the picture
 
-Upstream was MIT and its notice is kept in [`LICENSE.MIT`](LICENSE.MIT),
-covering the code inherited from it. Releases of this repository up to and
-including `61be695` were published under MIT and stay available under those
-terms.
+Three figures: a **row**, a **circle**, and a **curve** - bars standing along a
+path you draw over the wallpaper, following a ridge or a skyline, and hiding
+behind whatever you mark as in front of them. Everything is placed on the
+image, not the screen, so a figure lands on the same ridge on any monitor.
 
-## Requirements
+Each wallpaper keeps its own settings, keyed by the image's content: rename or
+move the file and they follow it.
 
-- A Wayland compositor with `wlr-layer-shell` (Hyprland, Sway, river, niri)
-- OpenGL 4.3 for SSBOs; 4.5 and newer also gets direct state access
-- [cava](https://github.com/karlstav/cava) on `PATH`, at runtime
+### Styles
 
-## Install
+<p align="center">
+  <img src="media/styles.gif" width="100%" alt="Rounded, segmented bars with the palette running along the row">
+</p>
+
+Rounded tips, LED-style blocks, colours up each bar or along the row, and
+mirrored bars that reach both ways from their line.
+
+<p align="center">
+  <img src="media/bars.gif" width="100%" alt="A thin mirrored row on the horizon of a sunset over water">
+</p>
+
+<p align="center">
+  <img src="media/circle.gif" width="100%" alt="A segmented ring of bars around a black hole">
+</p>
+
+### X-ray
+
+<p align="center">
+  <img src="media/xray.gif" width="100%" alt="Bars over a city that show a different, hidden picture through them">
+</p>
+
+The bars become windows onto a hidden picture: the wallpaper itself through a
+filter (inverted, desaturated, hue-shifted, blurred), or any picture you pick.
+It lines up pixel for pixel with the wallpaper underneath, and can follow the
+beat - quiet bars keep their colour, loud ones show the picture.
+
+### The editor
+
+<p align="center">
+  <img src="media/tune.png" width="100%" alt="cavawall tune: the wallpaper with a curve being edited, layers on the left, settings on the right">
+</p>
+
+`cavawall tune` opens an editor in your browser with a live preview in the
+real gradient, over the part of the image your monitor shows. Drag the row,
+the circle, or the points of a curve; draw occluders and choose which ones hide
+which path; bake an x-ray; set cava's input, sensitivity and smoothing. Save
+applies it to the running visualiser in place.
+
+### Live colours
+
+The gradient can follow your shell's palette - on Caelestia it changes with
+the wallpaper, in place, with no restart.
+
+### Cheap to leave running
+
+It runs all day, so it is built to cost nothing when it can:
+
+- **One draw call per frame**, whatever the figure: a curve with several paths
+  and occluders included. Occluders are rasterised once, when the surface is
+  placed, into a bitmask the bars test.
+- **Two bytes per bar per frame** reach the GPU: cava's own output, copied into
+  a persistently mapped buffer. A frame identical to the last is not drawn.
+- **Styles you do not use are not compiled in.** Each is a shader variant, so
+  plain bars run plain shaders.
+- **Silence parks it.** After half a second of silence nothing is drawn or
+  committed; with `sleep_timer` cava stops analysing too.
+- **Event-driven**, one thread, no polling: cava's pipe, the control socket,
+  config changes and Wayland all wake the same loop.
+
+Measured on an i5-12450H laptop with an RTX 4050, 32 bars at 45 fps: **1.6% of one core**
+drawing, **0.4%** in silence, one thread.
+
+## Installation
+
+Needs a Wayland compositor with `wlr-layer-shell` (Hyprland, Sway, river,
+niri), OpenGL 4.3, and [cava](https://github.com/karlstav/cava) on `PATH`.
 
 ```bash
 git clone https://github.com/PatAmigo0/cavawall
 cd cavawall
-cargo install --path . --root ~/.local
+./install.sh
 ```
 
-every build from this checkout targets the CPU it is built on: `.cargo/config.toml`
-sets `-C target-cpu=native`, since cavawall runs on the machine that compiled it
-and there is no reason to emit a 2003 baseline and hope. Packagers who need a
-portable binary set `RUSTFLAGS` in the environment, which takes precedence.
-
-That installs 3 binaries into `~/.local/bin`: `cavawall` itself, cavawallctl, and
-`cavawall-tune`, the editor. Make sure that directory is on your
-`PATH`. You only need the one name: bare `cavawall` is the visualiser, and
-`cavawall <command>` is everything else - `cavawall status`, `cavawall tune`,
-`cavawall reload`, `cavawall stop`, `cavawall help`.
-
-Then copy the annotated defaults and start it:
+`install.sh` builds, installs to `~/.local/bin` and copies the annotated
+[`config.toml`](config.toml) to `~/.config/cavawall/` unless you already have
+one. By hand:
 
 ```bash
-mkdir -p ~/.config/cavawall
-cp config.toml ~/.config/cavawall/
-cavawall
+cargo install --path . --root ~/.local
+mkdir -p ~/.config/cavawall && cp config.toml ~/.config/cavawall/
 ```
 
-`install.sh` does all of the above in one step.
+Builds target the CPU they are built on (`target-cpu=native`). Packagers set
+`RUSTFLAGS`, which takes precedence. An AUR package is planned.
 
-an AUR package is planned. until then, build from source
+## Usage
 
-## Configuration
-
-`~/.config/cavawall/config.toml`, or `--config <path>`. If that file is absent
-but `~/.config/wallpaper-cava/config.toml` exists it is read instead, with a
-notice, so switching over from upstream needs no immediate action
-
-See [`config.toml`](config.toml) for the annotated defaults
-
-| key | meaning |
-|---|---|
-| `general.mode` | **fork addition**: `bars`, `circle` or `curve` |
-| `general.framerate` | frames per second requested from cava |
-| `general.background_color` | usually fully transparent |
-| `general.preferred_output` | monitor name, e.g. `eDP-1`; omit to pick automatically |
-| `general.channels` | **fork addition**: `mono` or `stereo` |
-| `general.mono_option` | **fork addition**: `average`, `left` or `right` |
-| `general.audio_source` | **fork addition**: cava input source; omit for cava's default |
-| `general.sleep_timer` | **fork addition**: seconds of silence before cava sleeps; waking costs ~0.45s |
-| `bars.amount` | number of bars |
-| `bars.gap` | gap width as a fraction of bar width |
-| `bars.max_height` | **fork addition**: bar height cap, fraction of screen |
-| `bars.opacity` | **fork addition**: alpha multiplier, every mode |
-| `bars.matte` | **fork addition**: flatten the gradient toward its own mean |
-| `bars.left`, `bars.span`, `bars.baseline`, `bars.grow` | **fork addition**: place the row anywhere; `grow = "down"` hangs it from its baseline |
-| `bars.radius` | **fork addition**: round each bar's tip, fraction of its width (bars and curve) |
-| `bars.mirror`, `bars.blocks`, `bars.gradient` | **fork addition**: bars both ways from their line; LED-style segments; `gradient = "row"` runs the colours along the row |
-| `bars.reveal_pulse` | **fork addition**: the x-ray follows each bar's loudness |
-| `bars.reveal` | **fork addition**: x-ray - bars show a hidden image instead of the gradient, 0 to 1 |
-| `colors.*` | gradient stops, bottom to top; order matters, names do not |
-| `smoothing.*` | passed straight through to cava |
-| `circle.*` | **fork addition**: circle mode geometry; `position = [x, y]` places it by hand |
-| `curves.*` | **fork addition**: curve mode paths, keyed by wallpaper |
-| `wallpapers/<key>.toml` | **fork addition**: any of the above for one wallpaper, written by cavawall-tune |
-
-two environment variables: `CAVAWALL_DEBUG=1`
-reports placement and configure activity on stderr, and `CAVAWALL_OUTPUT=<name>`
-overrides `preferred_output` without touching the config file. `argv` stays
-exactly `[binary]`, so supervisors that identify the process by an exact argv
-match keep working
-
-The bar count and the mode are startup-only. Each mode is a separate GL
-program with its own uniforms, the count is written into the spawned cava's
-config at exec time, and both are baked into the GPU index buffer
-
-### Choosing a monitor
-
-With `preferred_output` unset and no `CAVAWALL_OUTPUT`, an external monitor
-wins over the machine's own panel - anything whose connector is not `eDP*`,
-`LVDS*` or `DSI*`. This is re-evaluated on every hotplug, so unplugging the
-external monitor moves the bars to the panel and plugging it back in moves
-them home.
-
-a name that matches no connected output maps **nothing**. That is deliberate:
-falling back to another monitor would put a visualiser somewhere it was
-explicitly not asked for
-
-### Mirrored bars
-
-cava defaults to `channels = stereo` and stereo doesn't give each bar its own
-frequency band. It splits the bars in half, drawing the **left channel reversed**
-across the left half and the right channel across the right half. Since most
-music has near-identical channels, the halves come out as mirror images with
-the bass meeting in the middle - a symmetric visualiser rather than a spectrum
-
-change:
-
-```toml
-[general]
-channels = "mono"
+```bash
+cavawall            # start the visualiser
+cavawall tune       # edit the current wallpaper's figure
+cavawall status     # what it is drawing
+cavawall reload     # re-read the config, in place
+cavawall move DP-1  # move to another monitor; no name picks automatically
+cavawall stop       # clear and exit
+cavawall help       # everything else
 ```
 
-for one left-to-right sweep across every bar. Unset, cava's default applies.
+Stop it with `cavawall stop` or SIGTERM, never SIGKILL: the exit path clears
+the surface, and a hard kill can leave the last frame on the wallpaper.
 
-`CAVAWALL_DEBUG=1` prints the exact config handed to cava, which is otherwise
-unobservable: it is written to cava's stdin
-
-### Compositor notes
-
-The layer-shell namespace is `cavawall`. On Hyprland, skip the map animation:
+On Hyprland, skip the layer's map animation, or a restarted shell can strand
+it mid-fade:
 
 ```
 layerrule = noanim, cavawall
 ```
 
-Without it the surface can strand mid-fade at alpha 0 if the shell is
-recreated underneath a running instance.
+## Configuration
 
-## Modes
+`~/.config/cavawall/config.toml` holds the defaults; `cavawall tune` writes
+per-wallpaper settings to `wallpapers/<key>.toml` beside it. The annotated
+[`config.toml`](config.toml) documents every key.
 
-### bars
+| key | meaning |
+|---|---|
+| `general.mode` | `bars`, `circle` or `curve` |
+| `general.framerate` | frames per second |
+| `general.preferred_output` | monitor name; omit to prefer an external monitor over the laptop panel |
+| `general.channels`, `general.mono_option` | `mono` for one sweep across every bar; stereo mirrors the halves |
+| `general.audio_source` | cava's input; omit for its default |
+| `general.sleep_timer` | seconds of silence before cava sleeps; waking takes ~0.45s |
+| `bars.amount`, `bars.gap`, `bars.max_height` | count, gap as a fraction of a bar, height |
+| `bars.left`, `bars.span`, `bars.baseline`, `bars.grow` | place the row anywhere; `grow = "down"` hangs it |
+| `bars.radius`, `bars.blocks`, `bars.mirror`, `bars.gradient` | styles |
+| `bars.opacity`, `bars.matte` | alpha, and flattening the gradient toward its own mean |
+| `bars.reveal`, `bars.reveal_pulse`, `bars.reveal_dir` | x-ray amount, follow the beat, where picked pictures are kept |
+| `circle.*` | size, hole, alpha ramp, anchor and margins, or `position` |
+| `curve.path`, `curve.occluder` | paths, and the named shapes that hide them (`cut_by`) |
+| `colors.*` | gradient stops, base to tip |
+| `scheme.colors`, `scheme.bars` | follow the shell's palette and bar count |
+| `smoothing.*` | passed to cava |
 
-The default: one row along the bottom of the output.
-`bars.max_height` caps how tall they grow
+`CAVAWALL_OUTPUT=<name>` overrides the monitor without touching the file, and
+`CAVAWALL_DEBUG=1` reports placement and the exact config handed to cava.
 
-### circle
+A named monitor that is not connected maps nothing, rather than falling back
+to one you did not ask for.
 
-Bars radiate from a ring. The surface is **square**, which is what keeps NDC
-square and the circle round with no aspect correction, and it is placed by
-anchor plus margin rather than centred. The gradient runs radially: the first
-stop is the centre, the last is the rim, and `inner_alpha`/`outer_alpha` fade
-it across each bar
+## How it works
 
-### curve
+cavawall spawns cava with raw 16-bit output and reads it from a non-blocking
+pipe. Each frame's heights go straight to the GPU as per-instance data; the
+bars are one instanced draw of a unit quad, shaped by the figure's shader. The
+surface is a layer-shell layer sized to the figure, not the whole output, and
+frames are paced by the compositor's frame callbacks.
 
-Bars stand along a path drawn over the wallpaper, leaning onto its normal, so
-they can follow a mountain ridge, a skyline, etc. Per control point they carry a
-scale, which is what makes a distant stretch of ridge hold shorter and thinner
-bars, and an optional angle override.
+Occluders, placement and the x-ray crop are computed once per configure. The
+bar count and the figure are fixed at startup; changing either re-executes in
+place, keeping the pid.
 
-Points are authored on the **image**, and cavawall maps them onto the output
-the same way the wallpaper itself is laid down: scaled to cover, centre-cropped.
-So a curve drawn on one monitor lands on the same ridge on a monitor of a
-different shape, rather than beside it. set `fit = "stretch"` for a daemon that
-stretches instead
+## License
 
-A curve is keyed by the wallpaper's **content hash**: a path
-authored for one image means nothing on another, a rename cannot break it, and
-a wallpaper with no entry falls back to bars instead of drawing a curve that
-belongs to a different picture
-
-one curve can hold several disconnected paths, each with its own reach, width,
-lean and bar count. Bars split between them by arc length unless a path names
-its own number
-
-Occluders are named shapes bars hide behind: a **skyline** closes down to the
-bottom edge, hiding everything beneath a ridge; a **closed** shape hides
-whatever is inside its outline, holes included. Each path names the occluders
-that cut it in `cut_by`, and one that names none is cut by all of them.
-Several cut by their union. However many paths and occluders there are, a
-frame is one draw call: the shapes are rasterised once, when the surface is
-placed, into a bitmask the bars test
-
-```toml
-[[curve.occluder]]
-name = "ridge"
-points = [[0.1, 0.45], [0.5, 0.30], [0.9, 0.42]]
-
-[[curve.occluder]]
-name = "tree"
-shape = "closed"
-points = [[0.62, 0.20], [0.70, 0.18], [0.72, 0.40], [0.60, 0.41]]
-
-[[curve.path]]
-points = [[0.1, 0.46], [0.9, 0.43]]
-cut_by = ["ridge"]
-```
-
-### Styles
-
-`mirror`, `blocks`, `gradient = "row"`, `radius` and `reveal_pulse` are each a
-shader variant compiled in only when set: at their defaults the shaders are
-the plain ones, and a style you do not use costs nothing. `mirror` draws
-twice the pixels of a plain row; the others are a line or two per pixel
-
-### x-ray
-
-`bars.reveal` makes the bars windows onto an image instead of the gradient:
-the wallpaper itself through a filter (inverted, desaturated, hue-shifted,
-blurred), or a picture of your own, picked in the editor. Pictures are kept in
-`~/Pictures/cavawall-xray/`, named after the wallpaper; `bars.reveal_dir`
-moves that folder. cavawall-tune bakes the result into `wallpapers/<key>.reveal.qoi`, which
-cavawall decodes once at startup; a frame costs one texture read per bar
-pixel. Without `reveal` the feature is compiled out of the shaders
-
-## The editor
-
-```bash
-cavawall tune
-```
-
-Serves an editor on localhost and prints the URL. It loads the **current**
-wallpaper and previews every figure live, in the gradient the bars will
-actually be drawn in, over the part of the image your monitor shows. It
-writes `wallpapers/<key>.toml` and reloads the running instance in place
-
-- **bars**: drag the band to move it, its sides to resize, its top to set
-  the height
-- **circle**: drag it anywhere, drag the rim to resize, or pin it to an
-  anchor
-- **curve**: paths and occluders in a layers panel, and a grid of which
-  occluder cuts which path
-
-- **paint** to trace a ridge freehand, or click to place control points
-- **snap active list to the edge** finds the edge that is actually in the
-  image, inside a corridor around what you drew. It is confined to that
-  corridor on purpose: the strongest edge in a wallpaper is usually the
-  subject, not the landscape, so an unconstrained search draws the wrong thing
-  confidently
-- **occluder** mode draws the silhouette bars hide behind
-- per-path `height`, `width`, `upright`, `flip` and bar count
-- **thin** simplifies a traced line to points you can still edit by hand
-
-It writes on save and leaves itself running, so draw, look, adjust and save
-again is the normal loop
+GPL-3.0-or-later ([`LICENSE`](LICENSE)). Upstream was MIT; its notice is kept
+in [`LICENSE.MIT`](LICENSE.MIT), covering the code inherited from it. Releases
+up to and including `61be695` were published under MIT and stay available
+under those terms.
