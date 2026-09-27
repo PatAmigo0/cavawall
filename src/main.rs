@@ -598,6 +598,7 @@ impl AppState {
     fn clear_and_exit(&mut self, why: &str) -> ! {
         say!("stopping: {why}");
         cavawall::log::exited(why);
+        cavawall::notify::send(NotifyEvent::Stop, &format!("stopped: {why}"));
         self.clear_surface();
         control::unbind();
         // SAFETY: a plain signal to our own child
@@ -786,6 +787,8 @@ impl AppState {
             .filter_map(|a| CString::new(a.as_os_str().as_bytes()).ok())
             .collect();
 
+        // The next image is this instance carrying on, not a new start
+        env::set_var("CAVAWALL_REEXEC", "1");
         if let Some(program) = program {
             if let Ok(prog) = CString::new(program.as_os_str().as_bytes()) {
                 let mut argv: Vec<*const libc::c_char> =
