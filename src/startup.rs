@@ -155,19 +155,11 @@ pub(crate) fn run() {
         Ok(config) => config,
         Err(error) => panic!("Error parsing config: {}", error.message()),
     };
-    // Effective bar count. Startup-only by construction: it is written into
-    // the spawned cava's config below and baked into the index buffer further
-    // down, so there is no honest way to follow it live. See SchemeConfig::bars
+    // The bar count is startup-only: it is written into the spawned cava's
+    // config and sizes the instance buffers, so a change re-execs
     let follow_bars = config.scheme.as_ref().and_then(|s| s.bars).unwrap_or(false);
-    // Resolved before bar_count because each mode may override it: a ridge
-    // wants a different density from a bottom row, and `[bars] amount` is
-    // shared by all three
-
-    // Resolved here, not at the curve setup below, because the bar count
-    // comes out of it. It has to be the curve for the CURRENT wallpaper:
-    // HashMap order is undefined, so any other choice is arbitrary
-    // One read of the wallpaper answers both questions it is asked: which
-    // curve this is, and how the image crops onto the output
+    // One read of the wallpaper answers both questions asked of it: which
+    // per-wallpaper file applies, and how the image crops onto the output
     let config_dir = config_filename
         .parent()
         .map_or_else(|| PathBuf::from("."), std::path::Path::to_path_buf);
@@ -211,23 +203,40 @@ pub(crate) fn run() {
             found
         })
         .flatten();
-    let bar_count = match configured_mode {
-        Mode::Circle => circle_config.and_then(|c| c.bars),
-        Mode::Curve => active_curve.and_then(CurveConfig::total_bars),
+    // Most specific first: the figure's own count, then this wallpaper's
+    // `[bars] amount`, then the shell's setting, then config.toml. A count
+    // set for one wallpaper has to beat the shell's global one, or editing it
+    // does nothing while `[scheme] bars` is on
+    let figure_bars = match configured_mode {
+        Mode::Circle => circle_config.and_then(|c| c.bars).map(|n| (n, "circle")),
+        Mode::Curve => active_curve.and_then(CurveConfig::total_bars).map(|n| (n, "curve")),
         Mode::Bars => None,
-    }
-    .unwrap_or(if follow_bars {
-        scheme::bar_count().unwrap_or(bars_config.amount)
-    } else {
-        bars_config.amount
+    };
+    let own_bars = figure_bars.or_else(|| {
+        per_wallpaper
+            .as_ref()
+            .and_then(|w| w.bars.as_ref()?.amount)
+            .map(|n| (n, "wallpaper"))
     });
+    // Watched whenever nothing more specific set the count, even if the shell
+    // has none yet, so setting one there takes effect
+    let bars_follow_shell = follow_bars && own_bars.is_none();
+    let (bar_count, bars_from) = own_bars
+        .or_else(|| {
+            bars_follow_shell
+                .then(scheme::bar_count)
+                .flatten()
+                .map(|n| (n, "shell"))
+        })
+        .unwrap_or((config.bars.amount, "config"));
     // Zero divides by zero in the bar-width maths. The ceiling is a sanity
-    // bound: 4096 bars is already sub-pixel on any real monitor
+    // bound: 4096 bars is already sub-pixel on any real monitor. Clamped, not
+    // asserted: one bad per-wallpaper value must not take the visualiser down
     const MAX_BARS: u32 = 4096;
-    assert!(
-        (1..=MAX_BARS).contains(&bar_count),
-        "bar count must be between 1 and {MAX_BARS}, got {bar_count}"
-    );
+    if !(1..=MAX_BARS).contains(&bar_count) {
+        eprintln!("cavawall: bar count {bar_count} from {bars_from} is outside 1..={MAX_BARS}, clamping");
+    }
+    let bar_count = bar_count.clamp(1, MAX_BARS);
     let mut cava_output_config: HashMap<String, String> = HashMap::from([
         ("method".into(), "raw".into()),
         ("raw_target".into(), "/dev/stdout".into()),
@@ -253,6 +262,7 @@ pub(crate) fn run() {
             bars: bar_count,
             autosens: config.general.autosens,
             sensitivity: config.general.sensitivity,
+            sleep_timer: config.general.sleep_timer,
         },
         smoothing: CavaSmoothingConfig {
             monstercat: config.smoothing.monstercat,
@@ -271,6 +281,16 @@ pub(crate) fn run() {
     }
     let mut cmd = Command::new("cava");
     cmd.arg("-p").arg("/dev/stdin");
+    // Dies with us, however we die. Blocked writing into a full pipe, cava
+    // does not act on SIGTERM, and asleep it writes too rarely to learn the
+    // pipe is gone
+    // SAFETY: prctl is async-signal-safe and touches only the child
+    unsafe {
+        std::os::unix::process::CommandExt::pre_exec(&mut cmd, || {
+            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+            Ok(())
+        });
+    }
     // The `Child` is taken apart rather than kept: exec keeps our PID and so
     // keeps this child, so what must survive is the raw pid. reexec() kills and
     // waits before replacing our image, and a cava that dies on its own takes
@@ -289,7 +309,14 @@ pub(crate) fn run() {
     cava_stdin.write_all(string_cava_config.as_bytes()).unwrap();
     drop(cava_stdin);
     let cava_stdout = cava_process.stdout.unwrap();
-    let cava_reader = BufReader::new(cava_stdout);
+    // Non-blocking, and read only when the event loop says it is readable:
+    // nothing ever waits on cava, so no frame, signal or order waits either
+    let cava_fd = cava_stdout.as_raw_fd();
+    // SAFETY: plain fcntl on a descriptor this process owns
+    unsafe {
+        let flags = libc::fcntl(cava_fd, libc::F_GETFL);
+        libc::fcntl(cava_fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+    }
     let conn = Connection::connect_to_env().unwrap();
     let (globals, mut event_queue, compositor, layer_shell) = bind_shell(&conn);
     let qh = event_queue.handle();
@@ -298,7 +325,6 @@ pub(crate) fn run() {
     let loop_handle = event_loop.handle();
     // WaylandSource is inserted further down, AFTER the output list has been
     // settled with an explicit roundtrip - see the note there
-    let frame_duration = Duration::from_secs(1) / config.general.framerate;
     let surface = compositor.create_surface(&qh);
     let layer_surface = layer_shell.create_layer_surface(
         &qh,
@@ -338,10 +364,10 @@ pub(crate) fn run() {
             .unwrap()
     };
     egl.initialize(egl_display).unwrap();
-    // Stencil carries the occluders: a silhouette is filled by parity into its
-    // own bit, and bars test it before the fragment shader runs. No config here
-    // offers stencil without depth, so a depth buffer comes along unused
-    const ATTRIBUTES: [i32; 11] = [
+    // Colour only. Occluders live in a texture filled once per configure, so
+    // there is no stencil or depth buffer to allocate, clear or scan out beside
+    // every frame
+    const ATTRIBUTES: [i32; 9] = [
         egl::RED_SIZE,
         8,
         egl::GREEN_SIZE,
@@ -349,8 +375,6 @@ pub(crate) fn run() {
         egl::BLUE_SIZE,
         8,
         egl::ALPHA_SIZE,
-        8,
-        egl::STENCIL_SIZE,
         8,
         egl::NONE,
     ];
@@ -419,6 +443,19 @@ pub(crate) fn run() {
     };
 
     println!("OpenGL version: {version}");
+    // Immutable buffer storage, and so a persistent mapping, is core from 4.4.
+    // The driver decides that, not the build, so it is read from the context
+    // that was granted
+    let persistent = unsafe {
+        let (mut major, mut minor) = (0, 0);
+        gl::GetIntegerv(gl::MAJOR_VERSION, &raw mut major);
+        gl::GetIntegerv(gl::MINOR_VERSION, &raw mut minor);
+        let ok = major > 4 || (major == 4 && minor >= 4);
+        if debug_enabled() {
+            eprintln!("cavawall: GL {major}.{minor}, persistent height ring {}", if ok { "on" } else { "off" });
+        }
+        ok
+    };
     println!("EGL version: {}", egl.version());
     // Resolved once, here, and carried into AppState. draw() then only matches
     // on the stored Option, so a frame costs a null check - no env lookup and
@@ -439,8 +476,8 @@ pub(crate) fn run() {
     let mut curve_paths: Vec<curve::PathSpec> = Vec::new();
     let mut path_ssbo: u32 = 0;
     let mut width_ssbo: u32 = 0;
-    let mut occ_ssbo: u32 = 0;
-    let mut curve_occlude: Vec<curve::Control> = Vec::new();
+    let mut occluders: Vec<curve::Occluder> = Vec::new();
+    let mut common_mask = 0u16;
     let mut curve_fit = FitMode::default();
     let mut curve_image: Option<(u32, u32)> = None;
     // A curve is authored against ONE wallpaper. If the current one has no
@@ -450,11 +487,32 @@ pub(crate) fn run() {
         mode = Mode::Bars;
     }
     let circle = CircleGeom::from_config(circle_config);
-    let shader_program = build_program(mode);
+    // Rounding and the reveal are compiled in only when used, so a config
+    // without them runs the exact shaders it always did
+    let radius = bars_config.radius.unwrap_or(0.0).clamp(0.0, 0.5);
+    let round = radius > 0.0 && mode != Mode::Circle;
+    let reveal_mix = bars_config.reveal.unwrap_or(0.0).clamp(0.0, 1.0);
+    let reveal_image = curve_key
+        .as_deref()
+        .filter(|_| reveal_mix > 0.0)
+        .and_then(|key| fs::read(config_dir.join("wallpapers").join(format!("{key}.reveal.qoi"))).ok())
+        .and_then(|bytes| cavawall::qoi::decode(&bytes));
+    if reveal_mix > 0.0 && reveal_image.is_none() {
+        eprintln!("cavawall: reveal is set but wallpapers/<key>.reveal.qoi will not read; drawing the gradient");
+    }
+    let mut defines = String::new();
+    if round {
+        defines.push_str("#define ROUND\n");
+    }
+    if reveal_image.is_some() {
+        defines.push_str("#define REVEAL\n");
+    }
+    let shader_program = build_program(mode, &defines);
     let mut quad_vbo = 0;
     let mut height_vbo = 0;
     let mut vao = 0;
     let mut gradient_colors_ssbo = 0;
+    let ring: Option<HeightRing>;
     // Ordered once and kept. A live re-resolve reuses this exact Vec rather
     // than walking the HashMap again, which would be free to hand back a
     // different order and silently reshuffle the gradient mid-session
@@ -473,18 +531,14 @@ pub(crate) fn run() {
         "[colors] needs at least one stop to build a gradient from"
     );
     let buffer_data = gradient_buffer(&initial_rgba);
-    // As the GPU sees it, which is not the configured count when there is only
-    // one stop. GradientScale below has to agree with the shader's own
-    // gradient_colors_size, so both come from here
-    let gradient_stops = uploaded_stops(initial_rgba.len()) as u32;
     // One watch over all three files, so a frame costs one read. They are
     // acted on differently: a palette is re-uploaded in place, a bar count or
     // a wallpaper re-execs
     //
-    // The wallpaper is watched whenever curve mode was ASKED for, not only
-    // when a curve is drawing: an instance that fell back to bars still has to
-    // notice the wallpaper it has a curve for coming back
-    let watch = scheme::Watch::new(follow_colors, follow_bars, configured_mode == Mode::Curve);
+    // The wallpaper is watched whenever any wallpaper has settings of its own,
+    // whatever this one draws: a per-wallpaper file can pick the figure, so
+    // moving onto or off one of them can change everything
+    let watch = scheme::Watch::new(follow_colors, bars_follow_shell, !curve_keys.is_empty());
 
     // Sized from the bar count, which cannot change without a re-exec, so both
     // are allocated once here rather than on every frame
@@ -494,9 +548,9 @@ pub(crate) fn run() {
     let prev_frame = cava_buffer.clone();
     let frame_bytes = std::mem::size_of_val(&*cava_buffer) as GLsizeiptr;
     let (bar_width, bar_stride) = bar_geometry(bar_count, bars_config.gap);
+    let bars_at = BarPlacement::from_config(&bars_config);
     let background_color = array_from_config_color(&config.general.background_color);
 
-    let gradient_scale_name = CString::new("GradientScale").unwrap();
     unsafe {
         gl::GenVertexArrays(1, &mut vao);
         gl::BindVertexArray(vao);
@@ -526,12 +580,15 @@ pub(crate) fn run() {
         // Attribute 1: one height per bar. The divisor is what makes it
         // per-instance rather than per-vertex, and is the whole trick
         gl::BindBuffer(gl::ARRAY_BUFFER, height_vbo);
-        gl::BufferData(
-            gl::ARRAY_BUFFER,
-            frame_bytes,
-            std::ptr::null(),
-            gl::DYNAMIC_DRAW,
-        );
+        ring = if persistent { HeightRing::map(frame_bytes) } else { None };
+        if ring.is_none() {
+            // A failed mapping leaves immutable storage behind, which cannot
+            // be respecified: start over on a fresh name
+            gl::DeleteBuffers(1, &height_vbo);
+            gl::GenBuffers(1, &mut height_vbo);
+            gl::BindBuffer(gl::ARRAY_BUFFER, height_vbo);
+            gl::BufferData(gl::ARRAY_BUFFER, frame_bytes, std::ptr::null(), gl::DYNAMIC_DRAW);
+        }
         gl::VertexAttribPointer(1, 1, gl::UNSIGNED_SHORT, gl::TRUE, 2, std::ptr::null());
         gl::EnableVertexAttribArray(1);
         gl::VertexAttribDivisor(1, 1);
@@ -555,6 +612,10 @@ pub(crate) fn run() {
                     gl::GetUniformLocation(shader_program, c"Stride".as_ptr()),
                     bar_stride,
                 );
+                gl::Uniform1f(
+                    gl::GetUniformLocation(shader_program, c"Grow".as_ptr()),
+                    if bars_at.down { -1.0 } else { 1.0 },
+                );
             }
             Mode::Curve => {
                 // Safe: mode was demoted to Bars above when no curve matched.
@@ -563,12 +624,24 @@ pub(crate) fn run() {
                 let cfg = active_curve.expect("curve mode implies a matching curve");
                 // [x, y] or [x, y, scale]; a short or empty entry is a config
                 // typo, and skipping it beats rendering a bar at the origin.
-                // Every path resolved up front, each with its own geometry:
-                // the shader never learns that paths exist
+                // Every path resolved up front, each with its own geometry and
+                // the bits of the occluders that cut it: the shader never
+                // learns that paths exist
+                let occlusion = cfg.occlusion();
+                let point = |p: &Vec<f32>| curve::Control { x: p[0], y: p[1], scale: 1.0, angle: None };
+                occluders = occlusion
+                    .shapes
+                    .iter()
+                    .map(|(pts, shape)| curve::Occluder {
+                        points: pts.iter().filter(|p| p.len() >= 2).map(point).collect(),
+                        closed: *shape == OccluderShape::Closed,
+                    })
+                    .collect();
                 curve_paths = cfg
                     .paths()
                     .iter()
-                    .map(|path| curve::PathSpec {
+                    .zip(occlusion.masks.iter().copied())
+                    .map(|(path, mask)| curve::PathSpec {
                         controls: path
                             .points
                             .iter()
@@ -580,28 +653,26 @@ pub(crate) fn run() {
                                 angle: p.get(3).copied(),
                             })
                             .collect(),
+                        mask,
+                        bars: path.bars,
                         // NDC spans 2.0, so a fraction of the output is twice
                         // that. Per path, because two ridges at different
                         // distances want different reaches
-                        clip: path.clip.unwrap_or(true),
-                        occlude: path.occlude.as_deref().map(|pts| {
-                            pts.iter()
-                                .filter(|p| p.len() >= 2)
-                                .map(|p| curve::Control {
-                                    x: p[0],
-                                    y: p[1],
-                                    scale: 1.0,
-                                    angle: None,
-                                })
-                                .collect()
-                        }),
-                        bars: path.bars,
                         reach: path.height.or(cfg.height).unwrap_or(0.18).clamp(0.0, 1.0) * 2.0,
                         width: path.width.or(cfg.width).unwrap_or(0.006).clamp(0.0, 1.0) * 2.0,
                         flip: path.flip.or(cfg.flip).unwrap_or(false),
                         upright: path.upright.or(cfg.upright).unwrap_or(false),
                     })
                     .collect();
+                // The occluders every bar tests. Only those may stop the
+                // surface short: one that a single path ignores cannot
+                common_mask = curve_paths
+                    .iter()
+                    .filter(|p| p.controls.len() >= 2)
+                    .fold(u16::MAX, |m, p| m & p.mask);
+                if curve_paths.iter().all(|p| p.controls.len() < 2) {
+                    common_mask = 0;
+                }
                 // Created empty and bound. Bars cannot be built until a surface
                 // exists - their normals and their crop both depend on the
                 // output's shape - and configure() fills these before any draw
@@ -613,28 +684,6 @@ pub(crate) fn run() {
                 if curve_image.is_none() && debug_enabled() {
                     eprintln!("cavawall: wallpaper size unreadable, treating it as output-shaped");
                 }
-                curve_occlude = cfg.occlude.as_deref().unwrap_or(&[])
-                    .iter()
-                    .filter(|p| p.len() >= 2)
-                    .map(|p| curve::Control { x: p[0], y: p[1], scale: 1.0, angle: None })
-                    .collect();
-                // Always created and bound, even when empty: an unbound SSBO
-                // read is undefined, and the shader guards on the length
-                gl::GenBuffers(1, &mut occ_ssbo);
-                gl::BindBuffer(gl::SHADER_STORAGE_BUFFER, occ_ssbo);
-                // std430 aligns a float array to 4 bytes, not 16, so the
-                // horizon starts immediately after the length - no padding.
-                // Length zero until an output exists: the shader guards on it,
-                // so an unplaced instance draws no occlusion rather than
-                // reading an empty buffer
-                gl::BufferData(
-                    gl::SHADER_STORAGE_BUFFER,
-                    4,
-                    [0i32].as_ptr().cast(),
-                    gl::STATIC_DRAW,
-                );
-                gl::BindBufferBase(gl::SHADER_STORAGE_BUFFER, 2, occ_ssbo);
-                gl::BindBuffer(gl::SHADER_STORAGE_BUFFER, 0);
                 gl::Uniform1f(
                     gl::GetUniformLocation(shader_program, c"InnerAlpha".as_ptr()),
                     circle.inner_alpha,
@@ -674,6 +723,35 @@ pub(crate) fn run() {
                 );
             }
         }
+        if round {
+            gl::Uniform1f(gl::GetUniformLocation(shader_program, c"Radius".as_ptr()), radius);
+        }
+        if let Some(img) = &reveal_image {
+            // Unit 1; unit 0 is the occluder mask's. Filtered, since the image
+            // is scaled onto the output; clamped, so the crop never wraps
+            let mut texture = 0u32;
+            gl::GenTextures(1, &mut texture);
+            gl::ActiveTexture(gl::TEXTURE1);
+            gl::BindTexture(gl::TEXTURE_2D, texture);
+            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::LINEAR as i32);
+            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::LINEAR as i32);
+            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_S, gl::CLAMP_TO_EDGE as i32);
+            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_T, gl::CLAMP_TO_EDGE as i32);
+            gl::TexImage2D(
+                gl::TEXTURE_2D,
+                0,
+                gl::RGBA8 as i32,
+                img.width as GLsizei,
+                img.height as GLsizei,
+                0,
+                gl::RGBA,
+                gl::UNSIGNED_BYTE,
+                img.rgba.as_ptr().cast(),
+            );
+            gl::ActiveTexture(gl::TEXTURE0);
+            gl::Uniform1i(gl::GetUniformLocation(shader_program, c"Reveal".as_ptr()), 1);
+            gl::Uniform1f(gl::GetUniformLocation(shader_program, c"RevealMix".as_ptr()), reveal_mix);
+        }
         gl::Enable(gl::BLEND);
         gl::BlendFunc(gl::SRC_ALPHA, gl::ONE_MINUS_SRC_ALPHA);
         gl::ClearColor(
@@ -698,47 +776,52 @@ pub(crate) fn run() {
             bars_config.opacity.unwrap_or(1.0).clamp(0.0, 1.0),
         );
     }
-    // Direct state access is core from 4.5. The driver decides that, not the
-    // build, so it is read back from the context that was granted
-    let dsa = unsafe {
-        let (mut major, mut minor) = (0, 0);
-        gl::GetIntegerv(gl::MAJOR_VERSION, &raw mut major);
-        gl::GetIntegerv(gl::MINOR_VERSION, &raw mut minor);
-        if debug_enabled() {
-            eprintln!("cavawall: GL {major}.{minor}, direct state access {}",
-                if major > 4 || (major == 4 && minor >= 5) { "on" } else { "off" });
-        }
-        major > 4 || (major == 4 && minor >= 5)
-    };
-    let resolution_location =
-        unsafe { gl::GetUniformLocation(shader_program, c"Resolution".as_ptr()) };
+    let aspect_location =
+        unsafe { gl::GetUniformLocation(shader_program, c"Aspect".as_ptr()) };
+    let surface_px_location =
+        unsafe { gl::GetUniformLocation(shader_program, c"SurfacePx".as_ptr()) };
+    let output_px_location =
+        unsafe { gl::GetUniformLocation(shader_program, c"OutputPx".as_ptr()) };
+    let reveal_map_location =
+        unsafe { gl::GetUniformLocation(shader_program, c"RevealMap".as_ptr()) };
     let path_scale_location =
         unsafe { gl::GetUniformLocation(shader_program, c"PathScale".as_ptr()) };
     let path_offset_location =
         unsafe { gl::GetUniformLocation(shader_program, c"PathOffset".as_ptr()) };
-    let instance_offset_location =
-        unsafe { gl::GetUniformLocation(shader_program, c"InstanceOffset".as_ptr()) };
-    // Its own VAO: the main one carries the quad and the per-bar heights, and
-    // a fan wants neither
-    let (stencil_program, stencil_scale_location, stencil_offset_location, stencil_vbo, stencil_vao) = unsafe {
-        let program = link_program(STENCIL_VERTEX_SHADER_SRC, STENCIL_FRAGMENT_SHADER_SRC);
-        let scale = gl::GetUniformLocation(program, c"PathScale".as_ptr());
-        let offset = gl::GetUniformLocation(program, c"PathOffset".as_ptr());
-        let (mut fan_vbo, mut fan_vao) = (0u32, 0u32);
-        gl::GenBuffers(1, &mut fan_vbo);
-        gl::GenVertexArrays(1, &mut fan_vao);
-        gl::BindVertexArray(fan_vao);
-        gl::BindBuffer(gl::ARRAY_BUFFER, fan_vbo);
-        gl::EnableVertexAttribArray(0);
-        gl::VertexAttribPointer(0, 2, gl::FLOAT, gl::FALSE, 8, std::ptr::null());
-        // Back to the one the draw loop assumes is bound: this program sets GL
-        // state once at startup and never rebinds per frame
-        gl::BindVertexArray(vao);
-        gl::BindBuffer(gl::ARRAY_BUFFER, height_vbo);
-        (program, scale, offset, fan_vbo, fan_vao)
-    };
-    let gradient_scale_location =
-        unsafe { gl::GetUniformLocation(shader_program, gradient_scale_name.as_ptr()) };
+    // The occluder mask. Curve bars sample it on unit 0 whatever happens, so a
+    // curve without occluders still gets one texel of zero: a test that never
+    // hides anything, where an unbound sampler would be undefined
+    let mask = (mode == Mode::Curve).then(|| {
+        // SAFETY: a context is current and nothing else uses texture unit 0
+        unsafe {
+            let mut texture = 0u32;
+            gl::GenTextures(1, &mut texture);
+            gl::ActiveTexture(gl::TEXTURE0);
+            gl::BindTexture(gl::TEXTURE_2D, texture);
+            // Integer textures cannot be filtered, and a filtered one is
+            // incomplete: nearest in both directions, no mipmaps
+            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::NEAREST as i32);
+            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::NEAREST as i32);
+            gl::TexImage2D(
+                gl::TEXTURE_2D,
+                0,
+                gl::R16UI as i32,
+                1,
+                1,
+                0,
+                gl::RED_INTEGER,
+                gl::UNSIGNED_SHORT,
+                [0u16].as_ptr().cast(),
+            );
+            gl::Uniform1i(gl::GetUniformLocation(shader_program, c"Occluders".as_ptr()), 0);
+            let pass = (!occluders.is_empty()).then(|| MaskPass::new(texture));
+            // The pass's constructor bound its own VAO and buffer
+            gl::UseProgram(shader_program);
+            gl::BindVertexArray(vao);
+            gl::BindBuffer(gl::ARRAY_BUFFER, height_vbo);
+            pass
+        }
+    }).flatten();
 
     // CAVAWALL_OUTPUT wins over the config file, and is how an external
     // watcher moves the visualiser between monitors: it relaunches with this
@@ -760,15 +843,17 @@ pub(crate) fn run() {
         layer_shell,
         layer_surface,
         surface,
-        cava_reader,
+        cava_fd,
+        // Eight frames: a backlog after a stall drains in few reads
+        cava_scratch: vec![0u8; bar_count as usize * 2 * 8].into_boxed_slice(),
+        cava_partial: 0,
+        fresh: false,
         wl_egl_surface,
         egl_surface,
         egl_config,
         egl_context,
         egl_display,
         height_vbo,
-        gradient_scale_location,
-        gradient_stops,
         bar_count,
         cava_pid,
         gradient_colors_ssbo,
@@ -778,20 +863,20 @@ pub(crate) fn run() {
         cava_buffer,
         bar_width,
         bar_stride,
-        damage_map: DamageMap::new(bar_count, bar_width, bar_stride, 256, 256),
+        damage_map: DamageMap::new(bar_count, bar_width, bar_stride, (256, 256), bars_at.down),
         frame_bytes,
         swap_damage,
         force_full_damage: true,
-        max_height: bars_config.max_height.unwrap_or(1.0),
+        bars_at,
         mode,
         circle,
         curve_paths: curve_paths.into_boxed_slice(),
         path_ssbo,
         width_ssbo,
         curve_bars: Box::new([]),
-        curve_occlude: curve_occlude.into_boxed_slice(),
-        curve_draws: Box::new([]),
-        curve_occluders: Box::new([]),
+        occluders: occluders.into_boxed_slice(),
+        common_mask,
+        mask,
         curve_horizon: Box::new([]),
         curve_fit,
         curve_key,
@@ -799,23 +884,25 @@ pub(crate) fn run() {
         curve_image,
         curve_box: None,
         curve_output: (1, 1),
-        resolution_location,
-        dsa,
+        aspect_location,
+        surface_px_location,
+        output_px_location,
+        surface_origin: (0, 0),
+        reveal_size: reveal_image.as_ref().map(|i| (i.width, i.height)),
+        reveal_map_location,
+        ring,
         matte_color_location,
         path_scale_location,
         path_offset_location,
         vao,
         program: shader_program,
-        instance_offset_location,
-        stencil_program,
-        stencil_scale_location,
-        stencil_offset_location,
-        stencil_vbo,
-        stencil_vao,
-        occ_fans: Box::new([]),
         silent_frames: 0,
         background_color,
         config_path: config_filename.clone(),
+        bars_from,
+        bars_follow_shell,
+        frame_pending: false,
+        redraw: false,
         pinned_output,
         placed_on: None,
         placed_size: None,
@@ -851,10 +938,40 @@ pub(crate) fn run() {
         Err(e) => eprintln!("cavawall: no control socket: {e}"),
     }
 
+    // Every input is an event source, so the loop sleeps with no timeout and
+    // an idle instance wakes only when something happens
+    loop_handle
+        .insert_source(
+            Generic::new(cava_stdout, Interest::READ, CalloopMode::Level),
+            |_, _, state: &mut AppState| {
+                state.on_cava();
+                Ok(PostAction::Continue)
+            },
+        )
+        .unwrap();
+    if let Some(fd) = simple_window.watch.as_ref().and_then(scheme::Watch::event_fd) {
+        loop_handle
+            .insert_source(Generic::new(fd, Interest::READ, CalloopMode::Level), |_, _, state| {
+                state.poll_external();
+                Ok(PostAction::Continue)
+            })
+            .unwrap();
+    }
+    // The signal handler writes here, so SIGTERM wakes a loop that is asleep
+    // SAFETY: eventfd returns a fresh descriptor or -1, checked below
+    let wake = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
+    if wake >= 0 {
+        WAKE.store(wake, std::sync::atomic::Ordering::Relaxed);
+        // SAFETY: just created, and owned by nothing else
+        let wake = unsafe { <std::os::fd::OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(wake) };
+        loop_handle
+            .insert_source(Generic::new(wake, Interest::READ, CalloopMode::Level), |_, _, state| {
+                state.clear_and_exit()
+            })
+            .unwrap();
+    }
     WaylandSource::new(conn.clone(), event_queue)
         .insert(loop_handle)
         .unwrap();
-    event_loop
-        .run(frame_duration, &mut simple_window, |state| state.poll_resume())
-        .unwrap();
+    event_loop.run(None, &mut simple_window, AppState::tick).unwrap();
 }

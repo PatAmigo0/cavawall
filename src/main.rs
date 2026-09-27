@@ -31,13 +31,14 @@ use core::ffi;
 use egl::API as egl;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-// Set from the SIGTERM/SIGINT handler; the draw loop notices and shuts down
-// cleanly instead of being killed mid-frame
+// Set from the SIGTERM/SIGINT handler, which also writes WAKE so the event
+// loop, asleep with no timeout, wakes to act on it
 static EXITING: AtomicBool = AtomicBool::new(false);
+/// An eventfd the loop watches; -1 until startup creates it
+static WAKE: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
 
-/// Below this, a bar counts as silence. Shared by draw() and poll_resume():
-/// they are the two halves of one decision (park / unpark) and drifting apart
-/// would mean parking at one threshold and waking at another
+/// Below this, a bar counts as silence. One threshold for both halves of one
+/// decision, park and unpark: two would park at one level and wake at another
 const SILENCE_THRESHOLD: f32 = 0.005;
 /// The same threshold in cava's raw 16-bit units, for comparing without
 /// unpacking to f32 first
@@ -117,9 +118,8 @@ const SILENT_GRACE_FRAMES: u32 = 23;
 
 /// Is this raw cava frame silence?
 ///
-/// The one place that question is answered: draw() parks on it and
-/// poll_resume() unparks on it, in the same units. Deciding on raw bytes keeps
-/// f32 unpacking off the silent path
+/// The one place that question is answered, per frame as it arrives, in
+/// cava's own units: deciding on raw bytes keeps f32 unpacking off the path
 fn is_silent(frame: &[u8]) -> bool {
     frame
         .as_chunks::<2>()
@@ -150,18 +150,23 @@ fn debug_enabled() -> bool {
 }
 
 extern "C" fn on_terminate(_sig: libc::c_int) {
-    // Only async-signal-safe work here: flip a flag, nothing else
+    // Only async-signal-safe work here: a flag and one write(2)
     EXITING.store(true, Ordering::SeqCst);
+    let fd = WAKE.load(Ordering::Relaxed);
+    if fd >= 0 {
+        let one = 1u64;
+        // SAFETY: write is async-signal-safe; eight bytes is an eventfd's unit
+        unsafe { libc::write(fd, (&raw const one).cast(), 8) };
+    }
 }
 use std::ffi::{CStr, CString};
 use std::io::Write;
-use std::process::{exit, ChildStdout};
+use std::process::exit;
 use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::os::unix::ffi::OsStrExt;
 use std::{env, fs, ptr};
 use std::{
-    io::{BufReader, Read},
     process::{Command, Stdio},
     thread::sleep,
     time::{Duration, Instant},
@@ -171,7 +176,7 @@ mod render;
 mod startup;
 mod wayland;
 
-use render::{damage_rects, surface_map, DamageMap};
+use render::{bar_band, damage_rects, reveal_map, surface_map, BarPlacement, DamageMap};
 
 use cavawall::{app_config, control, curve};
 use app_config::WallpaperConfig;
@@ -189,8 +194,9 @@ const FRAGMENT_SHADER_SRC: &str = include_str!("shaders/fragment_shader.glsl");
 const CIRCLE_VERTEX_SHADER_SRC: &str = include_str!("shaders/circle_vertex_shader.glsl");
 const CIRCLE_FRAGMENT_SHADER_SRC: &str = include_str!("shaders/circle_fragment_shader.glsl");
 const CURVE_VERTEX_SHADER_SRC: &str = include_str!("shaders/curve_vertex_shader.glsl");
-const STENCIL_VERTEX_SHADER_SRC: &str = include_str!("shaders/stencil_vertex_shader.glsl");
-const STENCIL_FRAGMENT_SHADER_SRC: &str = include_str!("shaders/stencil_fragment_shader.glsl");
+const CURVE_FRAGMENT_SHADER_SRC: &str = include_str!("shaders/curve_fragment_shader.glsl");
+const MASK_VERTEX_SHADER_SRC: &str = include_str!("shaders/mask_vertex_shader.glsl");
+const MASK_FRAGMENT_SHADER_SRC: &str = include_str!("shaders/mask_fragment_shader.glsl");
 
 /// Bar width and stride in NDC, both fixed until a re-exec
 ///
@@ -217,6 +223,8 @@ struct CircleGeom {
     anchor: CircleAnchor,
     /// Distance from the anchored edges, logical pixels
     margin: (u32, u32),
+    /// Centre as fractions of the output; overrides anchor and margin
+    position: Option<(f32, f32)>,
 }
 
 impl CircleGeom {
@@ -229,6 +237,12 @@ impl CircleGeom {
     fn margins_for(&self, d: u32, w: u32, h: u32) -> (i32, i32) {
         let (mx, my) = (self.margin.0 as i32, self.margin.1 as i32);
         let (free_w, free_h) = (w.saturating_sub(d) as i32, h.saturating_sub(d) as i32);
+        if let Some((x, y)) = self.position {
+            let half = d as f32 * 0.5;
+            let left = (x * w as f32 - half).round() as i32;
+            let top = (y * h as f32 - half).round() as i32;
+            return (top.clamp(0, free_h), left.clamp(0, free_w));
+        }
         let centre_x = free_w / 2;
         let centre_y = free_h / 2;
         let (left, top) = match self.anchor {
@@ -264,6 +278,9 @@ impl CircleGeom {
                 c.and_then(|c| c.margin_x).unwrap_or(0),
                 c.and_then(|c| c.margin_y).unwrap_or(0),
             ),
+            position: c
+                .and_then(|c| c.position)
+                .map(|[x, y]| (x.clamp(0.0, 1.0), y.clamp(0.0, 1.0))),
         }
     }
 }
@@ -279,20 +296,24 @@ const UNIT_QUAD: [f32; 8] = [0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0];
 ///
 /// On a compile or link failure, with the driver's log. COMPILE_STATUS is
 /// checked per stage: a link log does not name the offending line
-fn build_program(mode: Mode) -> u32 {
+fn build_program(mode: Mode, defines: &str) -> u32 {
     // Two programs, one picked at startup. Mode cannot change without a
     // re-exec, so nothing ever calls UseProgram again and the "GL state is set
     // once" invariant holds for both
     let (vert_src, frag_src) = match mode {
         Mode::Bars => (VERTEX_SHADER_SRC, FRAGMENT_SHADER_SRC),
         Mode::Circle => (CIRCLE_VERTEX_SHADER_SRC, CIRCLE_FRAGMENT_SHADER_SRC),
-        // Curve reuses the circle's fragment stage: "gradient along the bar
-        // with an alpha ramp from base to tip" is the same job, and both feed
-        // it the same vRadial. The occluder lives in the stencil buffer, so
-        // nothing is left that differed
-        Mode::Curve => (CURVE_VERTEX_SHADER_SRC, CIRCLE_FRAGMENT_SHADER_SRC),
+        // Curve's fragment stage is the circle's plus the occluder test
+        Mode::Curve => (CURVE_VERTEX_SHADER_SRC, CURVE_FRAGMENT_SHADER_SRC),
     };
-    link_program(vert_src, frag_src)
+    link_program(&with_defines(vert_src, defines), &with_defines(frag_src, defines))
+}
+
+/// `src` with `defines` after its `#version` line, which must stay first.
+/// Features that are off are then absent from the shader, not skipped in it
+fn with_defines(src: &str, defines: &str) -> String {
+    let (version, rest) = src.split_once('\n').unwrap_or((src, ""));
+    format!("{version}\n{defines}{rest}")
 }
 
 /// Compile and link one pair of stages.
@@ -408,7 +429,16 @@ struct AppState {
     layer_shell: LayerShell,
     layer_surface: LayerSurface,
     surface: WlSurface,
-    cava_reader: BufReader<ChildStdout>,
+    /// cava's stdout, non-blocking. The pipe belongs to its event source for
+    /// the life of the process; this is only ever read, in `on_cava`
+    cava_fd: std::os::fd::RawFd,
+    /// Frames land here straight from the pipe, and the newest is copied out.
+    /// A multiple of the frame size, so a full read ends on a frame boundary
+    cava_scratch: Box<[u8]>,
+    /// Bytes of a frame already read, when a read ended mid-frame
+    cava_partial: usize,
+    /// A frame has arrived since the last draw
+    fresh: bool,
     wl_egl_surface: WlEglSurface,
     egl_surface: egl::Surface,
     egl_config: egl::Config,
@@ -418,9 +448,6 @@ struct AppState {
     /// array and static quad need no handle: bound once at startup, never
     /// rebound. The SSBO is the other exception - the palette is re-uploaded
     height_vbo: u32,
-    gradient_scale_location: i32,
-    /// Stops in the SSBO, which is 2 even when one colour is configured
-    gradient_stops: u32,
     bar_count: u32,
     /// Kept so the palette can be re-uploaded in place
     gradient_colors_ssbo: u32,
@@ -430,15 +457,11 @@ struct AppState {
     watch: Option<scheme::Watch>,
     /// The cava child, kept so a re-exec can kill and reap it
     cava_pid: u32,
-    /// One NDC height per bar, reused. The entire per-frame vertex payload:
-    /// everything else about a bar's geometry is a uniform or gl_InstanceID
-
-    /// One raw cava frame, reused. Both were `vec![..]` locals in draw(), so an
-    /// idle machine still did three allocations and three frees per frame
+    /// One raw cava frame, reused. It is also the whole per-frame vertex
+    /// payload: everything else about a bar is a uniform or gl_InstanceID
     cava_buffer: Box<[u8]>,
-    /// Last frame's heights, so damage can be the span each bar actually moved
-    /// through rather than the whole band
-    /// The frame behind the one on screen, for the damage comparison
+    /// The frame on screen, for the damage comparison and to skip a frame
+    /// that would draw the same pixels
     prev_frame: Box<[u8]>,
     /// Bar geometry in NDC, kept so the damage map can be rebuilt on a resize
     bar_width: f32,
@@ -455,12 +478,26 @@ struct AppState {
     /// different surface, or every pixel changed for a reason bar heights do
     /// not capture - a new palette, a resize, coming back from parked
     force_full_damage: bool,
-    max_height: f32,
+    /// Where the row goes in bars mode
+    bars_at: BarPlacement,
     /// Startup-only, like the bar count: the two modes are different programs
     /// with different uniforms and different surface geometry
     mode: Mode,
     /// Which config file this instance read, for `status`
     config_path: PathBuf,
+    /// Where `bar_count` came from, for `status`: curve, circle, wallpaper,
+    /// shell or config
+    bars_from: &'static str,
+    /// The count came from the shell's setting, so a change there re-execs.
+    /// False whenever something more specific set it
+    bars_follow_shell: bool,
+    /// A frame callback has been requested and not yet received
+    frame_pending: bool,
+    /// A frame is owed: a callback arrived or a configure changed the surface.
+    /// Drawn from `tick()`, never inside Wayland dispatch - a swap there reads
+    /// the socket and refills the queue, so dispatch never returns while
+    /// audio plays and every other source starves
+    redraw: bool,
     circle: CircleGeom,
     /// Curve mode only. Kept so the bars can be rebuilt in configure: normals
     /// are perpendicular in PIXEL space, which depends on the output's aspect
@@ -473,16 +510,16 @@ struct AppState {
     /// perpendicular in pixel space, and the crop follows the output's aspect
     /// - so a configure that only resizes the surface does not change them
     curve_bars: Box<[curve::Bar]>,
-    /// The silhouette as authored, in IMAGE coordinates. Sampled into a
-    /// horizon only once an output is known, since where it lands depends on
-    /// how the wallpaper is cropped onto that output
-    curve_occlude: Box<[curve::Control]>,
-    /// One instanced draw per path, in bar order
-    curve_draws: Box<[curve::PathDraw]>,
-    /// Distinct silhouettes; index i is stencil bit 1 << i
-    curve_occluders: Box<[Box<[curve::Control]>]>,
-    /// The sampled silhouette, in output coordinates. Kept so the bounding box
-    /// can be cut down to what is visible above it. Empty when there is none
+    /// Occluders as authored, in IMAGE coordinates; index i is mask bit 1 << i.
+    /// Where they land depends on how the wallpaper crops onto the output, so
+    /// they are rasterised only once one is known
+    occluders: Box<[curve::Occluder]>,
+    /// The bits every bar tests: only those occluders can cut the surface
+    common_mask: u16,
+    /// Rasterises the occluders; None when there are none
+    mask: Option<MaskPass>,
+    /// How high the occluders every bar tests reach, in output coordinates.
+    /// Kept so the bounding box can stop where nothing is visible below
     curve_horizon: Box<[f32]>,
     curve_fit: FitMode,
     /// The wallpaper the running curve was resolved against, and every key the
@@ -490,23 +527,10 @@ struct AppState {
     /// change asks: would this still draw the same thing?
     curve_key: Option<String>,
     curve_keys: HashSet<String>,
-    /// Rewritten on every configure, since the crop it is sampled through
-    /// depends on the output
-    /// The bar VAO, for the same reason as `program`
+    /// The bar VAO and program. Bound at startup; kept so the mask pass can
+    /// hand the pipeline back after rasterising the occluders
     vao: u32,
-    /// The bar program. Bound at startup; kept so the stencil pass can hand
-    /// the pipeline back after filling the silhouettes
     program: u32,
-    /// Fills each silhouette into its own stencil bit
-    stencil_program: u32,
-    stencil_scale_location: gl::types::GLint,
-    stencil_offset_location: gl::types::GLint,
-    stencil_vbo: u32,
-    stencil_vao: u32,
-    /// First vertex and count of each occluder's fan, in bit order
-    occ_fans: Box<[(i32, i32)]>,
-    /// Bars are drawn per path, so each run says where it starts
-    instance_offset_location: gl::types::GLint,
     /// The wallpaper's pixel size, when its format could be read
     curve_image: Option<(u32, u32)>,
     /// Where the curve surface sits on the output, in output pixels:
@@ -515,9 +539,22 @@ struct AppState {
     /// Output size, which stops being `width`/`height` the moment the surface
     /// is smaller than the output it is on
     curve_output: (u32, u32),
-    resolution_location: gl::types::GLint,
-    /// The context is 4.5 or newer, so a buffer can be named in the call
-    dsa: bool,
+    /// Output width over height. Normals are unit length in pixels, and NDC
+    /// stretches x by this
+    aspect_location: gl::types::GLint,
+    /// Sizes in pixels for the rounded tips; -1, so ignored, when rounding
+    /// is compiled out
+    surface_px_location: gl::types::GLint,
+    output_px_location: gl::types::GLint,
+    /// Where the surface's top left sits on the output, logical pixels
+    surface_origin: (u32, u32),
+    /// The reveal image's size when bars show one, for the crop that maps a
+    /// fragment to its texel
+    reveal_size: Option<(u32, u32)>,
+    reveal_map_location: gl::types::GLint,
+    /// The per-bar heights, persistently mapped; None on a context too old
+    /// for it, where each frame respecifies the buffer instead
+    ring: Option<HeightRing>,
     /// Kept because the matte tone follows the palette, which a live scheme
     /// can change under us
     matte_color_location: gl::types::GLint,
@@ -546,11 +583,10 @@ struct AppState {
     compositor: CompositorState,
     /// Parked: silent, not committing, waiting for audio on the idle tick
     idle: bool,
-    /// Kept so the idle tick can request a frame callback - event_loop.run's
-    /// callback hands back only &mut AppState, not the QueueHandle
+    /// Kept because event_loop.run's callback hands back only &mut AppState,
+    /// and `tick()` draws, which requests frame callbacks
     qh: QueueHandle<AppState>,
-    /// Same reason, for clear_and_exit: SIGTERM must be honoured while parked,
-    /// and the parked path has no Connection handed to it
+    /// Same reason, for the roundtrip in clear_and_exit and reexec
     conn: Connection,
 }
 
@@ -560,55 +596,55 @@ impl AppState {
     /// bars. Without this a hard kill leaves that frame visible on the
     /// background until something else forces a repaint
     fn clear_and_exit(&mut self) -> ! {
+        self.clear_surface();
+        control::unbind();
+        // SAFETY: a plain signal to our own child
+        unsafe { libc::kill(self.cava_pid as libc::pid_t, libc::SIGKILL) };
+        std::process::exit(0);
+    }
+
+    /// Present one transparent frame and wait for it to reach the compositor.
+    /// Hyprland does not reliably repaint under a layer surface that just
+    /// vanishes, so leaving without this burns the last bars onto the wallpaper
+    ///
+    /// Nothing to clear when unplaced: the surface was closed or never mapped
+    fn clear_surface(&mut self) {
+        if self.placed_on.is_none() {
+            return;
+        }
         unsafe {
             gl::ClearColor(0.0, 0.0, 0.0, 0.0);
             gl::Clear(gl::COLOR_BUFFER_BIT);
         }
         let _ = egl.swap_buffers(self.egl_display, self.egl_surface);
-        self.surface.commit();
-        // Round-trip so the commit actually reaches the compositor before the
-        // process goes away and its objects are destroyed
+        // Round-trip so the commit reaches the compositor before our objects
+        // are destroyed
         let _ = self.conn.roundtrip();
-        control::unbind();
-        std::process::exit(0);
     }
 
-    /// Act on the external watches: a new palette, or a new bar count
+    /// Act on the external watches: a new palette, a new bar count or a new
+    /// wallpaper. An event source, so this runs only when a file changed
     ///
-    /// Called from BOTH draw() and poll_resume(), because between them they are
-    /// the only two states this program has and NEITHER covers the other
-    ///
-    /// poll_resume alone is not enough. It runs from calloop's timeout
-    /// callback, which gets a turn only when the Wayland source runs out of
-    /// work, and while audio plays it never does: frame callbacks arrive
-    /// faster than draw() consumes cava frames at 45fps. Measured: zero
-    /// invocations in six seconds of playback, against ~270 expected
-    ///
-    /// Registering the inotify fd with calloop as an event source does NOT
-    /// help. calloop polls once at the top of dispatch_events and then
-    /// dispatches ready sources; WaylandSource::process_events loops on
-    /// dispatch_pending until the queue drains, and every draw() in that loop
-    /// calls eglSwapBuffers, which reads the socket and refills it. No second
-    /// poll happens, so a source is starved exactly as the timeout callback
-    /// is. Measured: draw=29, poll_resume=0 over the first second of playback
-    ///
-    /// Guarded on placement because both paths touch GL - one re-uploads the
-    /// SSBO, the other clears the surface before exec'ing - and unplaced means
-    /// there is no EGL surface to be current on. A change arriving while no
-    /// output is usable waits for the next one; nothing is on screen anyway
-    fn poll_external(&mut self) {
-        if self.placed_on.is_none() {
-            return;
-        }
+    /// Unplaced is fine: a context is always current, on the last surface if
+    /// not a live one, and clear_surface skips the clear when nothing is shown.
+    /// It has to drain regardless - the source is level-triggered
+    pub fn poll_external(&mut self) {
         let changed = self.watch.as_mut().map(scheme::Watch::take).unwrap_or_default();
         // Ordered so the common case (nothing changed) never reaches
         // debug_enabled(). The watch is otherwise unobservable from outside
-        if (changed.scheme || changed.shell) && debug_enabled() {
-            eprintln!("cavawall: watch fired scheme={} shell={}", changed.scheme, changed.shell);
+        if (changed.scheme || changed.shell || changed.wallpaper) && debug_enabled() {
+            eprintln!(
+                "cavawall: watch fired scheme={} shell={} wallpaper={}",
+                changed.scheme, changed.shell, changed.wallpaper
+            );
         }
         // Bars first: a changed count re-execs, which re-reads the scheme on the
         // way up anyway, so resolving colours before that would be thrown away
-        if changed.shell {
+        //
+        // Only when the running count came from the shell. A curve, a circle or
+        // a wallpaper that names its own count wins over it, and comparing
+        // against the shell anyway would re-exec on every settings change
+        if changed.shell && self.bars_follow_shell {
             // Every settings change rewrites the whole of shell.json, so most
             // wake-ups here are about something else. Compare before acting:
             // an unrelated toggle must not restart the visualiser
@@ -647,6 +683,12 @@ impl AppState {
     /// Answer one client. Orders that replace or end the process do not return
     fn serve_control(&mut self, stream: &std::os::unix::net::UnixStream) {
         use control::{Request, Response};
+        // This runs on the render thread: a client that connects and never
+        // writes would otherwise stop drawing and SIGTERM handling with it.
+        // Accepted sockets do not inherit the listener's O_NONBLOCK
+        let _ = stream.set_nonblocking(false);
+        let _ = stream.set_read_timeout(Some(control::SERVE_TIMEOUT));
+        let _ = stream.set_write_timeout(Some(control::SERVE_TIMEOUT));
         let Some(req) = control::read_request(stream) else {
             control::write_response(stream, &Response::err("unparseable request"));
             return;
@@ -661,7 +703,10 @@ impl AppState {
                     "mode": self.mode,
                     "pinned_output": self.pinned_output,
                     "placed_on": self.placed_on,
+                    "output_size": self.placed_size,
                     "bars": self.bar_count,
+                    "bars_from": self.bars_from,
+                    "parked": self.idle,
                     "curve_key": self.curve_key,
                 });
                 control::write_response(stream, &Response::ok(Some(data)));
@@ -703,18 +748,8 @@ impl AppState {
     /// here. The environment carries over too, so a CAVAWALL_OUTPUT that
     /// fullscreen-watch set to move us to another monitor survives the restart
     fn reexec(&mut self) {
-        // The same transparent frame clear_and_exit paints, for the same reason:
-        // on exec our Wayland connection closes exactly as it would on a kill,
-        // and the compositor does not reliably repaint under a layer surface
-        // that just disappears. Without this the old bars stay burnt onto the
-        // wallpaper until something else damages that strip
-        unsafe {
-            gl::ClearColor(0.0, 0.0, 0.0, 0.0);
-            gl::Clear(gl::COLOR_BUFFER_BIT);
-        }
-        let _ = egl.swap_buffers(self.egl_display, self.egl_surface);
-        self.surface.commit();
-        let _ = self.conn.roundtrip();
+        // On exec our Wayland connection closes exactly as it would on a kill
+        self.clear_surface();
 
         // Kill and reap cava before replacing our image, because exec keeps the
         // PID and therefore keeps the children: the outgoing cava stays OUR
@@ -818,60 +853,112 @@ impl AppState {
         }
     }
 
-    /// Called on every event-loop timeout, whether or not the compositor sent
-    /// anything. While parked this is the only thing running: it drains whatever
-    /// cava has produced and unparks the moment a sample crosses the threshold
+    /// Runs after every event-loop dispatch. The loop sleeps with no timeout:
+    /// cava's frames, frame callbacks, the watches, the control socket and
+    /// signals all arrive as events, so an idle instance wakes for nothing
     ///
-    /// Reads are gated on poll() rather than made non-blocking, so the blocking
-    /// read_exact in draw() keeps working unchanged. cava writes a whole 24-byte
-    /// frame at a time at the configured framerate, so a readable fd means a
-    /// frame is there; a partial read would complete within one frame period
-    /// anyway
-    pub fn poll_resume(&mut self) {
-        // SIGTERM is caught by a handler that only sets EXITING, and the
-        // checks that act on it live in draw(), which does not run while
-        // parked. Without this a parked instance ignores SIGTERM entirely
-        if EXITING.load(Ordering::SeqCst) {
+    /// Frames are drawn here or from `on_cava`, never inside Wayland dispatch.
+    /// A swap reads the Wayland socket and queues the next callback, so a draw
+    /// inside dispatch kept it busy for as long as audio played, and no other
+    /// source got a turn
+    pub fn tick(&mut self) {
+        if EXITING.load(Ordering::Relaxed) {
             self.clear_and_exit();
         }
-        // Parked AND unplaced: the output went away while the audio was
-        // silent. Committing here would map a surface belonging to nothing.
-        // retarget() restarts the loop when an output comes back
-        if self.placed_on.is_none() {
-            return;
-        }
+        self.maybe_draw();
+    }
 
-        self.poll_external();
-
-        if !self.idle {
-            // Running: the compositor's frame callbacks drive draw(), and this
-            // tick has nothing to do. NOT a second drive for
-            // draw() - rendering ahead of the callback is what the callback
-            // exists to throttle, and cava's pipe is drained by draw() anyway
-            return;
+    /// Draw when both halves are in: the compositor wants a frame, and cava
+    /// has produced one. Whichever arrives second triggers it
+    fn maybe_draw(&mut self) {
+        if self.redraw && self.fresh && !self.frame_pending && !self.idle && self.placed_on.is_some() {
+            self.draw();
         }
-        let fd = self.cava_reader.get_ref().as_raw_fd();
+    }
+
+    /// cava's pipe is readable. Take every whole frame waiting, count silence
+    /// frame by frame, keep only the newest: a backlog after a stall is
+    /// dropped rather than fast-forwarded through
+    ///
+    /// Parking and unparking are both decided here, per frame, against the
+    /// one threshold in `is_silent`
+    pub fn on_cava(&mut self) {
+        let frame = self.cava_buffer.len();
+        let mut got = false;
+        let mut loud = false;
         loop {
-            let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
-            if unsafe { libc::poll(&mut pfd, 1, 0) } <= 0 || pfd.revents & libc::POLLIN == 0 {
-                return; // nothing waiting; stay parked
+            let at = self.cava_partial;
+            let room = self.cava_scratch.len() - at;
+            // SAFETY: the fd is the open read end of cava's pipe for the life
+            // of the process, and the range is inside the scratch buffer
+            let n = unsafe {
+                libc::read(self.cava_fd, self.cava_scratch.as_mut_ptr().add(at).cast(), room)
+            };
+            if n == 0 {
+                self.cava_gone();
             }
-            if self.cava_reader.read_exact(&mut self.cava_buffer).is_err() {
-                return;
+            if n < 0 {
+                if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                break; // EAGAIN: drained
             }
-            if !is_silent(&self.cava_buffer) {
-                // Unpark: one commit restarts the frame-callback loop, and
-                // rendering is driven by the compositor again from here
-                self.idle = false;
-                self.silent_frames = 0;
-                // Parked frames were never presented, so prev_heights describes
-                // a frame older than whatever is on screen
-                self.force_full_damage = true;
-                self.surface.frame(&self.qh, self.surface.clone());
-                self.surface.commit();
-                return;
+            let end = at + n as usize;
+            let whole = end - end % frame;
+            for f in self.cava_scratch[..whole].chunks_exact(frame) {
+                if is_silent(f) {
+                    self.silent_frames = self.silent_frames.saturating_add(1);
+                } else {
+                    self.silent_frames = 0;
+                    loud = true;
+                }
+            }
+            if whole > 0 {
+                self.cava_buffer.copy_from_slice(&self.cava_scratch[whole - frame..whole]);
+                got = true;
+            }
+            self.cava_scratch.copy_within(whole..end, 0);
+            self.cava_partial = end - whole;
+            // Short means the pipe is empty; no second read to be told so
+            if (n as usize) < room {
+                break;
             }
         }
+        if !got {
+            return;
+        }
+        self.fresh = true;
+        if self.idle {
+            if !loud {
+                return;
+            }
+            self.idle = false;
+            // Parked frames were never presented, so prev_frame describes one
+            // older than what is on screen
+            self.force_full_damage = true;
+            self.redraw = true;
+        } else if self.silent_frames > SILENT_GRACE_FRAMES {
+            // PARK: no draw and no commit. Hyprland damages a layer by its
+            // geometry on any commit, buffer attached or not, so even a
+            // bufferless one recomposites the band. The grace lets the bars
+            // finish falling first: with monstercat=1.5 and noise_reduction=60
+            // a tone cut from full volume decays below the threshold in 8
+            // frames (0.18s); the rest of the 23 (0.51s) is hysteresis, so a
+            // gap between tracks does not park and unpark repeatedly
+            if debug_enabled() {
+                eprintln!("cavawall: parking (silent_frames={})", self.silent_frames);
+            }
+            self.idle = true;
+            return;
+        }
+        self.maybe_draw();
+    }
+
+    /// Leave the way SIGTERM does. `panic = "abort"` skips all cleanup, so
+    /// panicking instead leaves the last frame burnt onto the wallpaper
+    fn cava_gone(&mut self) -> ! {
+        eprintln!("cavawall: cava exited, shutting down");
+        self.clear_and_exit();
     }
 
     /// Rank a connected output; lower wins, None means "not eligible at all".
@@ -954,7 +1041,7 @@ impl AppState {
             return None;
         }
         let (ow, oh) = (self.width as f32, self.height as f32);
-        let (x0, y0, x1, y1) = curve::bounds(&self.curve_bars);
+        let (x0, y0, x1, y1) = curve::bounds(&self.curve_bars, ow / oh.max(1.0));
         // NDC -> pixels, y flipped: NDC counts up, a margin counts down
         let pad = 2.0;
         let left = (((x0 + 1.0) * 0.5 * ow) - pad).floor().clamp(0.0, ow);
@@ -1023,15 +1110,17 @@ impl AppState {
         if debug_enabled() {
             eprintln!("cavawall: placing on {name} ({}x{})", logical_size.0, logical_size.1);
         }
-        let old_surface = self.surface.clone();
         self.surface = self.compositor.create_surface(qh);
-        self.layer_surface = self.layer_shell.create_layer_surface(
+        let fresh = self.layer_shell.create_layer_surface(
             qh,
             self.surface.clone(),
             Layer::Bottom,
             Some("cavawall"),
             Some(output),
         );
+        // Kept alive until EGL has moved off it: dropping a LayerSurface
+        // destroys its wl_surface too, and the EGL window still points there
+        let old_layer = std::mem::replace(&mut self.layer_surface, fresh);
         self.width = logical_size.0 as u32;
         self.height = logical_size.1 as u32;
         // same empty input region as at startup - the surface is
@@ -1059,12 +1148,18 @@ impl AppState {
         // identical - inside a surface that IS the band, they use its full
         // height rather than max_height of it
         self.layer_surface.set_exclusive_zone(-1); // see note at startup
-        match self.mode {
+        let requested = match self.mode {
             Mode::Bars => {
-                let band =
-                    ((self.height as f32 * self.max_height).ceil() as u32).clamp(1, self.height);
-                self.layer_surface.set_size(self.width, band);
-                self.layer_surface.set_anchor(Anchor::BOTTOM);
+                let band = bar_band(&self.bars_at, self.width, self.height);
+                self.surface_origin = (band.left, band.top);
+                self.layer_surface.set_size(band.width, band.height);
+                if band.bottom_row {
+                    self.layer_surface.set_anchor(Anchor::BOTTOM);
+                } else {
+                    self.layer_surface.set_anchor(Anchor::TOP | Anchor::LEFT);
+                    self.layer_surface.set_margin(band.top as i32, 0, 0, band.left as i32);
+                }
+                (band.width, band.height)
             }
             // A square surface keeps NDC square and the circle round with no
             // aspect uniform. Anchored to a corner and positioned
@@ -1088,66 +1183,109 @@ impl AppState {
                 // ridge it was drawn on
                 let fit = self.fit_for(self.curve_output);
                 let aspect = self.width as f32 / self.height.max(1) as f32;
-                let built =
-                    curve::build(&self.curve_paths, &self.curve_occlude, self.bar_count, aspect, fit);
-                self.curve_bars = built.bars.into();
-                self.curve_draws = built.draws.into();
-                self.curve_occluders = built.occluders.into();
+                self.curve_bars = curve::build(&self.curve_paths, self.bar_count, aspect, fit).into();
                 self.curve_horizon =
-                    curve::occluder_floor(&self.curve_occluders, fit).into_boxed_slice();
+                    curve::occluder_floor(&self.occluders, self.common_mask, fit).into_boxed_slice();
                 self.curve_box = self.curve_bbox();
                 match self.curve_box {
                     Some((left, top, w, h)) => {
+                        self.surface_origin = (left, top);
                         self.layer_surface.set_size(w, h);
                         self.layer_surface.set_anchor(Anchor::TOP | Anchor::LEFT);
                         self.layer_surface.set_margin(top as i32, 0, 0, left as i32);
+                        (w, h)
                     }
                     None => {
+                        self.surface_origin = (0, 0);
                         self.layer_surface.set_size(self.width, self.height);
                         self.layer_surface.set_anchor(Anchor::TOP | Anchor::LEFT);
+                        (self.width, self.height)
                     }
                 }
             }
             Mode::Circle => {
                 let d = self.circle.diameter.min(self.width).min(self.height).max(1);
                 let (top, left) = self.circle.margins_for(d, self.width, self.height);
+                self.surface_origin = (left.max(0) as u32, top.max(0) as u32);
                 self.layer_surface.set_size(d, d);
                 self.layer_surface.set_anchor(Anchor::TOP | Anchor::LEFT);
                 self.layer_surface.set_margin(top, 0, 0, left);
+                (d, d)
             }
-        }
+        };
         self.surface.commit();
         drop(input_region);
-        old_surface.destroy();
+        self.rebind_egl(requested);
+        // Role object first, then its wl_surface; SCTK's drop does both
+        drop(old_layer);
         // A fresh surface carries no frame callback and nothing parked. The
-        // configure this commit provokes is what restarts the loop, and it
-        // only draws because placed_on is set here first
+        // configure this commit provokes is what starts the loop, and it only
+        // draws because placed_on is set here first
         self.idle = false;
         self.silent_frames = 0;
+        self.frame_pending = false;
+        self.redraw = false;
         self.placed_on = Some(name);
         self.placed_size = info.logical_size;
     }
 
+    /// Point EGL at `self.surface`, which has just been replaced
+    ///
+    /// The context is unbound first: NVIDIA leaves a surface destroyed while
+    /// current in a state where the next one fails eglSwapBuffers with
+    /// EGL_BAD_SURFACE. The swap interval belongs to the surface, so a new one
+    /// is back at the driver's default of 1 - on NVIDIA that is FIFO, which
+    /// costs a second commit per frame and a vsync wait inside every swap
+    fn rebind_egl(&mut self, (w, h): (u32, u32)) {
+        let (w, h) = (w.max(1) as i32, h.max(1) as i32);
+        egl.make_current(self.egl_display, None, None, None).ok();
+        egl.destroy_surface(self.egl_display, self.egl_surface).ok();
+        self.wl_egl_surface =
+            WlEglSurface::new(self.surface.id(), w, h).expect("wl_egl_window for the new surface");
+        // SAFETY: the window was just created for a live wl_surface and
+        // outlives the EGL surface, which is destroyed before it is replaced
+        self.egl_surface = unsafe {
+            egl.create_window_surface(
+                self.egl_display,
+                self.egl_config,
+                self.wl_egl_surface.ptr() as egl::NativeWindowType,
+                None,
+            )
+        }
+        .expect("EGL surface for the new wl_surface");
+        egl.make_current(
+            self.egl_display,
+            Some(self.egl_surface),
+            Some(self.egl_surface),
+            Some(self.egl_context),
+        )
+        .expect("make the new surface current");
+        if egl.swap_interval(self.egl_display, 0).is_err() && debug_enabled() {
+            eprintln!("cavawall: swap interval unchanged, frames pace on vsync too");
+        }
+    }
+
 }
 
-/// Upload every bar: one vec4 each for base and unit normal, one vec2 each
-/// for width and reach
+/// Upload every bar: one vec4 of base and unit normal, one vec4 of width,
+/// reach and occluder mask
 ///
-/// Rewritten whole, since it changes only when the
-/// output's shape does, which is a monitor change, not a frame
+/// Rewritten whole, since it changes only when the output's shape does, which
+/// is a monitor change, not a frame
 ///
 /// # Safety
 /// A GL context must be current and both buffers must already exist
 unsafe fn upload_bars(bars: &[curve::Bar], path_ssbo: u32, width_ssbo: u32) {
     let packed: Vec<[f32; 4]> =
         bars.iter().map(|b| [b.pos[0], b.pos[1], b.normal[0], b.normal[1]]).collect();
-    let widths: Vec<[f32; 2]> = bars.iter().map(|b| [b.width, b.reach]).collect();
+    let geom: Vec<[f32; 4]> =
+        bars.iter().map(|b| [b.width, b.reach, f32::from(b.mask), 0.0]).collect();
     // SAFETY: the caller guarantees a current context and live buffers; both
     // are only ever rewritten here, each bound to its own binding point
     unsafe {
         let pairs: [(u32, usize, *const ffi::c_void, u32); 2] = [
             (path_ssbo, size_of_val(packed.as_slice()), packed.as_ptr().cast(), 1),
-            (width_ssbo, size_of_val(widths.as_slice()), widths.as_ptr().cast(), 3),
+            (width_ssbo, size_of_val(geom.as_slice()), geom.as_ptr().cast(), 3),
         ];
         for (buf, bytes, ptr, binding) in pairs {
             gl::BindBuffer(gl::SHADER_STORAGE_BUFFER, buf);
@@ -1155,6 +1293,181 @@ unsafe fn upload_bars(bars: &[curve::Bar], path_ssbo: u32, width_ssbo: u32) {
             gl::BindBufferBase(gl::SHADER_STORAGE_BUFFER, binding, buf);
         }
         gl::BindBuffer(gl::SHADER_STORAGE_BUFFER, 0);
+    }
+}
+
+/// Slots in the height ring. A slot is rewritten two frames after the GPU last
+/// read it: only one frame callback is ever in flight, and a callback arrives
+/// once the compositor has presented - so after the GPU finished - that frame
+const RING_SLOTS: u32 = 3;
+
+/// The per-bar heights in a persistently mapped, coherent buffer: a frame
+/// costs a memcpy of cava's bytes, and no driver call allocates, orphans or
+/// copies anything
+struct HeightRing {
+    /// Mapped for the life of the process; write-only, never read back
+    ptr: std::ptr::NonNull<u8>,
+    frame: usize,
+    next: u32,
+}
+
+impl HeightRing {
+    /// Give the bound ARRAY_BUFFER immutable storage for every slot and map
+    /// it. None if the driver refuses the mapping
+    ///
+    /// # Safety
+    /// A GL 4.4 context must be current, with the target buffer bound to
+    /// ARRAY_BUFFER and no storage yet
+    unsafe fn map(frame_bytes: GLsizeiptr) -> Option<Self> {
+        let flags = gl::MAP_WRITE_BIT | gl::MAP_PERSISTENT_BIT | gl::MAP_COHERENT_BIT;
+        let size = frame_bytes * RING_SLOTS as GLsizeiptr;
+        // SAFETY: the caller guarantees the context and the binding
+        let ptr = unsafe {
+            gl::BufferStorage(gl::ARRAY_BUFFER, size, std::ptr::null(), flags);
+            gl::MapBufferRange(gl::ARRAY_BUFFER, 0, size, flags)
+        };
+        let ptr = std::ptr::NonNull::new(ptr.cast::<u8>())?;
+        Some(Self { ptr, frame: usize::try_from(frame_bytes).ok()?, next: 0 })
+    }
+
+    /// Copy one frame into the next slot; returns the base instance that
+    /// reads it
+    fn write(&mut self, frame: &[u8]) -> u32 {
+        let slot = self.next;
+        self.next = (slot + 1) % RING_SLOTS;
+        debug_assert_eq!(frame.len(), self.frame);
+        // SAFETY: the mapping is persistent and covers RING_SLOTS frames, so
+        // slot * frame + frame is in bounds; coherent, so no flush is needed
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                frame.as_ptr(),
+                self.ptr.as_ptr().add(slot as usize * self.frame),
+                self.frame,
+            );
+        }
+        // Heights are two bytes per bar, one per instance
+        slot * (self.frame / 2) as u32
+    }
+}
+
+/// Rasterises every occluder into one integer texture, a bit per occluder,
+/// which the curve fragment stage reads to discard what is hidden
+///
+/// Once per configure rather than once per frame: the shapes only move when
+/// the output does, so a frame costs one texel fetch per fragment and no draws
+struct MaskPass {
+    program: u32,
+    scale_location: gl::types::GLint,
+    offset_location: gl::types::GLint,
+    vao: u32,
+    vbo: u32,
+    fbo: u32,
+    /// R16UI, surface-sized, bound to texture unit 0 for the life of the process
+    texture: u32,
+}
+
+impl MaskPass {
+    /// # Safety
+    /// A GL context must be current
+    unsafe fn new(texture: u32) -> Self {
+        let program = link_program(MASK_VERTEX_SHADER_SRC, MASK_FRAGMENT_SHADER_SRC);
+        let (mut vao, mut vbo, mut fbo) = (0, 0, 0);
+        // SAFETY: the caller guarantees a current context
+        unsafe {
+            gl::GenVertexArrays(1, &mut vao);
+            gl::GenBuffers(1, &mut vbo);
+            gl::GenFramebuffers(1, &mut fbo);
+            gl::BindVertexArray(vao);
+            gl::BindBuffer(gl::ARRAY_BUFFER, vbo);
+            let stride = std::mem::size_of::<curve::MaskVertex>() as GLsizei;
+            gl::EnableVertexAttribArray(0);
+            gl::VertexAttribPointer(0, 2, gl::FLOAT, gl::FALSE, stride, std::ptr::null());
+            gl::EnableVertexAttribArray(1);
+            // I, not the float form: the bit has to arrive as an integer
+            gl::VertexAttribIPointer(1, 1, gl::UNSIGNED_INT, stride, std::ptr::without_provenance(8));
+            Self {
+                program,
+                scale_location: gl::GetUniformLocation(program, c"PathScale".as_ptr()),
+                offset_location: gl::GetUniformLocation(program, c"PathOffset".as_ptr()),
+                vao,
+                vbo,
+                fbo,
+                texture,
+            }
+        }
+    }
+
+    /// Size the mask to the surface and fill it. Leaves the bar program, VAO
+    /// and the default framebuffer bound, as every frame expects
+    ///
+    /// # Safety
+    /// A GL context must be current, and `bar_program`/`bar_vao` must be live
+    unsafe fn rasterise(
+        &self,
+        tris: &[curve::MaskVertex],
+        (w, h): (u32, u32),
+        (scale, offset): ([f32; 2], [f32; 2]),
+        (bar_program, bar_vao): (u32, u32),
+    ) {
+        let (w, h) = (w.max(1) as GLsizei, h.max(1) as GLsizei);
+        // SAFETY: the caller guarantees a current context and live names; the
+        // texture is attached to this FBO and nothing samples it until after
+        unsafe {
+            gl::BindTexture(gl::TEXTURE_2D, self.texture);
+            gl::TexImage2D(
+                gl::TEXTURE_2D,
+                0,
+                gl::R16UI as i32,
+                w,
+                h,
+                0,
+                gl::RED_INTEGER,
+                gl::UNSIGNED_SHORT,
+                std::ptr::null(),
+            );
+            gl::BindFramebuffer(gl::FRAMEBUFFER, self.fbo);
+            gl::FramebufferTexture2D(
+                gl::FRAMEBUFFER,
+                gl::COLOR_ATTACHMENT0,
+                gl::TEXTURE_2D,
+                self.texture,
+                0,
+            );
+            if debug_enabled() {
+                let status = gl::CheckFramebufferStatus(gl::FRAMEBUFFER);
+                if status != gl::FRAMEBUFFER_COMPLETE {
+                    eprintln!("cavawall: occluder mask framebuffer incomplete: {status:#x}");
+                }
+            }
+            gl::Viewport(0, 0, w, h);
+            gl::ClearBufferuiv(gl::COLOR, 0, [0u32; 4].as_ptr());
+            gl::BindBuffer(gl::ARRAY_BUFFER, self.vbo);
+            gl::BufferData(
+                gl::ARRAY_BUFFER,
+                std::mem::size_of_val(tris) as GLsizeiptr,
+                tris.as_ptr().cast(),
+                gl::STATIC_DRAW,
+            );
+            gl::UseProgram(self.program);
+            gl::Uniform2f(self.scale_location, scale[0], scale[1]);
+            gl::Uniform2f(self.offset_location, offset[0], offset[1]);
+            gl::BindVertexArray(self.vao);
+            // XOR per bit is a parity fill; logic op replaces blending here
+            gl::Enable(gl::COLOR_LOGIC_OP);
+            gl::LogicOp(gl::XOR);
+            gl::DrawArrays(gl::TRIANGLES, 0, tris.len() as GLsizei);
+            gl::Disable(gl::COLOR_LOGIC_OP);
+            if debug_enabled() {
+                let err = gl::GetError();
+                eprintln!(
+                    "cavawall: occluder mask {w}x{h}, {} triangles, GL error {err:#x}",
+                    tris.len() / 3
+                );
+            }
+            gl::BindFramebuffer(gl::FRAMEBUFFER, 0);
+            gl::UseProgram(bar_program);
+            gl::BindVertexArray(bar_vao);
+        }
     }
 }
 
@@ -1171,8 +1484,8 @@ impl AppState {
             Some(_) if !self.force_full_damage && self.mode == Mode::Bars => {
                 damage_rects(&self.cava_buffer, &self.prev_frame, &self.damage_map, &mut rects)
             }
-            // Whole surface. Not the same as passing zero rects, which means
-            // "nothing changed" and would present a frame nobody redraws
+            // Whole surface. EGL reads zero rects the same way, so an empty
+            // list can never say "nothing changed" - draw() skips that frame
             _ => {
                 rects[..4].copy_from_slice(&[0, 0, self.width as i32, self.height as i32]);
                 4
@@ -1201,109 +1514,15 @@ impl AppState {
         }
     }
 
-    pub fn draw(&mut self, _conn: &Connection, qh: &QueueHandle<Self>) {
-        // Before any GL work, and before the blocking read below: while audio is
-        // playing this is the ONLY path that runs, so it is the only chance a
-        // scheme or bar-count change gets to be noticed. Costs one non-blocking
-        // read per watch per frame, returning EAGAIN in the overwhelming
-        // majority of them
-        self.poll_external();
-        if let Err(e) = self.cava_reader.read_exact(&mut self.cava_buffer) {
-            // A signal interrupts the blocking read, which is exactly how we
-            // find out it is time to go
-            if EXITING.load(Ordering::SeqCst) {
-                self.clear_and_exit();
-            }
-            if e.kind() == std::io::ErrorKind::Interrupted {
-                return;
-            }
-            // cava is gone and the pipe read back EOF. Leave the way SIGTERM
-            // does: `panic = "abort"` skips all cleanup, so panicking here
-            // leaves the last frame of bars burnt onto the wallpaper
-            if e.kind() == std::io::ErrorKind::UnexpectedEof {
-                eprintln!("cavawall: cava exited, shutting down");
-                self.clear_and_exit();
-            }
-            panic!("cava read failed: {e}");
-        }
-        if EXITING.load(Ordering::SeqCst) {
-            self.clear_and_exit();
-        }
-
-        // Drop stale frames and render the newest
-        //
-        // cava writes at the configured framerate regardless of whether we are
-        // keeping up. Reading exactly one frame per draw means a stall leaves a
-        // backlog in the pipe, and on recovery every queued frame is rendered in
-        // turn - the visualiser freezes, then fast-forwards through the audio
-        // it missed. Skipping to the newest frame keeps it in step with what is
-        // actually playing
-        //
-        // The BufReader's own buffer has to be checked as well as the fd: bytes
-        // already pulled out of the pipe are invisible to poll(), so polling
-        // alone would report "nothing waiting" while a backlog sat in memory
-        let frame_len = self.cava_buffer.len();
-        let fd = self.cava_reader.get_ref().as_raw_fd();
-        let mut skipped = 0u32;
-        while skipped < 512 {
-            let ready = if self.cava_reader.buffer().len() >= frame_len {
-                true
-            } else {
-                let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
-                (unsafe { libc::poll(&mut pfd, 1, 0) }) > 0 && pfd.revents & libc::POLLIN != 0
-            };
-            if !ready {
-                break;
-            }
-            if self.cava_reader.read_exact(&mut self.cava_buffer).is_err() {
-                break;
-            }
-            skipped += 1;
-        }
-
-        // Skip GPU work while the audio is silent. cava emits frames at the
-        // configured framerate whether or not anything is playing, so without
-        // this the full-screen surface is recomposited 60x/sec forever just to
-        // draw bars that are all zero - measurably pinning an integrated GPU
-        //
-        // Commit with no new buffer instead of drawing: that still schedules
-        // Grace before parking, so the bars finish falling to zero rather than
-        // freezing part-way down
-        //
-        // Measured, not guessed: with monstercat=1.5 and noise_reduction=60, a
-        // tone cut from full volume decays below the threshold in 8 frames -
-        // 0.18s. The original 90 (2.0s) was 11x that. 23 frames is 0.51s, still
-        // ~3x the real decay
-        //
-        // The remainder is hysteresis rather than decay: a quiet passage or a
-        // gap between tracks would otherwise park and unpark repeatedly. That
-        // costs almost nothing - parking sets a flag, unparking is one commit
-        // - and is invisible, since the bars are already at zero whenever it
-        // happens
-        if is_silent(&self.cava_buffer) {
-            self.silent_frames = self.silent_frames.saturating_add(1);
-        } else {
-            self.silent_frames = 0;
-        }
-        if self.silent_frames > SILENT_GRACE_FRAMES {
-            if debug_enabled() {
-                eprintln!("cavawall: parking (silent_frames={})", self.silent_frames);
-            }
-            // PARK. No draw, and critically no commit either
-            //
-            // A bufferless commit is free for us but not for the compositor:
-            // Hyprland damages a layer by its GEOMETRY on any commit, buffer
-            // attached or not, so every one recomposited the whole band. The
-            // original comment here claimed it "produces no damage" - false,
-            // and visible in the damage overlay as a flash on an idle workspace
-            // with no audio playing
-            //
-            // Committing was only ever there to keep frame callbacks coming, so
-            // that audio returning would be noticed. That job moves to
-            // poll_resume(), driven by the timeout event_loop.run already has,
-            // which owes nothing to the compositor. So while silent this draws
-            // nothing, commits nothing, and damages nothing
-            self.idle = true;
+    /// Render the newest cava frame. Only ever called from `maybe_draw`
+    pub fn draw(&mut self) {
+        self.redraw = false;
+        self.fresh = false;
+        // The same heights draw the same pixels, so there is nothing to
+        // present. No commit is the saving; with no callback coming, the next
+        // tick reads the next frame
+        if !self.force_full_damage && self.cava_buffer == self.prev_frame {
+            self.redraw = true;
             return;
         }
 
@@ -1317,92 +1536,41 @@ impl AppState {
             // fresh region and never waits for the GPU to finish reading the
             // old one. Naming the buffer in the call leaves the frame with no
             // binding to make; without direct state access it takes one
-            if self.dsa {
-                gl::NamedBufferData(
-                    self.height_vbo,
-                    self.frame_bytes,
-                    self.cava_buffer.as_ptr().cast(),
-                    gl::DYNAMIC_DRAW,
-                );
-            } else {
-                gl::BindBuffer(gl::ARRAY_BUFFER, self.height_vbo);
-                gl::BufferData(
-                    gl::ARRAY_BUFFER,
-                    self.frame_bytes,
-                    self.cava_buffer.as_ptr().cast(),
-                    gl::DYNAMIC_DRAW,
-                );
-            }
-            // Clear honours the stencil mask, so it has to be open first
-            gl::StencilMask(0xFF);
-            gl::Clear(gl::COLOR_BUFFER_BIT | gl::STENCIL_BUFFER_BIT);
-
-            // Each silhouette into its own bit. A fan over the outline with
-            // INVERT fills by parity, which needs no tessellation and copes
-            // with an outline that crosses itself
-            if !self.occ_fans.is_empty() {
-                gl::UseProgram(self.stencil_program);
-                gl::BindVertexArray(self.stencil_vao);
-                gl::Enable(gl::STENCIL_TEST);
-                gl::ColorMask(gl::FALSE, gl::FALSE, gl::FALSE, gl::FALSE);
-                gl::StencilFunc(gl::ALWAYS, 0, 0xFF);
-                gl::StencilOp(gl::KEEP, gl::KEEP, gl::INVERT);
-                for (i, (first, count)) in self.occ_fans.iter().enumerate() {
-                    gl::StencilMask(1 << i);
-                    gl::DrawArrays(gl::TRIANGLE_FAN, *first, *count);
+            let base = match &mut self.ring {
+                Some(ring) => ring.write(&self.cava_buffer),
+                None => {
+                    // Respecifying the store orphans it, so the driver never
+                    // waits for the GPU to finish reading the old one
+                    gl::BindBuffer(gl::ARRAY_BUFFER, self.height_vbo);
+                    gl::BufferData(
+                        gl::ARRAY_BUFFER,
+                        self.frame_bytes,
+                        self.cava_buffer.as_ptr().cast(),
+                        gl::DYNAMIC_DRAW,
+                    );
+                    0
                 }
-                gl::ColorMask(gl::TRUE, gl::TRUE, gl::TRUE, gl::TRUE);
-                gl::StencilOp(gl::KEEP, gl::KEEP, gl::KEEP);
-                gl::UseProgram(self.program);
-                gl::BindVertexArray(self.vao);
-            }
-            // Nothing below writes stencil
-            gl::StencilMask(0);
-
-            // Four vertices, once per bar. No index buffer: each instance is
-            // its own strip, so there are no shared vertices to index
-            if self.curve_draws.is_empty() {
-                gl::Disable(gl::STENCIL_TEST);
-                gl::DrawArraysInstanced(gl::TRIANGLE_STRIP, 0, 4, self.bar_count as GLsizei);
-            } else {
-                // One draw per path: the silhouette a run tests against is a
-                // stencil reference, which is per draw and not per instance
-                for d in self.curve_draws.iter() {
-                    match d.occ {
-                        Some(bit) => {
-                            gl::Enable(gl::STENCIL_TEST);
-                            gl::StencilFunc(gl::EQUAL, 0, 1 << bit);
-                        }
-                        None => gl::Disable(gl::STENCIL_TEST),
-                    }
-                    gl::Uniform1i(self.instance_offset_location, d.first as i32);
-                    gl::DrawArraysInstanced(gl::TRIANGLE_STRIP, 0, 4, d.count as GLsizei);
-                }
-                gl::Disable(gl::STENCIL_TEST);
-            }
+            };
+            gl::Clear(gl::COLOR_BUFFER_BIT);
+            // Every bar of every mode in one draw: four vertices per instance,
+            // each its own strip, so there is nothing to index. Occluders cut
+            // curve bars in the fragment stage against a mask rasterised once
+            // per configure, so no path needs a draw of its own. The base
+            // instance picks the ring slot; gl_InstanceID still starts at 0
+            gl::DrawArraysInstancedBaseInstance(
+                gl::TRIANGLE_STRIP,
+                0,
+                4,
+                self.bar_count as GLsizei,
+                base,
+            );
         }
-        // Ask for the next callback BEFORE the swap, never after
-        //
-        // "The frame request will take effect on the next wl_surface.commit"
-        // (wayland.xml) - it is double-buffered state like a buffer or a
-        // damage region, so it needs a commit AFTER it to be applied.
-        // eglSwapBuffers is that commit: Mesa attaches the new buffer, adds
-        // damage, and commits, all inside the call
-        //
-        // Requesting it afterwards instead left the request sitting in pending
-        // state with nothing left to apply it, so the loop ran on the callback
-        // committed by the PREVIOUS draw - self-sustaining only once two
-        // draws had happened, and dead the moment one draw did not swap (the
-        // silence park returns before this point) or the surface holding the
-        // in-flight callback was destroyed (new_output does exactly that).
-        // Replacing the request with a bare commit() after the swap is worse
-        // still: no request is created at all, so the very first draw is the
-        // last one, and the trailing bufferless commit re-damages the layer by
-        // its geometry for nothing (see the park note above).
-        //
-        // frame-then-swap is what weston-simple-egl does, and it keeps exactly
-        // one callback in flight with no dependence on a second commit
-        self.surface.frame(qh, self.surface.clone());
+        // Ask for the next callback BEFORE the swap, never after. The request
+        // is double-buffered state and takes effect on the next commit, which
+        // the swap provides; requested afterwards it waits for a commit that
+        // may never come. frame-then-swap keeps exactly one callback in flight
+        self.surface.frame(&self.qh, self.surface.clone());
+        self.frame_pending = true;
         self.present();
     }
 }

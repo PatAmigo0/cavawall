@@ -11,32 +11,46 @@ layout(location = 1) in float height;
 layout(std430, binding = 1) readonly buffer PathSamples {
     vec4 path[];
 };
-// Width and reach are per bar, because paths differ in both and the shader has
-// no idea paths exist. A vec2 array packs to 8 bytes with no padding
+// Per bar, because paths differ and the shader has no idea paths exist:
+// x = width, y = reach, z = the occluder mask, exact in a float up to 2^24
 layout(std430, binding = 3) readonly buffer BarGeometry {
-    vec2 geom[];
+    vec4 geom[];
 };
 // The surface is the path's bounding box, not the output, so everything here
 // is computed in the OUTPUT's NDC and mapped in at the end. One affine map
 // covers positions, reach and width alike; identity when the surface is the
 // whole output
-// Bars are drawn one path at a time so each can test its own silhouette, so
-// gl_InstanceID restarts at zero and the run's start is passed in
-uniform int InstanceOffset;
 uniform vec2 PathScale;
 uniform vec2 PathOffset;
-// 0 at the base, 1 at the tip. The fragment stage is the circle's, which
-// indexes the gradient and the alpha ramp by exactly this
+// Output width over height. The normal is unit length in PIXELS, which NDC
+// stretches by this in x, so both vectors are mapped back before scaling:
+// otherwise a leaning bar tilts further than its normal and shears
+uniform float Aspect;
+// 0 at the base, 1 at the tip; the gradient and the alpha ramp run along it
 out float vRadial;
+flat out uint vMask;
+#ifdef ROUND
+// The output in pixels, which width and reach are fractions of
+uniform vec2 OutputPx;
+out vec2 vLocal;
+flat out vec2 vSize;
+#endif
 void main() {
-    int bar = gl_InstanceID + InstanceOffset;
-    vec4 s = path[bar];
+    vec4 s = path[gl_InstanceID];
     vec2 n = s.zw;
     // Tangent is the normal turned a quarter turn; no second lookup needed
     vec2 t = vec2(-n.y, n.x);
-    // x = width, y = reach, both carrying the point's scale already
-    vec2 g = geom[bar];
+    // Width is a fraction of output width and reach of output height, both
+    // carrying the point's scale already
+    vec4 g = geom[gl_InstanceID];
+    vMask = uint(g.z);
     vRadial = corner.y * height;
-    vec2 p = s.xy + t * (corner.x - 0.5) * g.x + n * vRadial * g.y;
+    vec2 across = vec2(t.x, t.y * Aspect) * g.x;
+    vec2 along = vec2(n.x / Aspect, n.y) * g.y;
+    vec2 p = s.xy + across * (corner.x - 0.5) + along * vRadial;
     gl_Position = vec4(p * PathScale + PathOffset, 0.0, 1.0);
+#ifdef ROUND
+    vSize = vec2(g.x * 0.5 * OutputPx.x, height * g.y * 0.5 * OutputPx.y);
+    vLocal = vec2((corner.x - 0.5) * vSize.x, corner.y * vSize.y);
+#endif
 }

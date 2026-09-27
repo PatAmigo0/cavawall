@@ -1,10 +1,11 @@
-//! What a wallpaper's curve costs in GL draws, without starting the renderer
+//! What a wallpaper's curve costs the GPU, without starting the renderer
 //!
-//! Usage: cargo run --example draws -- ~/.config/cavawall/wallpapers/<key>.toml
+//! Usage: cargo run --example draws -- ~/.config/cavawall/wallpapers/<key>.toml [bars]
 
-use cavawall::{app_config::WallpaperConfig, curve};
+use cavawall::app_config::{OccluderShape, WallpaperConfig};
+use cavawall::curve;
 
-fn ctrl(pts: &[Vec<f32>]) -> Vec<curve::Control> {
+fn ctrl(pts: &[Vec<f32>]) -> Box<[curve::Control]> {
     pts.iter()
         .filter(|p| p.len() >= 2)
         .map(|p| curve::Control {
@@ -21,37 +22,62 @@ fn main() {
         eprintln!("usage: draws <wallpaper.toml> [bars]");
         std::process::exit(2);
     };
-    let bars: u32 = std::env::args().nth(2).and_then(|s| s.parse().ok()).unwrap_or(23);
-    let wp: WallpaperConfig = toml::from_str(&std::fs::read_to_string(&arg).unwrap()).unwrap();
+    let text = match std::fs::read_to_string(&arg) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("draws: {arg}: {e}");
+            std::process::exit(1);
+        }
+    };
+    let wp: WallpaperConfig = match toml::from_str(&text) {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("draws: {arg}: {e}");
+            std::process::exit(1);
+        }
+    };
     let Some(c) = wp.curve else {
-        println!("no curve block: circle or bars mode, one draw");
+        println!("no curve block: circle or bars mode, one draw per frame");
         return;
     };
+    let bars: u32 = std::env::args()
+        .nth(2)
+        .and_then(|s| s.parse().ok())
+        .or_else(|| c.total_bars())
+        .unwrap_or(23);
+
+    let occlusion = c.occlusion();
+    let occluders: Vec<curve::Occluder> = occlusion
+        .shapes
+        .iter()
+        .map(|(pts, shape)| curve::Occluder { points: ctrl(pts), closed: *shape == OccluderShape::Closed })
+        .collect();
     let specs: Vec<curve::PathSpec> = c
         .paths()
         .iter()
-        .map(|p| curve::PathSpec {
-            controls: ctrl(&p.points).into(),
+        .zip(occlusion.masks.iter().copied())
+        .map(|(p, mask)| curve::PathSpec {
+            controls: ctrl(&p.points),
             bars: p.bars,
-            reach: p.height.or(c.height).unwrap_or(0.18) * 2.0,
-            width: p.width.or(c.width).unwrap_or(0.006) * 2.0,
-            flip: p.flip.unwrap_or(false),
-            upright: p.upright.unwrap_or(false),
-            occlude: p.occlude.as_deref().map(|o| ctrl(o).into()),
-            clip: p.clip.unwrap_or(true),
+            reach: 0.36,
+            width: 0.012,
+            flip: false,
+            upright: true,
+            mask,
         })
         .collect();
-    let shared = c.occlude.as_deref().map(ctrl).unwrap_or_default();
-    let built = curve::build(&specs, &shared, bars, 1920.0 / 1200.0, curve::Fit::STRETCH);
+    let built = curve::build(&specs, bars, 1920.0 / 1200.0, curve::Fit::STRETCH);
+    let tris = curve::occluder_triangles(&occluders, curve::Fit::STRETCH);
 
-    println!("paths in config : {}", specs.len());
-    println!("occluder fans   : {}", built.occluders.len());
-    for (i, o) in built.occluders.iter().enumerate() {
-        println!("   fan {i}: {} outline points", o.len());
+    println!("bars            : {}", built.len());
+    println!("occluders       : {}", occluders.len());
+    for (i, o) in occluders.iter().enumerate() {
+        let kind = if o.closed { "closed" } else { "skyline" };
+        println!("  bit {i:<2} {kind:<8} {} points", o.points.len());
     }
-    println!("bar draws       : {}", built.draws.len());
-    for (i, d) in built.draws.iter().enumerate() {
-        println!("   draw {i}: bars {}..{}  occ={:?}", d.first, d.first + d.count, d.occ);
+    for (i, (s, mask)) in specs.iter().zip(&occlusion.masks).enumerate() {
+        println!("  path {i:<2} {} points, cut by {mask:#06b}", s.controls.len());
     }
-    println!("TOTAL GL DRAWS  : {}", built.occluders.len() + built.draws.len());
+    println!("mask triangles  : {} (rasterised once per configure)", tris.len() / 3);
+    println!("GL draws/frame  : 1");
 }

@@ -182,6 +182,16 @@ impl Watch {
         Some(w)
     }
 
+    /// A second descriptor on the same inotify instance, for an event loop to
+    /// poll while this one does the reading. Close-on-exec, like the first
+    #[must_use]
+    pub fn event_fd(&self) -> Option<std::os::fd::OwnedFd> {
+        // SAFETY: fcntl on a descriptor this struct owns; the result is fresh
+        let fd = unsafe { libc::fcntl(self.fd, libc::F_DUPFD_CLOEXEC, 0) };
+        // SAFETY: a new descriptor that nothing else owns
+        (fd >= 0).then(|| unsafe { std::os::fd::FromRawFd::from_raw_fd(fd) })
+    }
+
     /// -1 if the directory is missing or the watch could not be added
     fn add(&self, dir: &Path) -> i32 {
         if !dir.is_dir() {

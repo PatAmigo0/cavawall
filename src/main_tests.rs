@@ -36,6 +36,7 @@
             anchor: None,
             margin_x: None,
             margin_y: None,
+            position: None,
         };
         let g = CircleGeom::from_config(Some(&wild));
         assert_eq!(g.diameter, 16, "diameter floored");
@@ -90,6 +91,7 @@
             outer_alpha: 1.0,
             anchor: a,
             margin: (mx, my),
+            position: None,
         };
         // 1920x1080 output, 300px circle: 1620 and 780 of free space
         let (w, h, d) = (1920, 1080, 300);
@@ -190,7 +192,7 @@
 
     fn rects_of(heights: &[f32], prev: &[f32], w: u32, h: u32) -> Vec<[i32; 4]> {
         let (bw, stride) = bar_geometry(heights.len() as u32, 0.0);
-        let map = DamageMap::new(heights.len() as u32, bw, stride, w, h);
+        let map = DamageMap::new(heights.len() as u32, bw, stride, (w, h), false);
         let mut out = [0i32; DAMAGE_BUCKETS * 4];
         let n = damage_rects(&raw(heights), &raw(prev), &map, &mut out);
         out[..n].as_chunks::<4>().0.to_vec()
@@ -276,7 +278,7 @@
 
         for (w, full_h, frac) in [(1920u32, 1080u32, 0.65f32), (2560, 1440, 0.5), (1366, 768, 1.0)] {
             let h = (full_h as f32 * frac).ceil() as u32;
-            let map = DamageMap::new(bars as u32, bw, stride, w, h);
+            let map = DamageMap::new(bars as u32, bw, stride, (w, h), false);
             let mut out = [0i32; DAMAGE_BUCKETS * 4];
             let n = damage_rects(&raw(&new), &raw(&prev), &map, &mut out);
             let rects: Vec<&[i32]> = out[..n].as_chunks::<4>().0.iter().map(|r| &r[..]).collect();
@@ -317,7 +319,7 @@
         }
     }
 
-    /// draw() and poll_resume() must not be able to disagree about what silence
+    /// draw() and audio_returned() must not be able to disagree about what silence
     /// is: they are the park and unpark halves of one decision. This pins the
     /// shared predicate to the f32 threshold draw() used to apply on its own
     #[test]
@@ -356,4 +358,95 @@
             let fetched = f32::from(n) / f32::from(u16::MAX) * 2.0 - 1.0;
             assert!((ndc(n) - fetched).abs() < 1e-6, "{n}: {} vs {fetched}", ndc(n));
         }
+    }
+
+    fn placement(left: f32, span: f32, baseline: f32, reach: f32, down: bool) -> BarPlacement {
+        BarPlacement { left, span, baseline, reach, down }
+    }
+
+    /// No placement set is the row cavawall always drew: full width, standing
+    /// on the bottom edge, anchored there so it follows a resize by itself
+    #[test]
+    fn the_default_row_is_the_bottom_band() {
+        let cfg: BarConfig = toml::from_str("amount = 8\ngap = 0.1\nmax_height = 0.65").expect("parses");
+        let b = bar_band(&BarPlacement::from_config(&cfg), 1920, 1080);
+        assert_eq!((b.left, b.top, b.width, b.height), (0, 1080 - 702, 1920, 702));
+        assert!(b.bottom_row);
+    }
+
+    #[test]
+    fn a_placed_row_lands_where_it_says_and_stays_on_the_output() {
+        // A third of the width, centred, standing on the middle of the screen
+        let b = bar_band(&placement(1.0 / 3.0, 1.0 / 3.0, 0.5, 0.2, false), 1920, 1080);
+        assert_eq!((b.left, b.top, b.width, b.height), (640, 540 - 216, 640, 216));
+        assert!(!b.bottom_row);
+        // Hanging from the top edge
+        let b = bar_band(&placement(0.0, 1.0, 0.0, 0.3, true), 1920, 1080);
+        assert_eq!((b.top, b.height), (0, 324));
+        assert!(!b.bottom_row, "a hanging row is placed, not bottom-anchored");
+        // A baseline too high for the reach is pulled down until it fits
+        let b = bar_band(&placement(0.0, 1.0, 0.1, 0.5, false), 1920, 1080);
+        assert_eq!(b.top, 0);
+        // And too low for a hanging row is pushed up
+        let b = bar_band(&placement(0.9, 0.5, 0.9, 0.5, true), 1920, 1080);
+        assert_eq!(b.top + b.height, 1080);
+        assert!(b.left + b.width <= 1920);
+    }
+
+    /// Wild values are clamped rather than trusted: `left = 1` once meant a
+    /// clamp whose minimum passed its maximum, which panics
+    #[test]
+    fn placement_clamps_what_it_is_given() {
+        let cfg: BarConfig =
+            toml::from_str("amount = 8\ngap = 0.1\nleft = 1.0\nspan = 5.0\nbaseline = -2.0").expect("parses");
+        let p = BarPlacement::from_config(&cfg);
+        assert!(p.left <= 0.99 && p.left + p.span <= 1.0 + 1e-6, "{p:?}");
+        assert_eq!(p.baseline, 0.0);
+        let b = bar_band(&p, 1920, 1080);
+        assert!(b.width >= 1 && b.left + b.width <= 1920);
+    }
+
+    /// A circle placed by hand is centred on its point, and still kept whole
+    #[test]
+    fn a_positioned_circle_is_centred_on_its_point() {
+        let mut g = CircleGeom::from_config(None);
+        g.position = Some((0.25, 0.5));
+        assert_eq!(g.margins_for(200, 1920, 1080), (440, 380));
+        g.position = Some((1.0, 0.0));
+        assert_eq!(g.margins_for(200, 1920, 1080), (0, 1720), "clamped onto the output");
+    }
+
+    /// A hanging row counts its damage down from the top edge
+    #[test]
+    fn a_hanging_row_damages_from_the_top() {
+        let (w, h) = (1000u32, 100u32);
+        let (bw, stride) = bar_geometry(4, 0.0);
+        let map = DamageMap::new(4, bw, stride, (w, h), true);
+        let mut out = [0; DAMAGE_BUCKETS * 4];
+        // NDC heights: -1 is silence, 0 is half the band
+        let n = damage_rects(&raw(&[0.0, -1.0, -1.0, -1.0]), &raw(&[-1.0; 4]), &map, &mut out);
+        assert_eq!(n, 4, "one bar moved, one rect");
+        let (y, height) = (out[1], out[3]);
+        assert_eq!(y + height, h as i32, "reaches the top edge, where the bar hangs from");
+        assert!((45..=50).contains(&y), "and down past its tip: y={y}");
+    }
+
+    /// The reveal map has to put a fragment on the texel under it: with the
+    /// surface being the whole output and the image output-shaped, the four
+    /// corners of the surface land on the image's corners, y flipped
+    #[test]
+    fn the_reveal_map_lands_fragments_on_their_texels() {
+        let uv = |m: [f32; 4], x: f32, y: f32| [x * m[0] + m[2], y * m[1] + m[3]];
+        let m = reveal_map((1920, 1080), (1920, 1080), (0, 0), 1080);
+        assert_eq!(uv(m, 0.0, 0.0), [0.0, 1.0], "bottom left of the surface is the image's bottom left");
+        assert_eq!(uv(m, 1920.0, 1080.0), [1.0, 0.0]);
+        // A band along the bottom samples only the bottom of the image
+        let m = reveal_map((1920, 1080), (1920, 1080), (0, 1080 - 108), 108);
+        let top = uv(m, 0.0, 108.0);
+        assert!((top[1] - 0.9).abs() < 1e-6, "the band's top edge is 90% down: {top:?}");
+        // A 16:9 image on a 16:10 output is cropped at the sides, as the
+        // wallpaper is: the output's left edge is inside the image
+        let m = reveal_map((1920, 1080), (1920, 1200), (0, 0), 1200);
+        let left = uv(m, 0.0, 600.0);
+        assert!(left[0] > 0.0 && (left[1] - 0.5).abs() < 1e-5, "{left:?}");
     }
