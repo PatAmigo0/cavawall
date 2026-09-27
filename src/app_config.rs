@@ -161,14 +161,17 @@ impl WallpaperConfig {
     /// Prepended on write; `toml` cannot emit comments itself.
     const HEADER: &'static str = "\
 # cavawall settings for one wallpaper, keyed by its content hash so the file
-# survives a rename or a move. Written by cavawall-tune; hand edits are fine.
+# survives a rename or a move. Written by `cavawall tune`; hand edits are fine.
 #
 #   name    label for you; nothing reads it
 #   mode    bars | circle | curve, overriding general.mode in config.toml
-#   circle  diameter, anchor, inner_radius, inner_alpha, outer_alpha, bars
-#   bars    amount, gap, max_height, opacity, matte - each falls back to [bars]
-#   curve   occlude, bars, and one [[curve.path]] per stretch, each of
-#           which may carry its own occlude, or clip = false to opt out
+#   bars    amount, gap, max_height, opacity, matte, left, span, baseline,
+#           grow, radius, blocks, mirror, gradient, reveal, reveal_pulse -
+#           each falls back to [bars] in config.toml
+#   circle  bars, diameter, inner_radius, inner_alpha, outer_alpha, and
+#           anchor with margin_x/margin_y, or position = [x, y]
+#   curve   bars, height, width, fit, [[curve.occluder]] shapes, and one
+#           [[curve.path]] per stretch; a path names what hides it in cut_by
 #
 # Delete this file to go back to config.toml's defaults for this wallpaper.
 
