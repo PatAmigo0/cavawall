@@ -54,10 +54,48 @@ enum LogWhat {
         #[arg(short = 'n', long, default_value_t = 40)]
         lines: usize,
     },
+    /// The newest lines, then every new one as it is written
+    Watch {
+        #[arg(short = 'n', long, default_value_t = 20)]
+        lines: usize,
+    },
     /// Where the log is kept
     Path,
     /// Why the last instance stopped
     LastExit,
+}
+
+/// `log watch`: the tail, then new lines as they land. A shrunk file means
+/// the log rotated at startup, and the new one is read from its start
+fn follow(lines: usize) -> ! {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    if let Ok(text) = cavawall::log::tail(lines) {
+        print!("{text}");
+    }
+    let path = cavawall::log::path();
+    let mut pos = std::fs::metadata(&path).map_or(0, |m| m.len());
+    let mut buf = Vec::new();
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        let len = std::fs::metadata(&path).map_or(0, |m| m.len());
+        if len < pos {
+            pos = 0;
+        }
+        if len == pos {
+            continue;
+        }
+        if let Ok(mut f) = std::fs::File::open(&path) {
+            if f.seek(SeekFrom::Start(pos)).is_ok() {
+                buf.clear();
+                if f.read_to_end(&mut buf).is_ok() {
+                    pos += buf.len() as u64;
+                    let mut out = std::io::stdout().lock();
+                    let _ = out.write_all(&buf);
+                    let _ = out.flush();
+                }
+            }
+        }
+    }
 }
 
 /// The name this was run as: `cavawall <command>` hands over to this binary
@@ -125,6 +163,7 @@ fn main() {
                         exit(1);
                     }
                 },
+                LogWhat::Watch { lines } => follow(*lines),
                 LogWhat::Path => println!("{}", cavawall::log::path().display()),
                 LogWhat::LastExit => match std::fs::read_to_string(cavawall::log::last_exit_path()) {
                     Ok(text) => print!("{text}"),

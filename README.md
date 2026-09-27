@@ -145,7 +145,7 @@ cavawall reload     # re-read the config, in place
 cavawall refresh    # look again at the wallpaper, for a source it cannot watch
 cavawall move DP-1  # move to another monitor; no name picks automatically
 cavawall stop       # clear and exit
-cavawall log        # what happened; log last-exit says why it last stopped
+cavawall log        # what happened; log watch follows it live, log last-exit says why it last stopped
 cavawall help       # everything else
 ```
 
