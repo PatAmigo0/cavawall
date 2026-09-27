@@ -44,7 +44,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-env XDG_RUNTIME_DIR="$RT" XDG_STATE_HOME="$RT/state" WAYLAND_DISPLAY="$display" PATH="$RT/bin:$PATH" \
+env XDG_RUNTIME_DIR="$RT" CAVAWALL_LOG_DIR="$RT/state" WAYLAND_DISPLAY="$display" PATH="$RT/bin:$PATH" \
     FAKE_CAVA_SILENT="$SILENT" ${TEST_ENV:-} setsid "$bin" --config "$cfg" >"$RT/log" 2>&1 </dev/null &
 sleep "${WARMUP:-2}"
 PID=$(pgrep -f "^$bin --config $cfg$" | head -1)
