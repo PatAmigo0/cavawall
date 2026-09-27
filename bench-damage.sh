@@ -16,7 +16,10 @@ HZ=$(getconf CLK_TCK)
 ticks() { awk '{print $14+$15}' /proc/$H/stat; }
 
 echo ":: stopping fullscreen-watch and any running cavawall"
-pkill -x fullscreen-watch 2>/dev/null
+# -f with the full path, not -x: /proc comm is capped at 15 characters, so
+# "fullscreen-watch" never matches -x and the watcher would keep running. The
+# bracket keeps the pattern from matching this script's own command line
+pkill -f "^$HOME/.local/bin/fullscreen-watc[h]\$" 2>/dev/null
 pkill -x cavawall 2>/dev/null
 sleep 1
 
