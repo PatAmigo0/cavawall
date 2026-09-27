@@ -175,6 +175,7 @@ use std::{
 mod hypr;
 mod render;
 mod startup;
+mod toplevel;
 mod wayland;
 
 use render::{bar_band, damage_rects, reveal_map, surface_map, BarPlacement, DamageMap};
@@ -577,6 +578,9 @@ struct AppState {
     hypr_partial: Vec<u8>,
     /// cava suspended with SIGSTOP while nothing can be shown
     cava_stopped: bool,
+    /// Windows from the foreign-toplevel protocol, where Hyprland's IPC is
+    /// not there to ask
+    toplevels: toplevel::Toplevels,
     /// Name of the output we currently have a mapped surface on. None means
     /// nothing is drawn: either no output has been chosen yet, or the one we
     /// were on went away
@@ -1128,6 +1132,15 @@ impl AppState {
             // SAFETY: a plain signal to our own child
             unsafe { libc::kill(self.cava_pid as libc::pid_t, libc::SIGSTOP) };
             self.cava_stopped = true;
+        }
+    }
+
+    /// A window's fullscreen state or outputs changed, from foreign-toplevel
+    pub fn recheck_toplevels(&mut self, qh: &QueueHandle<Self>) {
+        let now = self.toplevels.covered(|o| self.output_state.info(o)?.name);
+        if now != self.covered {
+            self.covered = now;
+            self.retarget(qh);
         }
     }
 
