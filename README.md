@@ -60,11 +60,22 @@ beat - quiet bars keep their colour, loud ones show the picture.
   <img src="media/tune.png" width="100%" alt="cavawall tune: the wallpaper with a curve being edited, layers on the left, settings on the right">
 </p>
 
-`cavawall tune` opens an editor in your browser with a live preview in the
-real gradient, over the part of the image your monitor shows. Drag the row,
-the circle, or the points of a curve; draw occluders and choose which ones hide
-which path; bake an x-ray; set cava's input, sensitivity and smoothing. Save
-applies it to the running visualiser in place.
+`cavawall tune` opens an editor in your browser: the current wallpaper, with a
+live preview in the real gradient over the part your monitor shows. Save
+applies everything to the running visualiser in place.
+
+- **Shape**: drag the row, the circle or a curve's points on the image; bar
+  count, height, placement, anchors
+- **Look**: rounded tips, blocks, mirror, colours along the row, opacity and
+  matte; the x-ray with its picture and filters; the palette, stop by stop
+- **Cava**: input source, sensitivity, frame rate, smoothing; which monitor
+  and what a fullscreen window does; where the wallpaper and palette come
+  from; notifications
+- A **layers card** for a curve's paths and occluders, with a grid of which
+  occluder hides which path; it folds away. The **point editor** opens next
+  to the selected point. The settings panel can be **dragged anywhere**
+- Undo, redo, and a warning for unsaved changes. Settings shared by every
+  wallpaper are written into `config.toml` with its comments kept
 
 ### Live colours, any setup
 
@@ -72,6 +83,18 @@ The gradient can follow a live palette and changes in place, with no restart:
 Caelestia's, pywal's, or any JSON file a theme tool writes. The wallpaper is
 followed the same way - from Caelestia, swww, waypaper, a file, or a command
 of your own - so each wallpaper gets its own figure whatever sets it.
+
+### Behaves on any setup
+
+- **Steps aside for fullscreen windows** (`on_fullscreen`): moves to a free
+  monitor, or unmaps and suspends cava until one is free. Hyprland through its
+  IPC; Sway, river, niri, labwc and Wayfire through foreign-toplevel. Off by
+  default, and off costs nothing
+- **Notifications** for errors and crashes - optionally starts and stops -
+  through your notification daemon, Hyprland, or a command
+- **A log and a reason for every exit**: `cavawall log` shows what happened
+  and `cavawall log last-exit` why it last stopped, a crash included. Every
+  failure a user can meet says what to do about it
 
 ### Cheap to leave running
 
