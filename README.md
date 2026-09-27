@@ -152,6 +152,7 @@ per-wallpaper settings to `wallpapers/<key>.toml` beside it. The annotated
 | `general.mode` | `bars`, `circle` or `curve` |
 | `general.framerate` | frames per second |
 | `general.preferred_output` | monitor name; omit to prefer an external monitor over the laptop panel |
+| `general.on_fullscreen` | `move` off a monitor a fullscreen window covers, `pause`, or `ignore` (default); Hyprland |
 | `general.channels`, `general.mono_option` | `mono` for one sweep across every bar; stereo mirrors the halves |
 | `general.audio_source` | cava's input; omit for its default |
 | `general.sleep_timer` | seconds of silence before cava sleeps; waking takes ~0.45s |

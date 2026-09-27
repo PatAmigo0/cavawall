@@ -172,6 +172,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod hypr;
 mod render;
 mod startup;
 mod wayland;
@@ -568,6 +569,14 @@ struct AppState {
     /// preferred_output. None means choose automatically - an external
     /// monitor if one is connected, the built-in panel otherwise
     pinned_output: Option<String>,
+    /// `general.on_fullscreen`, and the monitors a visible fullscreen window
+    /// covers right now. Empty and untouched when the policy is ignore
+    on_fullscreen: FullscreenPolicy,
+    covered: std::collections::BTreeSet<String>,
+    /// A line of Hyprland events split across reads
+    hypr_partial: Vec<u8>,
+    /// cava suspended with SIGSTOP while nothing can be shown
+    cava_stopped: bool,
     /// Name of the output we currently have a mapped surface on. None means
     /// nothing is drawn: either no output has been chosen yet, or the one we
     /// were on went away
@@ -706,6 +715,8 @@ impl AppState {
                     "mode": self.mode,
                     "pinned_output": self.pinned_output,
                     "placed_on": self.placed_on,
+                    "covered": self.covered,
+                    "on_fullscreen": self.on_fullscreen,
                     "output_size": self.placed_size,
                     "bars": self.bar_count,
                     "bars_from": self.bars_from,
@@ -971,6 +982,9 @@ impl AppState {
     /// the pinned output - when fullscreen-watch says "eDP-1", falling back
     /// to the monitor it just ruled out would defeat the point
     fn output_rank(&self, name: &str) -> Option<u8> {
+        if self.on_fullscreen == FullscreenPolicy::Move && self.covered.contains(name) {
+            return None;
+        }
         match &self.pinned_output {
             Some(pin) => (pin == name).then_some(0),
             None => Some(u8::from(is_builtin_connector(name))),
@@ -1021,10 +1035,14 @@ impl AppState {
             self.placed_size = None;
         }
 
-        let Some((output, info, name)) = self.choose_output() else {
-            if self.placed_on.take().is_some() || self.placed_size.take().is_some() {
-                say!("no usable output, idling until one appears");
+        let chosen = self
+            .choose_output()
+            .filter(|(_, _, name)| !(self.on_fullscreen == FullscreenPolicy::Pause && self.covered.contains(name)));
+        let Some((output, info, name)) = chosen else {
+            if self.placed_on.is_some() {
+                say!("nothing to show on: {}", if self.covered.is_empty() { "no usable output" } else { "covered by fullscreen" });
             }
+            self.hide();
             return;
         };
         if self.placed_on.as_deref() == Some(name.as_str()) && self.placed_size == info.logical_size
@@ -1097,6 +1115,36 @@ impl AppState {
             .reduce(f32::min)
     }
 
+    /// Nothing can be shown: unmap the surface and suspend cava, so a covered
+    /// or outputless instance costs nothing until it can draw again
+    fn hide(&mut self) {
+        if self.placed_on.take().is_some() {
+            self.surface.attach(None, 0, 0);
+            self.surface.commit();
+        }
+        self.placed_size = None;
+        if !self.cava_stopped {
+            // SAFETY: a plain signal to our own child
+            unsafe { libc::kill(self.cava_pid as libc::pid_t, libc::SIGSTOP) };
+            self.cava_stopped = true;
+        }
+    }
+
+    /// Hyprland said something that may cover or uncover a monitor
+    pub fn on_hypr(&mut self, events: &mut std::os::unix::net::UnixStream) {
+        if !hypr::relevant(events, &mut self.hypr_partial) {
+            return;
+        }
+        // Unreadable is not "nothing covered": keep the last answer
+        if let Some(now) = hypr::covered() {
+            if now != self.covered {
+                self.covered = now;
+                let qh = self.qh.clone();
+                self.retarget(&qh);
+            }
+        }
+    }
+
     /// Build a fresh layer surface on `output` and start drawing to it
     ///
     /// Moving is always a rebuild: a layer surface belongs to the output it was
@@ -1113,6 +1161,11 @@ impl AppState {
         };
         if debug_enabled() {
             say!("placing on {name} ({}x{})", logical_size.0, logical_size.1);
+        }
+        if self.cava_stopped {
+            // SAFETY: a plain signal to our own child
+            unsafe { libc::kill(self.cava_pid as libc::pid_t, libc::SIGCONT) };
+            self.cava_stopped = false;
         }
         self.surface = self.compositor.create_surface(qh);
         let fresh = self.layer_shell.create_layer_surface(

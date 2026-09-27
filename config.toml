@@ -31,6 +31,10 @@ background_color = { hex = "#000000", alpha = 0.0 }
 # A name that matches nothing connected draws nothing at all, deliberately,
 # rather than falling back to some other monitor.
 # preferred_output = ""
+# While a fullscreen window covers the monitor: "move" to a free one (pausing
+# when none is left), "pause" in place, or "ignore" (the default). Paused means
+# the surface unmapped and cava suspended. Hyprland only for now
+# on_fullscreen = "move"
 # Source cava captures from, forwarded to its [input] section as
 # method=pulse, source=<this>. Left unset, cava monitors whatever the current
 # DEFAULT SINK is - which goes silent the moment that sink's monitor does
