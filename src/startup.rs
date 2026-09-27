@@ -331,7 +331,12 @@ pub(crate) fn run() {
         let flags = libc::fcntl(cava_fd, libc::F_GETFL);
         libc::fcntl(cava_fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
     }
-    let conn = Connection::connect_to_env().unwrap();
+    // The one failure a person meets by running this outside a Wayland
+    // session: a message, not a panic. cava dies with us on exit
+    let conn = Connection::connect_to_env().unwrap_or_else(|e| {
+        eprintln!("cavawall: cannot reach a Wayland compositor ({e}); is WAYLAND_DISPLAY set?");
+        exit(1);
+    });
     let (globals, mut event_queue, compositor, layer_shell) = bind_shell(&conn);
     let qh = event_queue.handle();
     let mut event_loop: EventLoop<AppState> =
