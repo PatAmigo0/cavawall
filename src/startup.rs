@@ -3,7 +3,7 @@
 use super::*;
 
 fn default_config_path() -> PathBuf {
-    let home = PathBuf::from(env::var_os("HOME").expect("Unable to get home directory"));
+    let home = PathBuf::from(env::var_os("HOME").unwrap_or_else(|| fatal!("HOME is not set, so there is no config to find; pass --config")));
     let own = home.join(".config/cavawall/config.toml");
     if own.exists() {
         return own;
@@ -12,8 +12,8 @@ fn default_config_path() -> PathBuf {
     // keeps working
     let inherited = home.join(".config/wallpaper-cava/config.toml");
     if inherited.exists() {
-        eprintln!(
-            "cavawall: using {}\n\
+        say!(
+            "using {}\n\
              cavawall: move it to ~/.config/cavawall/config.toml when convenient",
             inherited.display()
         );
@@ -32,7 +32,7 @@ fn claim_single_instance() -> fs::File {
     let file = match fs::OpenOptions::new().create(true).write(true).truncate(false).open(&path) {
         Ok(f) => f,
         Err(e) => {
-            eprintln!("cavawall: {}: {e}", path.display());
+            say!("{}: {e}", path.display());
             exit(1);
         }
     };
@@ -63,7 +63,7 @@ fn claim_single_instance() -> fs::File {
         }
         exit(0);
     }
-    eprintln!("cavawall: cannot lock {}", path.display());
+    say!("cannot lock {}", path.display());
     exit(1);
 }
 
@@ -74,7 +74,8 @@ fn claim_single_instance() -> fs::File {
 fn bind_shell(conn: &Connection) -> (GlobalList, EventQueue<AppState>, CompositorState, LayerShell) {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let (globals, queue) = registry_queue_init::<AppState>(conn).unwrap();
+        let (globals, queue) = registry_queue_init::<AppState>(conn)
+            .unwrap_or_else(|e| fatal!("cannot read the compositor's globals: {e}"));
         let qh = queue.handle();
         match (
             CompositorState::bind(&globals, &qh),
@@ -85,9 +86,10 @@ fn bind_shell(conn: &Connection) -> (GlobalList, EventQueue<AppState>, Composito
             }
             _ if Instant::now() < deadline => sleep(Duration::from_millis(50)),
             (compositor, _) => {
-                let missing = if compositor.is_err() { "wl_compositor" } else { "layer shell" };
-                eprintln!("cavawall: {missing} not available");
-                exit(1);
+                if compositor.is_err() {
+                    fatal!("the compositor offers no wl_compositor");
+                }
+                fatal!("the compositor has no wlr-layer-shell, which cavawall draws with (Hyprland, Sway, river and niri have it; GNOME does not)");
             }
         }
     }
@@ -120,7 +122,7 @@ fn migrate_curves(dir: &std::path::Path, config: &app_config::Config) {
         if path.parent().is_some_and(|p| std::fs::create_dir_all(p).is_ok())
             && std::fs::write(&path, body).is_ok()
         {
-            eprintln!("cavawall: migrated curve {key} to {}", path.display());
+            say!("migrated curve {key} to {}", path.display());
         }
     }
 }
@@ -146,12 +148,16 @@ pub(crate) fn run() {
         (Some(flag), Some(path), None) if flag == "--config" => PathBuf::from(path),
         (None, _, _) => default_config_path(),
         _ => {
-            eprintln!("cavawall: --config takes one path");
+            say!("--config takes one path");
             exit(2);
         }
     };
     // Before cava is spawned, so a duplicate costs nothing
     let _instance = claim_single_instance();
+    // After the lock: a second instance, which stands down at once, must not
+    // rotate the running one's log away from under it
+    cavawall::log::init();
+    say!("starting, version {}, config {}", env!("CARGO_PKG_VERSION"), config_filename.display());
     // Shut down cleanly on SIGTERM so the surface can be cleared first. A hard
     // kill leaves the last frame burnt into the background: the layer surface
     // goes away, but Hyprland does not reliably repaint underneath it, so a
@@ -165,14 +171,26 @@ pub(crate) fn run() {
 
     // A typo in a hand-edited file is the likeliest failure here: said with
     // the file, line and column toml reports, then exit 1, never a panic
-    let config_str = fs::read_to_string(&config_filename).unwrap_or_else(|e| {
-        eprintln!("cavawall: cannot read {}: {e}", config_filename.display());
-        exit(1);
-    });
-    let config: Config = toml::from_str(&config_str).unwrap_or_else(|e| {
-        eprintln!("cavawall: {}: {e}", config_filename.display());
-        exit(1);
-    });
+    let config_str = fs::read_to_string(&config_filename)
+        .unwrap_or_else(|e| fatal!("cannot read {}: {e}", config_filename.display()));
+    let config: Config = toml::from_str(&config_str)
+        .unwrap_or_else(|e| fatal!("{}: {e}", config_filename.display()));
+    // Colours are checked here, once, so a typo is a message naming the key
+    // rather than a panic wherever the value is first used
+    let bad_colour = |hex: &str| app_config::try_color_from_hex(hex, 1.0).is_none();
+    let hex_of = |c: &ConfigColor| match c {
+        ConfigColor::Simple(h) => h.clone(),
+        ConfigColor::Complex(c) => c.hex.clone(),
+    };
+    for (key, colour) in config.colors.iter().map(|(k, c)| (format!("colors.{k}"), c)).chain(std::iter::once((
+        "general.background_color".to_owned(),
+        &config.general.background_color,
+    ))) {
+        let hex = hex_of(colour);
+        if bad_colour(&hex) {
+            fatal!("{}: {key} = {hex:?} is not a colour; write it as \"#rrggbb\"", config_filename.display());
+        }
+    }
     // The bar count is startup-only: it is written into the spawned cava's
     // config and sizes the instance buffers, so a change re-execs
     let follow_bars = config.scheme.as_ref().and_then(|s| s.bars).unwrap_or(false);
@@ -216,7 +234,7 @@ pub(crate) fn run() {
                 .and_then(|w| w.curve.as_ref())
                 .or_else(|| config.curves.as_ref()?.get(&key));
             if found.is_none() && debug_enabled() {
-                eprintln!("cavawall: no curve for wallpaper {key}, falling back to bars");
+                say!("no curve for wallpaper {key}, falling back to bars");
             }
             found
         })
@@ -252,7 +270,7 @@ pub(crate) fn run() {
     // asserted: one bad per-wallpaper value must not take the visualiser down
     const MAX_BARS: u32 = 4096;
     if !(1..=MAX_BARS).contains(&bar_count) {
-        eprintln!("cavawall: bar count {bar_count} from {bars_from} is outside 1..={MAX_BARS}, clamping");
+        say!("bar count {bar_count} from {bars_from} is outside 1..={MAX_BARS}, clamping");
     }
     let bar_count = bar_count.clamp(1, MAX_BARS);
     let mut cava_output_config: HashMap<String, String> = HashMap::from([
@@ -295,7 +313,7 @@ pub(crate) fn run() {
     // with its config on stdin, so there is no file to inspect afterwards and
     // no other way to check a setting actually got through
     if debug_enabled() {
-        eprintln!("cavawall: cava config >>>\n{string_cava_config}<<<");
+        say!("cava config >>>\n{string_cava_config}<<<");
     }
     let mut cmd = Command::new("cava");
     cmd.arg("-p").arg("/dev/stdin");
@@ -318,15 +336,17 @@ pub(crate) fn run() {
         .stdout(Stdio::piped())
         .stdin(Stdio::piped())
         .spawn()
-        .expect("failed to spawn cava process");
+        .unwrap_or_else(|e| fatal!("cannot start cava ({e}); is it installed and on PATH?"));
     // Captured before the field moves below leave `cava_process` partially moved
     // and unusable as a whole. Needed so a re-exec can reap this child: see
     // reexec(), where not having it leaked a zombie per bar-count change
     let cava_pid = cava_process.id();
-    let mut cava_stdin = cava_process.stdin.unwrap();
-    cava_stdin.write_all(string_cava_config.as_bytes()).unwrap();
+    let mut cava_stdin = cava_process.stdin.expect("stdin was piped");
+    if let Err(e) = cava_stdin.write_all(string_cava_config.as_bytes()) {
+        fatal!("cava exited before reading its config ({e}); run cava by hand to see why");
+    }
     drop(cava_stdin);
-    let cava_stdout = cava_process.stdout.unwrap();
+    let cava_stdout = cava_process.stdout.expect("stdout was piped");
     // Non-blocking, and read only when the event loop says it is readable:
     // nothing ever waits on cava, so no frame, signal or order waits either
     let cava_fd = cava_stdout.as_raw_fd();
@@ -337,10 +357,8 @@ pub(crate) fn run() {
     }
     // The one failure a person meets by running this outside a Wayland
     // session: a message, not a panic. cava dies with us on exit
-    let conn = Connection::connect_to_env().unwrap_or_else(|e| {
-        eprintln!("cavawall: cannot reach a Wayland compositor ({e}); is WAYLAND_DISPLAY set?");
-        exit(1);
-    });
+    let conn = Connection::connect_to_env()
+        .unwrap_or_else(|e| fatal!("cannot reach a Wayland compositor ({e}); is WAYLAND_DISPLAY set?"));
     let (globals, mut event_queue, compositor, layer_shell) = bind_shell(&conn);
     let qh = event_queue.handle();
     let mut event_loop: EventLoop<AppState> =
@@ -381,12 +399,11 @@ pub(crate) fn run() {
     layer_surface.set_anchor(Anchor::TOP);
     surface.commit();
     drop(input_region);
-    egl.bind_api(egl::OPENGL_API).unwrap();
-    let egl_display = unsafe {
-        egl.get_display(conn.display().id().as_ptr() as *mut std::ffi::c_void)
-            .unwrap()
-    };
-    egl.initialize(egl_display).unwrap();
+    egl.bind_api(egl::OPENGL_API)
+        .unwrap_or_else(|e| fatal!("EGL has no desktop OpenGL API ({e}); is the GPU driver's EGL installed?"));
+    let egl_display = unsafe { egl.get_display(conn.display().id().as_ptr() as *mut std::ffi::c_void) }
+        .unwrap_or_else(|| fatal!("EGL has no display for this Wayland connection"));
+    egl.initialize(egl_display).unwrap_or_else(|e| fatal!("EGL will not initialise ({e})"));
     // Colour only. Occluders live in a texture filled once per configure, so
     // there is no stencil or depth buffer to allocate, clear or scan out beside
     // every frame
@@ -404,8 +421,9 @@ pub(crate) fn run() {
 
     let egl_config = egl
         .choose_first_config(egl_display, &ATTRIBUTES)
-        .unwrap()
-        .unwrap();
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| fatal!("EGL offers no 8-bit RGBA config"));
     // 4.3 is the floor: the shaders are `#version 430 core` and index SSBOs.
     // 4.5 adds direct state access, which draw() uses when it is there, so the
     // higher version is asked for first and 4.3 answers everything else
@@ -425,9 +443,10 @@ pub(crate) fn run() {
         .find_map(|minor| {
             egl.create_context(egl_display, egl_config, None, &context_attributes(minor)).ok()
         })
-        .expect("no OpenGL 4.3 core context: cavawall needs SSBOs");
+        .unwrap_or_else(|| fatal!("the GPU driver gives no OpenGL 4.3 core context, which cavawall needs"));
 
-    let wl_egl_surface = WlEglSurface::new(surface.id(), 256, 256).unwrap();
+    let wl_egl_surface = WlEglSurface::new(surface.id(), 256, 256)
+        .unwrap_or_else(|e| fatal!("cannot create the EGL window ({e})"));
     let egl_surface = unsafe {
         egl.create_window_surface(
             egl_display,
@@ -435,24 +454,26 @@ pub(crate) fn run() {
             wl_egl_surface.ptr() as egl::NativeWindowType,
             None,
         )
-        .unwrap()
-    };
+    }
+    .unwrap_or_else(|e| fatal!("cannot create the EGL surface ({e})"));
     egl.make_current(
         egl_display,
         Some(egl_surface),
         Some(egl_surface),
         Some(egl_context),
     )
-    .unwrap();
+    .unwrap_or_else(|e| fatal!("cannot make the GL context current ({e})"));
     // The compositor paces this surface with frame callbacks, which is the
     // only pacing a layer surface should have. The default interval of 1 adds
     // the driver's own wait for vsync on top of that, inside every swap.
     // Applies to the surface bound to the current context, so it goes after
     // make_current
     if egl.swap_interval(egl_display, 0).is_err() && debug_enabled() {
-        eprintln!("cavawall: swap interval unchanged, frames pace on vsync too");
+        say!("swap interval unchanged, frames pace on vsync too");
     }
-    gl::load_with(|name| egl.get_proc_address(name).unwrap() as *const std::ffi::c_void);
+    // Null for what the driver lacks: gl asks for every function it knows,
+    // and a driver missing one never called must not stop the start
+    gl::load_with(|name| egl.get_proc_address(name).map_or(std::ptr::null(), |f| f as *const std::ffi::c_void));
     // CStr, not CString::from_raw: glGetString returns a pointer into the
     // driver's static string table and from_raw claims ownership, which would
     // free a block Rust never allocated. A null returns None
@@ -465,7 +486,7 @@ pub(crate) fn run() {
         }
     };
 
-    println!("OpenGL version: {version}");
+    say!("OpenGL {version}");
     // Immutable buffer storage, and so a persistent mapping, is core from 4.4.
     // The driver decides that, not the build, so it is read from the context
     // that was granted
@@ -475,19 +496,19 @@ pub(crate) fn run() {
         gl::GetIntegerv(gl::MINOR_VERSION, &raw mut minor);
         let ok = major > 4 || (major == 4 && minor >= 4);
         if debug_enabled() {
-            eprintln!("cavawall: GL {major}.{minor}, persistent height ring {}", if ok { "on" } else { "off" });
+            say!("GL {major}.{minor}, persistent height ring {}", if ok { "on" } else { "off" });
         }
         ok
     };
-    println!("EGL version: {}", egl.version());
+    say!("EGL {}", egl.version());
     // Resolved once, here, and carried into AppState. draw() then only matches
     // on the stored Option, so a frame costs a null check - no env lookup and
     // no eglGetProcAddress. Reporting the same value that gets used, rather
     // than resolving a second time, keeps one source of truth for it
     let swap_damage = load_swap_with_damage(egl_display);
     if debug_enabled() {
-        eprintln!(
-            "cavawall: swap-with-damage {}",
+        say!(
+            "swap-with-damage {}",
             if swap_damage.is_some() {
                 "available"
             } else {
@@ -521,7 +542,7 @@ pub(crate) fn run() {
         .and_then(|key| fs::read(config_dir.join("wallpapers").join(format!("{key}.reveal.qoi"))).ok())
         .and_then(|bytes| cavawall::qoi::decode(&bytes));
     if reveal_mix > 0.0 && reveal_image.is_none() {
-        eprintln!("cavawall: reveal is set but wallpapers/<key>.reveal.qoi will not read; drawing the gradient");
+        say!("reveal is set but wallpapers/<key>.reveal.qoi will not read; drawing the gradient");
     }
     let reveal_size = reveal_image.as_ref().map(|i| (i.width, i.height));
     // Styles likewise: each is a variant, compiled in only when set
@@ -719,7 +740,7 @@ pub(crate) fn run() {
                 curve_fit = cfg.fit.unwrap_or_default();
                 curve_image = wallpaper.as_ref().and_then(|(_, size)| *size);
                 if curve_image.is_none() && debug_enabled() {
-                    eprintln!("cavawall: wallpaper size unreadable, treating it as output-shaped");
+                    say!("wallpaper size unreadable, treating it as output-shaped");
                 }
                 gl::Uniform1f(
                     gl::GetUniformLocation(shader_program, c"InnerAlpha".as_ptr()),
@@ -962,7 +983,9 @@ pub(crate) fn run() {
     // below sees every connected monitor at once and places exactly once. The
     // OutputHandler callbacks it fires do nothing while startup_settled is
     // false
-    event_queue.roundtrip(&mut simple_window).unwrap();
+    event_queue
+        .roundtrip(&mut simple_window)
+        .unwrap_or_else(|e| fatal!("the compositor dropped the connection during setup ({e})"));
     simple_window.startup_settled = true;
     simple_window.retarget(&qh);
 
@@ -980,7 +1003,7 @@ pub(crate) fn run() {
                 )
                 .unwrap();
         }
-        Err(e) => eprintln!("cavawall: no control socket: {e}"),
+        Err(e) => say!("no control socket: {e}"),
     }
 
     // Every input is an event source, so the loop sleeps with no timeout and
@@ -1011,12 +1034,15 @@ pub(crate) fn run() {
         let wake = unsafe { <std::os::fd::OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(wake) };
         loop_handle
             .insert_source(Generic::new(wake, Interest::READ, CalloopMode::Level), |_, _, state| {
-                state.clear_and_exit()
+                state.clear_and_exit("SIGTERM or SIGINT")
             })
             .unwrap();
     }
     WaylandSource::new(conn.clone(), event_queue)
         .insert(loop_handle)
         .unwrap();
-    event_loop.run(None, &mut simple_window, AppState::tick).unwrap();
+    if let Err(e) = event_loop.run(None, &mut simple_window, AppState::tick) {
+        // A compositor that restarts or crashes ends up here
+        fatal!("the event loop stopped: {e}; the compositor connection most likely closed");
+    }
 }

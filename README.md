@@ -124,8 +124,14 @@ cavawall status     # what it is drawing
 cavawall reload     # re-read the config, in place
 cavawall move DP-1  # move to another monitor; no name picks automatically
 cavawall stop       # clear and exit
+cavawall log        # what happened; log last-exit says why it last stopped
 cavawall help       # everything else
 ```
+
+Everything it prints also goes to `~/.local/state/cavawall/cavawall.log`, and
+the reason the last instance stopped - a stop, a signal, an error, a crash -
+to `last-exit`, so a failure is still readable when it happened with no
+terminal attached.
 
 Stop it with `cavawall stop` or SIGTERM, never SIGKILL: the exit path clears
 the surface, and a hard kill can leave the last frame on the wallpaper.

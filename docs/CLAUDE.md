@@ -81,6 +81,17 @@ paints one transparent frame and round-trips; a hard kill leaves the last bars
 burnt onto the wallpaper. cava is tied to us with `PR_SET_PDEATHSIG` and is
 killed on every exit path.
 
+## Messages and failures
+
+**Print with `say!`, fail with `fatal!`; never `eprintln!`, never a panic on a
+path a user can reach.** The session's instance runs with no terminal, so
+`say!` writes the line to stderr and to `~/.local/state/cavawall/cavawall.log`;
+`fatal!` also records it in `last-exit` and exits 1. A panic hook and a
+fatal-signal handler record the rest (`log.rs`), and every clean stop names
+its reason through `clear_and_exit`. A failure worth a message says what to
+do about it. `expect` stays only where the invariant is the program's own
+(a piped stdin exists), not the system's.
+
 ## The loop
 
 Everything is an event source and the loop sleeps with **no timeout**: cava's

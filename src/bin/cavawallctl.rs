@@ -35,8 +35,27 @@ enum Command {
     Kill,
     /// Open the editor for the current wallpaper
     Tune,
+    /// Read the log: what happened, and why the last instance stopped
+    Log {
+        #[command(subcommand)]
+        what: Option<LogWhat>,
+    },
     /// Print a shell completion script
     Completions { shell: Shell },
+}
+
+#[derive(Subcommand)]
+enum LogWhat {
+    /// The newest lines (the default)
+    Show {
+        /// How many lines
+        #[arg(short = 'n', long, default_value_t = 40)]
+        lines: usize,
+    },
+    /// Where the log is kept
+    Path,
+    /// Why the last instance stopped
+    LastExit,
 }
 
 /// The name this was run as: `cavawall <command>` hands over to this binary
@@ -93,6 +112,23 @@ fn main() {
     match &cli.command {
         Command::Completions { shell } => {
             clap_complete::generate(*shell, &mut command(), name, &mut std::io::stdout());
+            return;
+        }
+        Command::Log { what } => {
+            match what.as_ref().unwrap_or(&LogWhat::Show { lines: 40 }) {
+                LogWhat::Show { lines } => match cavawall::log::tail(*lines) {
+                    Ok(text) => print!("{text}"),
+                    Err(e) => {
+                        eprintln!("{name}: no log at {} ({e})", cavawall::log::path().display());
+                        exit(1);
+                    }
+                },
+                LogWhat::Path => println!("{}", cavawall::log::path().display()),
+                LogWhat::LastExit => match std::fs::read_to_string(cavawall::log::last_exit_path()) {
+                    Ok(text) => print!("{text}"),
+                    Err(_) => println!("no exit recorded yet"),
+                },
+            }
             return;
         }
         Command::Tune => {
@@ -175,7 +211,12 @@ fn main() {
         Command::Move { output } => Request::Move { output: output.clone() },
         Command::Stop => Request::Stop,
         Command::Reload => Request::Reload,
-        Command::Start | Command::Restart | Command::Kill | Command::Tune | Command::Completions { .. } => {
+        Command::Start
+        | Command::Restart
+        | Command::Kill
+        | Command::Tune
+        | Command::Log { .. }
+        | Command::Completions { .. } => {
             unreachable!("handled above")
         }
     };
