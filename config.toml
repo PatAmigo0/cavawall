@@ -37,6 +37,10 @@ background_color = { hex = "#000000", alpha = 0.0 }
 # not work (a Bluetooth A2DP sink, for one). Point it at a source that stays
 # put across output switches.
 # audio_source = ""
+# Seconds of silence before cava sleeps. It then stops analysing and nearly
+# stops writing, so a parked cavawall barely wakes; waking costs ~0.45s
+# (measured) before the first bar moves, so only long silences pay it.
+# sleep_timer = 5
 
 [bars]
 amount = 76
@@ -49,6 +53,19 @@ gap = 0.1
 # stops the gradient reading as something lit. 0 is the gradient as written.
 # opacity = 1.0
 # matte = 0.0
+# Round each bar's tip, as a fraction of its width: 0.5 is a semicircle.
+# Bars and curve modes. Zero compiles the rounding out of the shader.
+# radius = 0.0
+# Where the row sits, as fractions of the output. Unset is the full width
+# along the bottom. `baseline` is where the bars stand, from the top; with
+# grow = "down" they hang from it instead, for a row along the top.
+# left = 0.0
+# span = 1.0
+# baseline = 1.0
+# grow = "up"
+# X-ray: bars show wallpapers/<key>.reveal.qoi instead of the gradient, 0 to
+# 1. cavawall-tune bakes that image; without it this does nothing.
+# reveal = 0.0
 
 # Only read when mode = "circle". Every key is optional.
 # [circle]
@@ -63,9 +80,13 @@ gap = 0.1
 # # so 1.0/1.0 leaves the palette exactly as written.
 # inner_alpha = 1.0
 # outer_alpha = 0.4
-# # Logical pixels from the centre of the output, positive right and down.
-# offset_x = 0
-# offset_y = 0
+# # Which point of the output it is pinned to: center, top, bottom, left,
+# # right, top-left, top-right, bottom-left or bottom-right, and how far in.
+# anchor = "center"
+# margin_x = 0
+# margin_y = 0
+# # Or its centre, by hand, as fractions of the output; this wins over anchor.
+# # position = [0.7, 0.3]
 
 # Only read when mode = "curve". Bars stand along a path you draw over the
 # wallpaper, which is why each block is keyed by the wallpaper's CONTENT hash:
