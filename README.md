@@ -41,7 +41,9 @@ portable binary set `RUSTFLAGS` in the environment, which takes precedence.
 
 That installs 3 binaries into `~/.local/bin`: `cavawall` itself, cavawallctl, and
 `cavawall-tune`, the editor. Make sure that directory is on your
-`PATH`.
+`PATH`. You only need the one name: bare `cavawall` is the visualiser, and
+`cavawall <command>` is everything else - `cavawall status`, `cavawall tune`,
+`cavawall reload`, `cavawall stop`, `cavawall help`.
 
 Then copy the annotated defaults and start it:
 
@@ -222,7 +224,7 @@ pixel. Without `reveal` the feature is compiled out of the shaders
 ## The editor
 
 ```bash
-cavawall-tune
+cavawall tune
 ```
 
 Serves an editor on localhost and prints the URL. It loads the **current**

@@ -46,8 +46,21 @@ fn claim_single_instance() -> fs::File {
         let _ = (&file).flush();
         return file;
     }
-    // Someone else owns the surface. 0, so a launcher reads it as stand-down
+    // Someone else owns the surface. 0, so a launcher reads it as stand-down;
+    // a person at a terminal is told what is running and what to type
     if std::io::Error::last_os_error().kind() == std::io::ErrorKind::WouldBlock {
+        if unsafe { libc::isatty(2) } == 1 {
+            let pid = fs::read_to_string(&path).unwrap_or_default();
+            eprintln!(
+                "cavawall is already running (pid {}).\n\
+                 \n  cavawall status    what it is drawing\
+                 \n  cavawall tune      edit this wallpaper's figure\
+                 \n  cavawall reload    re-read the config\
+                 \n  cavawall stop      clear and exit\
+                 \n  cavawall help      everything else",
+                pid.trim()
+            );
+        }
         exit(0);
     }
     eprintln!("cavawall: cannot lock {}", path.display());
@@ -127,13 +140,14 @@ fn known_wallpapers(dir: &std::path::Path) -> Vec<String> {
 }
 
 pub(crate) fn run() {
+    dispatch();
     let mut args = env::args_os().skip(1);
     let config_filename = match (args.next(), args.next(), args.next()) {
-        (None, _, _) => default_config_path(),
         (Some(flag), Some(path), None) if flag == "--config" => PathBuf::from(path),
+        (None, _, _) => default_config_path(),
         _ => {
-            print_help();
-            exit(0);
+            eprintln!("cavawall: --config takes one path");
+            exit(2);
         }
     };
     // Before cava is spawned, so a duplicate costs nothing
