@@ -915,8 +915,14 @@ function buildInspector() {
   s = section('X-ray', '', 'bars show an image');
   row({k: 'reveal', label: 'Reveal', min: 0, max: 1, step: 0.01, hint: 'how much of the image replaces the gradient'}, s);
   const src = document.createElement('div'); src.className = 'row';
-  src.innerHTML = `<label>Image</label><select id=revealSrc style="grid-column:2/4"><option value=wallpaper>This wallpaper</option>${S.ctx.reveal_source ? `<option value=auto>${S.ctx.reveal_source.split('/').pop()}</option>` : ''}</select>`;
+  src.innerHTML = `<label>Image</label><select id=revealSrc style="grid-column:2/4"><option value=wallpaper>This wallpaper</option>${S.ctx.reveal_source ? `<option value=auto>${escapeHtml(S.ctx.reveal_source.split('/').pop())}</option>` : ''}</select>`;
   s.appendChild(src);
+  // Only pictures that exist are listed, so say where the other one goes
+  if (!S.ctx.reveal_source) {
+    const wp = S.ctx.wallpaper || '', dir = wp.slice(0, wp.lastIndexOf('/') + 1).replace(/^\/home\/[^/]+\//, '~/');
+    const stem = wp.split('/').pop().replace(/\.[^.]+$/, '');
+    s.insertAdjacentHTML('beforeend', `<p class=note>To reveal a different picture, save it as <b>${escapeHtml(stem)}_reveal.png</b> (or .jpg, .webp) in <b>${escapeHtml(dir)}</b>, then reload this page.</p>`);
+  }
   $('revealSrc').value = S.reveal.source;
   $('revealSrc').onchange = e => { snapshot(); S.reveal.source = e.target.value; S.reveal.changed = true; revealSourceChanged(); commit(); };
   const FX = [['invert', 'Invert', 0, 100, 0, '%'], ['grayscale', 'Grey', 0, 100, 0, '%'], ['sepia', 'Sepia', 0, 100, 0, '%'], ['saturate', 'Saturate', 0, 300, 100, '%'],
@@ -932,7 +938,7 @@ function buildInspector() {
     el.querySelector('.reset').onclick = () => { snapshot(); delete S.reveal.filter[k]; sync(); S.reveal.changed = true; bakeRevealCanvas(); commit(); };
     s.appendChild(el); ROWS.push(sync); sync();
   }
-  s.insertAdjacentHTML('beforeend', `<p class=note>The image is baked on save and read once when cavawall starts: a frame costs one texture read, nothing more. A <b>${escapeHtml(((S.ctx.wallpaper || '').split('/').pop() || '').replace(/\.[^.]+$/, ''))}_reveal.*</b> file beside the wallpaper is offered as the image.</p>`);
+  s.insertAdjacentHTML('beforeend', `<p class=note>The image is baked on save and read once when cavawall starts: a frame costs one texture read, nothing more.</p>`);
 
   s = section('View', '');
   s.innerHTML += `<div class=chips><button class=chip id=vFrame>Screen frame</button><button class=chip id=vHandles>Handles</button></div>
