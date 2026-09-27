@@ -906,6 +906,15 @@ pub(crate) fn run() {
     // here breaks all three at once
     //
     // Unset, with no preferred_output, means choose automatically
+    // Opt-in: with the policy at ignore, Hyprland's socket is never opened.
+    // The first reading comes before the first placement, so an instance
+    // started under a game does not flash onto its monitor first
+    let on_fullscreen = config.general.on_fullscreen.unwrap_or_default();
+    let hypr_events = (on_fullscreen != FullscreenPolicy::Ignore).then(hypr::events).flatten();
+    if on_fullscreen != FullscreenPolicy::Ignore && hypr_events.is_none() {
+        say!("on_fullscreen is set, but Hyprland's event socket is not there; ignoring fullscreen windows");
+    }
+    let covered = hypr_events.as_ref().and_then(|_| hypr::covered()).unwrap_or_default();
     let pinned_output = env::var("CAVAWALL_OUTPUT")
         .ok()
         .filter(|s| !s.is_empty())
@@ -980,6 +989,10 @@ pub(crate) fn run() {
         frame_pending: false,
         redraw: false,
         pinned_output,
+        on_fullscreen,
+        covered,
+        hypr_partial: Vec::new(),
+        cava_stopped: false,
         placed_on: None,
         placed_size: None,
         startup_settled: false,
@@ -1031,6 +1044,15 @@ pub(crate) fn run() {
         loop_handle
             .insert_source(Generic::new(fd, Interest::READ, CalloopMode::Level), |_, _, state| {
                 state.poll_external();
+                Ok(PostAction::Continue)
+            })
+            .unwrap();
+    }
+    if let Some(events) = hypr_events {
+        loop_handle
+            .insert_source(Generic::new(events, Interest::READ, CalloopMode::Level), |_, events, state: &mut AppState| {
+                // SAFETY: the stream is only read, and only here
+                state.on_hypr(unsafe { events.get_mut() });
                 Ok(PostAction::Continue)
             })
             .unwrap();

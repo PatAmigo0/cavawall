@@ -20,6 +20,15 @@ pub struct Config {
     pub notify: Option<NotifyConfig>,
 }
 
+#[derive(Serialize, Deserialize, Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum FullscreenPolicy {
+    Move,
+    Pause,
+    #[default]
+    Ignore,
+}
+
 /// `[notify]`: whether, how and for what cavawall raises notifications
 #[derive(Serialize, Deserialize, Debug, Default, Clone)]
 pub struct NotifyConfig {
@@ -499,6 +508,10 @@ pub struct GeneralConfig {
     pub autosens: Option<bool>,
     pub sensitivity: Option<f32>,
     pub preferred_output: Option<String>,
+    /// What to do while a fullscreen window covers the monitor: `move` to a
+    /// free one (pausing when none is left), `pause` in place, or `ignore`,
+    /// the default. On Hyprland; off costs nothing, not even a socket
+    pub on_fullscreen: Option<FullscreenPolicy>,
     /// "mono" or "stereo", passed through to cava's [output] section
     ///
     /// cava defaults to stereo, and in stereo mode it does not give each bar a
