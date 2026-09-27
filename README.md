@@ -13,9 +13,7 @@
   <img src="https://img.shields.io/badge/license-GPL--3.0-lightgrey.svg" alt="GPL-3.0">
 </p>
 
-A fork of [rs-pro0/wallpaper-cava](https://github.com/rs-pro0/wallpaper-cava),
-which did the hard work.
-
+A fork of [rs-pro0/wallpaper-cava](https://github.com/rs-pro0/wallpaper-cava)
 ## Features
 
 ### Bars that belong to the picture
