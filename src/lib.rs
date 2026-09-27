@@ -7,6 +7,7 @@
 pub mod app_config;
 pub mod control;
 pub mod curve;
+pub mod log;
 pub mod math;
 pub mod qoi;
 pub mod scheme;

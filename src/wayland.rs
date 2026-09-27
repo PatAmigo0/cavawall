@@ -147,7 +147,7 @@ impl LayerShellHandler for AppState {
         let width = if configure.new_size.0 > 0 { configure.new_size.0 } else { self.width };
         let height = if configure.new_size.1 > 0 { configure.new_size.1 } else { self.height };
         if debug_enabled() {
-            eprintln!("cavawall: configure {width}x{height} on {:?}", self.placed_on);
+            say!("configure {width}x{height} on {:?}", self.placed_on);
         }
         self.width = width;
         self.height = height;

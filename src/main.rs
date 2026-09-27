@@ -178,7 +178,7 @@ mod wayland;
 
 use render::{bar_band, damage_rects, reveal_map, surface_map, BarPlacement, DamageMap};
 
-use cavawall::{app_config, control, curve};
+use cavawall::{app_config, control, curve, fatal, say};
 use app_config::WallpaperConfig;
 use cavawall::math::fma;
 use app_config::*;
@@ -329,7 +329,7 @@ fn link_program(vert_src: &str, frag_src: &str) -> u32 {
         let mut status: gl::types::GLint = 0;
         gl::GetProgramiv(program, gl::LINK_STATUS, &mut status);
         if status != gl::TRUE as gl::types::GLint {
-            panic!("shader program failed to link:\n{}", program_log(program));
+            fatal!("the GPU driver would not link the shaders; please report this with the log:\n{}", program_log(program));
         }
         // The linked program holds everything it needs; left attached, as they
         // were, both stages stay alive for the life of the process
@@ -359,8 +359,8 @@ fn compile_shader(kind: gl::types::GLenum, src: &str, what: &str) -> u32 {
         if status != gl::TRUE as gl::types::GLint {
             let mut len: gl::types::GLint = 0;
             gl::GetShaderiv(shader, gl::INFO_LOG_LENGTH, &mut len);
-            panic!(
-                "{what} shader failed to compile:\n{}",
+            fatal!(
+                "the GPU driver would not compile the {what} shader; please report this with the log:\n{}",
                 read_log(len, |n, written, buf| gl::GetShaderInfoLog(shader, n, written, buf))
             );
         }
@@ -409,7 +409,7 @@ fn debug_palette(what: &str, rgba: &[[f32; 4]]) {
             )
         })
         .collect();
-    eprintln!("cavawall: {what} palette: {}", stops.join(" "));
+    say!("{what} palette: {}", stops.join(" "));
 }
 
 
@@ -595,7 +595,9 @@ impl AppState {
     /// compositor is left with a clean surface rather than our last set of
     /// bars. Without this a hard kill leaves that frame visible on the
     /// background until something else forces a repaint
-    fn clear_and_exit(&mut self) -> ! {
+    fn clear_and_exit(&mut self, why: &str) -> ! {
+        say!("stopping: {why}");
+        cavawall::log::exited(why);
         self.clear_surface();
         control::unbind();
         // SAFETY: a plain signal to our own child
@@ -633,8 +635,8 @@ impl AppState {
         // Ordered so the common case (nothing changed) never reaches
         // debug_enabled(). The watch is otherwise unobservable from outside
         if (changed.scheme || changed.shell || changed.wallpaper) && debug_enabled() {
-            eprintln!(
-                "cavawall: watch fired scheme={} shell={} wallpaper={}",
+            say!(
+                "watch fired scheme={} shell={} wallpaper={}",
                 changed.scheme, changed.shell, changed.wallpaper
             );
         }
@@ -666,8 +668,8 @@ impl AppState {
             let wanted = key.as_ref().is_some_and(|k| self.curve_keys.contains(k));
             if key != self.curve_key && (drawn || wanted) {
                 if debug_enabled() {
-                    eprintln!(
-                        "cavawall: wallpaper changed {:?} -> {key:?}, restarting",
+                    say!(
+                        "wallpaper changed {:?} -> {key:?}, restarting",
                         self.curve_key
                     );
                 }
@@ -722,7 +724,7 @@ impl AppState {
             }
             Request::Stop => {
                 control::write_response(stream, &Response::ok(None));
-                self.clear_and_exit();
+                self.clear_and_exit("asked to stop");
             }
             // Bars, mode and curve are all sampled at startup, so re-reading
             // config means running again - the same file, never PATH
@@ -806,8 +808,8 @@ impl AppState {
                 self.background_color[3],
             );
         }
-        eprintln!(
-            "cavawall: re-exec failed, keeping {} bars: {}",
+        say!(
+            "re-exec failed, keeping {} bars: {}",
             self.bar_count,
             std::io::Error::last_os_error()
         );
@@ -863,7 +865,7 @@ impl AppState {
     /// source got a turn
     pub fn tick(&mut self) {
         if EXITING.load(Ordering::Relaxed) {
-            self.clear_and_exit();
+            self.clear_and_exit("SIGTERM or SIGINT");
         }
         self.maybe_draw();
     }
@@ -946,7 +948,7 @@ impl AppState {
             // frames (0.18s); the rest of the 23 (0.51s) is hysteresis, so a
             // gap between tracks does not park and unpark repeatedly
             if debug_enabled() {
-                eprintln!("cavawall: parking (silent_frames={})", self.silent_frames);
+                say!("parking (silent_frames={})", self.silent_frames);
             }
             self.idle = true;
             return;
@@ -957,8 +959,7 @@ impl AppState {
     /// Leave the way SIGTERM does. `panic = "abort"` skips all cleanup, so
     /// panicking instead leaves the last frame burnt onto the wallpaper
     fn cava_gone(&mut self) -> ! {
-        eprintln!("cavawall: cava exited, shutting down");
-        self.clear_and_exit();
+        self.clear_and_exit("cava exited; check the audio source, or run cava by hand to see why");
     }
 
     /// Rank a connected output; lower wins, None means "not eligible at all".
@@ -1019,7 +1020,7 @@ impl AppState {
 
         let Some((output, info, name)) = self.choose_output() else {
             if self.placed_on.take().is_some() || self.placed_size.take().is_some() {
-                eprintln!("cavawall: no usable output, idling until one appears");
+                say!("no usable output, idling until one appears");
             }
             return;
         };
@@ -1108,7 +1109,7 @@ impl AppState {
             return;
         };
         if debug_enabled() {
-            eprintln!("cavawall: placing on {name} ({}x{})", logical_size.0, logical_size.1);
+            say!("placing on {name} ({}x{})", logical_size.0, logical_size.1);
         }
         self.surface = self.compositor.create_surface(qh);
         let fresh = self.layer_shell.create_layer_surface(
@@ -1241,7 +1242,7 @@ impl AppState {
         egl.make_current(self.egl_display, None, None, None).ok();
         egl.destroy_surface(self.egl_display, self.egl_surface).ok();
         self.wl_egl_surface =
-            WlEglSurface::new(self.surface.id(), w, h).expect("wl_egl_window for the new surface");
+            WlEglSurface::new(self.surface.id(), w, h).unwrap_or_else(|e| fatal!("cannot create the EGL window for the new surface ({e})"));
         // SAFETY: the window was just created for a live wl_surface and
         // outlives the EGL surface, which is destroyed before it is replaced
         self.egl_surface = unsafe {
@@ -1252,16 +1253,16 @@ impl AppState {
                 None,
             )
         }
-        .expect("EGL surface for the new wl_surface");
+        .unwrap_or_else(|e| fatal!("cannot create the EGL surface for the new output ({e})"));
         egl.make_current(
             self.egl_display,
             Some(self.egl_surface),
             Some(self.egl_surface),
             Some(self.egl_context),
         )
-        .expect("make the new surface current");
+        .unwrap_or_else(|e| fatal!("cannot make the new surface current ({e})"));
         if egl.swap_interval(self.egl_display, 0).is_err() && debug_enabled() {
-            eprintln!("cavawall: swap interval unchanged, frames pace on vsync too");
+            say!("swap interval unchanged, frames pace on vsync too");
         }
     }
 
@@ -1436,7 +1437,7 @@ impl MaskPass {
             if debug_enabled() {
                 let status = gl::CheckFramebufferStatus(gl::FRAMEBUFFER);
                 if status != gl::FRAMEBUFFER_COMPLETE {
-                    eprintln!("cavawall: occluder mask framebuffer incomplete: {status:#x}");
+                    say!("occluder mask framebuffer incomplete: {status:#x}");
                 }
             }
             gl::Viewport(0, 0, w, h);
@@ -1459,8 +1460,8 @@ impl MaskPass {
             gl::Disable(gl::COLOR_LOGIC_OP);
             if debug_enabled() {
                 let err = gl::GetError();
-                eprintln!(
-                    "cavawall: occluder mask {w}x{h}, {} triangles, GL error {err:#x}",
+                say!(
+                    "occluder mask {w}x{h}, {} triangles, GL error {err:#x}",
                     tris.len() / 3
                 );
             }
@@ -1500,16 +1501,24 @@ impl AppState {
         match self.swap_damage {
             // SAFETY: display and surface are current and live, and `rects`
             // holds `len` valid ints, which is `len / 4` complete rectangles
-            Some(f) => unsafe {
-                f(
-                    self.egl_display.as_ptr(),
-                    self.egl_surface.as_ptr(),
-                    rects.as_ptr(),
-                    (len / 4) as egl::Int,
-                );
-            },
+            Some(f) => {
+                let ok = unsafe {
+                    f(
+                        self.egl_display.as_ptr(),
+                        self.egl_surface.as_ptr(),
+                        rects.as_ptr(),
+                        (len / 4) as egl::Int,
+                    )
+                };
+                if ok == egl::FALSE {
+                    fatal!("presenting a frame failed; the GL context was probably lost, restart with `cavawall start`");
+                }
+            }
             None => {
-                egl.swap_buffers(self.egl_display, self.egl_surface).unwrap();
+                // A lost context - a GPU reset, a resume - is the realistic cause
+                if let Err(e) = egl.swap_buffers(self.egl_display, self.egl_surface) {
+                    fatal!("presenting a frame failed ({e}); the GL context was probably lost, restart with `cavawall start`");
+                }
             }
         }
     }
