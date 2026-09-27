@@ -40,7 +40,11 @@ pub struct BarOverride {
     pub baseline: Option<f32>,
     pub grow: Option<Grow>,
     pub radius: Option<f32>,
+    pub mirror: Option<bool>,
+    pub blocks: Option<u32>,
+    pub gradient: Option<GradientAxis>,
     pub reveal: Option<f32>,
+    pub reveal_pulse: Option<bool>,
     /// The recipe cavawall-tune baked the reveal image from, kept so the
     /// next edit starts from it. The renderer reads only the image
     pub reveal_source: Option<String>,
@@ -61,7 +65,11 @@ impl BarOverride {
             baseline: self.baseline.or(base.baseline),
             grow: self.grow.or(base.grow),
             radius: self.radius.or(base.radius),
+            mirror: self.mirror.or(base.mirror),
+            blocks: self.blocks.or(base.blocks),
+            gradient: self.gradient.or(base.gradient),
             reveal: self.reveal.or(base.reveal),
+            reveal_pulse: self.reveal_pulse.or(base.reveal_pulse),
             reveal_dir: base.reveal_dir.clone(),
         }
     }
@@ -75,6 +83,16 @@ pub enum Grow {
     Up,
     /// Hanging from the baseline, for a row along the top
     Down,
+}
+
+/// What the gradient runs along: each bar from base to tip, or the whole row
+/// from its first bar to its last
+#[derive(Serialize, Deserialize, Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum GradientAxis {
+    #[default]
+    Height,
+    Row,
 }
 
 /// Per-wallpaper overrides, one file each under `wallpapers/`.
@@ -503,11 +521,22 @@ pub struct BarConfig {
     /// semicircle. Bars and curve only; a circle's bars are wedges. Zero or
     /// absent compiles the rounding out of the shader altogether
     pub radius: Option<f32>,
+    /// Bars reach both ways from their line, mirrored. Bars and curve; twice
+    /// the pixels of a plain row
+    pub mirror: Option<bool>,
+    /// Splits each bar into this many segments at full height, LED style.
+    /// Zero or absent draws solid bars
+    pub blocks: Option<u32>,
+    /// `row` runs the gradient along the row instead of up each bar
+    pub gradient: Option<GradientAxis>,
     /// How far bars show the wallpaper's reveal image instead of the
     /// gradient, 0 to 1: an x-ray through the bars. The image is
     /// `wallpapers/<key>.reveal.qoi`, written by cavawall-tune. Zero, absent,
     /// or no image compiles it out
     pub reveal: Option<f32>,
+    /// The reveal follows each bar's loudness: quiet bars keep the gradient,
+    /// loud ones show the picture
+    pub reveal_pulse: Option<bool>,
     /// Where cavawall-tune keeps x-ray pictures, one per wallpaper named
     /// after it. `~/` is home. Absent is ~/Pictures/cavawall-xray
     pub reveal_dir: Option<String>,

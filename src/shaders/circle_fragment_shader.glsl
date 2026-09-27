@@ -23,10 +23,30 @@ uniform sampler2D Reveal;
 uniform vec4 RevealMap;
 uniform float RevealMix;
 #endif
+#ifdef GRADIENT_ROW
+in float vAlong;
+#endif
+#ifdef BLOCKS
+// Segments a full bar is split into
+uniform float Blocks;
+#endif
+#ifdef REVEAL_PULSE
+flat in float vPeak;
+#endif
 out vec4 fragColor;
 void main() {
     float t = clamp(vRadial, 0.0, 1.0);
+#ifdef BLOCKS
+    // A quarter of every segment is the gap below the next one
+    if (fract(t * Blocks) > 0.75) {
+        discard;
+    }
+#endif
+#ifdef GRADIENT_ROW
+    float findex = vAlong * float(gradient_colors_size - 1);
+#else
     float findex = t * float(gradient_colors_size - 1);
+#endif
     // Clamped before the fraction is taken, as in the linear shader. Safe with
     // no lower bound only because gradient_buffer uploads a lone configured
     // stop twice - do not "optimise" that duplication away
@@ -35,7 +55,12 @@ void main() {
     // Radial alpha ramp, applied on top of whatever alpha the stop carries
     c.a *= mix(InnerAlpha, OuterAlpha, t);
 #ifdef REVEAL
-    c.rgb = mix(c.rgb, texture(Reveal, gl_FragCoord.xy * RevealMap.xy + RevealMap.zw).rgb, RevealMix);
+#ifdef REVEAL_PULSE
+    float reveal = RevealMix * smoothstep(0.1, 0.8, vPeak);
+#else
+    float reveal = RevealMix;
+#endif
+    c.rgb = mix(c.rgb, texture(Reveal, gl_FragCoord.xy * RevealMap.xy + RevealMap.zw).rgb, reveal);
 #endif
     c.rgb = mix(c.rgb, MatteColor, Matte);
     c.a *= Opacity;

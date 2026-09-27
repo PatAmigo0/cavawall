@@ -80,6 +80,8 @@ See [`config.toml`](config.toml) for the annotated defaults
 | `bars.matte` | **fork addition**: flatten the gradient toward its own mean |
 | `bars.left`, `bars.span`, `bars.baseline`, `bars.grow` | **fork addition**: place the row anywhere; `grow = "down"` hangs it from its baseline |
 | `bars.radius` | **fork addition**: round each bar's tip, fraction of its width (bars and curve) |
+| `bars.mirror`, `bars.blocks`, `bars.gradient` | **fork addition**: bars both ways from their line; LED-style segments; `gradient = "row"` runs the colours along the row |
+| `bars.reveal_pulse` | **fork addition**: the x-ray follows each bar's loudness |
 | `bars.reveal` | **fork addition**: x-ray - bars show a hidden image instead of the gradient, 0 to 1 |
 | `colors.*` | gradient stops, bottom to top; order matters, names do not |
 | `smoothing.*` | passed straight through to cava |
@@ -199,6 +201,13 @@ points = [[0.62, 0.20], [0.70, 0.18], [0.72, 0.40], [0.60, 0.41]]
 points = [[0.1, 0.46], [0.9, 0.43]]
 cut_by = ["ridge"]
 ```
+
+### Styles
+
+`mirror`, `blocks`, `gradient = "row"`, `radius` and `reveal_pulse` are each a
+shader variant compiled in only when set: at their defaults the shaders are
+the plain ones, and a style you do not use costs nothing. `mirror` draws
+twice the pixels of a plain row; the others are a line or two per pixel
 
 ### x-ray
 

@@ -459,10 +459,17 @@ pub fn corners(bar: &Bar, aspect: f32) -> [[f32; 2]; 4] {
 /// The hull of both ends of every bar, not of the path: a leaning bar reaches
 /// outside the path's own box. Lets the surface shrink to the curve
 #[must_use]
-pub fn bounds(bars: &[Bar], aspect: f32) -> (f32, f32, f32, f32) {
+pub fn bounds(bars: &[Bar], aspect: f32, mirror: bool) -> (f32, f32, f32, f32) {
     let (mut x0, mut y0) = (f32::MAX, f32::MAX);
     let (mut x1, mut y1) = (f32::MIN, f32::MIN);
-    for [x, y] in bars.iter().flat_map(|b| corners(b, aspect)) {
+    // Mirrored, a bar also reaches its own length back behind the path: its
+    // tip corners reflected through its base
+    let reflected = |b: &Bar| {
+        let c = corners(b, aspect);
+        [0, 1].map(|i| [2.0 * c[i][0] - c[i + 2][0], 2.0 * c[i][1] - c[i + 2][1]])
+    };
+    let back = bars.iter().filter(|_| mirror).flat_map(reflected);
+    for [x, y] in bars.iter().flat_map(|b| corners(b, aspect)).chain(back) {
         x0 = x0.min(x);
         y0 = y0.min(y);
         x1 = x1.max(x);
@@ -767,10 +774,13 @@ mod tests {
     #[test]
     fn bounds_cover_bar_and_width() {
         let bar = Bar { pos: [0.0, 0.0], normal: [0.0, 1.0], reach: 0.5, width: 0.2, mask: 0 };
-        let (x0, y0, x1, y1) = bounds(&[bar], 16.0 / 9.0);
+        let (x0, y0, x1, y1) = bounds(&[bar], 16.0 / 9.0, false);
         assert!((x0 - -0.1).abs() < 1e-6 && (x1 - 0.1).abs() < 1e-6, "width straddles the base");
         assert!((y0 - 0.0).abs() < 1e-6 && (y1 - 0.5).abs() < 1e-6, "reach sets the top");
-        assert_eq!(bounds(&[], 1.0), (-1.0, -1.0, 1.0, 1.0), "no bars claims everything");
+        assert_eq!(bounds(&[], 1.0, false), (-1.0, -1.0, 1.0, 1.0), "no bars claims everything");
+        // Mirrored, it reaches as far below its base as above
+        let (_, y0, _, y1) = bounds(&[bar], 16.0 / 9.0, true);
+        assert!((y0 - -0.5).abs() < 1e-6 && (y1 - 0.5).abs() < 1e-6, "{y0} {y1}");
     }
 
     /// A leaning bar has to stay a rectangle ON SCREEN, at the angle its normal

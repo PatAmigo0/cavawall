@@ -29,6 +29,14 @@ uniform float Aspect;
 // 0 at the base, 1 at the tip; the gradient and the alpha ramp run along it
 out float vRadial;
 flat out uint vMask;
+#ifdef GRADIENT_ROW
+// 0 at the first bar, 1 at the last
+uniform float Count;
+out float vAlong;
+#endif
+#ifdef REVEAL_PULSE
+flat out float vPeak;
+#endif
 #ifdef ROUND
 // The output in pixels, which width and reach are fractions of
 uniform vec2 OutputPx;
@@ -44,13 +52,26 @@ void main() {
     // carrying the point's scale already
     vec4 g = geom[gl_InstanceID];
     vMask = uint(g.z);
-    vRadial = corner.y * height;
+#ifdef MIRROR
+    // Both ways from the path. Signed, so it interpolates across the path;
+    // the fragment stage takes abs
+    float side = corner.y * 2.0 - 1.0;
+#else
+    float side = corner.y;
+#endif
+    vRadial = side * height;
     vec2 across = vec2(t.x, t.y * Aspect) * g.x;
     vec2 along = vec2(n.x / Aspect, n.y) * g.y;
     vec2 p = s.xy + across * (corner.x - 0.5) + along * vRadial;
     gl_Position = vec4(p * PathScale + PathOffset, 0.0, 1.0);
 #ifdef ROUND
     vSize = vec2(g.x * 0.5 * OutputPx.x, height * g.y * 0.5 * OutputPx.y);
-    vLocal = vec2((corner.x - 0.5) * vSize.x, corner.y * vSize.y);
+    vLocal = vec2((corner.x - 0.5) * vSize.x, side * vSize.y);
+#endif
+#ifdef GRADIENT_ROW
+    vAlong = (float(gl_InstanceID) + corner.x) / Count;
+#endif
+#ifdef REVEAL_PULSE
+    vPeak = height;
 #endif
 }

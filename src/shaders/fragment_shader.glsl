@@ -13,6 +13,16 @@ uniform vec3 MatteColor;
 uniform float Matte;
 // One multiplier over whatever alpha the stops already carry
 uniform float Opacity;
+#ifdef GRADIENT_ROW
+in float vAlong;
+#endif
+#ifdef BLOCKS
+// Segments a full bar is split into
+uniform float Blocks;
+#endif
+#ifdef REVEAL_PULSE
+flat in float vPeak;
+#endif
 #ifdef ROUND
 // A fraction of the bar's width; only the tip is rounded, the base stands
 // on its line
@@ -29,18 +39,42 @@ uniform float RevealMix;
 #endif
 out vec4 fragColor;
 void main() {
-    float findex = vLevel * float(gradient_colors_size - 1);
+#ifdef MIRROR
+    float level = abs(vLevel);
+#else
+    float level = vLevel;
+#endif
+#ifdef BLOCKS
+    // A quarter of every segment is the gap below the next one
+    if (fract(level * Blocks) > 0.75) {
+        discard;
+    }
+#endif
+#ifdef GRADIENT_ROW
+    float findex = vAlong * float(gradient_colors_size - 1);
+#else
+    float findex = level * float(gradient_colors_size - 1);
+#endif
     // Clamped before the fraction is taken, so the top row lands on the last
     // stop rather than a step of 0.0 into the one below it. Branchless, and
     // gradient_buffer guarantees at least two stops so this cannot go negative
     int index = min(int(findex), gradient_colors_size - 2);
     vec4 c = mix(gradient_colors[index], gradient_colors[index + 1], findex - float(index));
 #ifdef REVEAL
-    c.rgb = mix(c.rgb, texture(Reveal, gl_FragCoord.xy * RevealMap.xy + RevealMap.zw).rgb, RevealMix);
+#ifdef REVEAL_PULSE
+    float reveal = RevealMix * smoothstep(0.1, 0.8, vPeak);
+#else
+    float reveal = RevealMix;
+#endif
+    c.rgb = mix(c.rgb, texture(Reveal, gl_FragCoord.xy * RevealMap.xy + RevealMap.zw).rgb, reveal);
 #endif
 #ifdef ROUND
     float r = min(Radius * vSize.x, vSize.y);
+#ifdef MIRROR
+    vec2 q = vec2(abs(vLocal.x) - (0.5 * vSize.x - r), abs(vLocal.y) - (vSize.y - r));
+#else
     vec2 q = vec2(abs(vLocal.x) - (0.5 * vSize.x - r), vLocal.y - (vSize.y - r));
+#endif
     if (q.x > 0.0 && q.y > 0.0) {
         // One pixel of antialiasing across the arc
         c.a *= clamp(r - length(q) + 0.5, 0.0, 1.0);

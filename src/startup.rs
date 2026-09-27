@@ -501,12 +501,25 @@ pub(crate) fn run() {
         eprintln!("cavawall: reveal is set but wallpapers/<key>.reveal.qoi will not read; drawing the gradient");
     }
     let reveal_size = reveal_image.as_ref().map(|i| (i.width, i.height));
+    // Styles likewise: each is a variant, compiled in only when set
+    let mirror = bars_config.mirror.unwrap_or(false) && mode != Mode::Circle;
+    let blocks = bars_config.blocks.unwrap_or(0).min(256);
+    let along_row = bars_config.gradient == Some(GradientAxis::Row);
+    let pulse = bars_config.reveal_pulse.unwrap_or(false) && reveal_image.is_some();
     let mut defines = String::new();
-    if round {
-        defines.push_str("#define ROUND\n");
-    }
-    if reveal_image.is_some() {
-        defines.push_str("#define REVEAL\n");
+    for (on, name) in [
+        (round, "ROUND"),
+        (reveal_image.is_some(), "REVEAL"),
+        (mirror, "MIRROR"),
+        (blocks > 0, "BLOCKS"),
+        (along_row, "GRADIENT_ROW"),
+        (pulse, "REVEAL_PULSE"),
+    ] {
+        if on {
+            defines.push_str("#define ");
+            defines.push_str(name);
+            defines.push('\n');
+        }
     }
     let shader_program = build_program(mode, &defines);
     let mut quad_vbo = 0;
@@ -727,6 +740,12 @@ pub(crate) fn run() {
         if round {
             gl::Uniform1f(gl::GetUniformLocation(shader_program, c"Radius".as_ptr()), radius);
         }
+        if blocks > 0 {
+            gl::Uniform1f(gl::GetUniformLocation(shader_program, c"Blocks".as_ptr()), blocks as f32);
+        }
+        if along_row {
+            gl::Uniform1f(gl::GetUniformLocation(shader_program, c"Count".as_ptr()), bar_count as f32);
+        }
         // Taken by value: the pixels are freed once GL has its copy, where a
         // local of this function would live as long as the process
         if let Some(img) = reveal_image {
@@ -866,7 +885,7 @@ pub(crate) fn run() {
         cava_buffer,
         bar_width,
         bar_stride,
-        damage_map: DamageMap::new(bar_count, bar_width, bar_stride, (256, 256), bars_at.down),
+        damage_map: DamageMap::new(bar_count, bar_width, bar_stride, (256, 256), bars_at.down, bars_at.mirror),
         frame_bytes,
         swap_damage,
         force_full_damage: true,

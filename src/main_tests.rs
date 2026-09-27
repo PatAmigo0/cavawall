@@ -192,7 +192,7 @@
 
     fn rects_of(heights: &[f32], prev: &[f32], w: u32, h: u32) -> Vec<[i32; 4]> {
         let (bw, stride) = bar_geometry(heights.len() as u32, 0.0);
-        let map = DamageMap::new(heights.len() as u32, bw, stride, (w, h), false);
+        let map = DamageMap::new(heights.len() as u32, bw, stride, (w, h), false, false);
         let mut out = [0i32; DAMAGE_BUCKETS * 4];
         let n = damage_rects(&raw(heights), &raw(prev), &map, &mut out);
         out[..n].as_chunks::<4>().0.to_vec()
@@ -278,7 +278,7 @@
 
         for (w, full_h, frac) in [(1920u32, 1080u32, 0.65f32), (2560, 1440, 0.5), (1366, 768, 1.0)] {
             let h = (full_h as f32 * frac).ceil() as u32;
-            let map = DamageMap::new(bars as u32, bw, stride, (w, h), false);
+            let map = DamageMap::new(bars as u32, bw, stride, (w, h), false, false);
             let mut out = [0i32; DAMAGE_BUCKETS * 4];
             let n = damage_rects(&raw(&new), &raw(&prev), &map, &mut out);
             let rects: Vec<&[i32]> = out[..n].as_chunks::<4>().0.iter().map(|r| &r[..]).collect();
@@ -361,7 +361,7 @@
     }
 
     fn placement(left: f32, span: f32, baseline: f32, reach: f32, down: bool) -> BarPlacement {
-        BarPlacement { left, span, baseline, reach, down }
+        BarPlacement { left, span, baseline, reach, down, mirror: false }
     }
 
     /// No placement set is the row cavawall always drew: full width, standing
@@ -416,12 +416,34 @@
         assert_eq!(g.margins_for(200, 1920, 1080), (0, 1720), "clamped onto the output");
     }
 
+    /// Mirrored, the band is twice the reach and centred on its baseline
+    #[test]
+    fn a_mirrored_row_is_centred_on_its_line() {
+        let p = BarPlacement { left: 0.0, span: 1.0, baseline: 0.5, reach: 0.2, down: false, mirror: true };
+        let b = bar_band(&p, 1920, 1080);
+        assert_eq!((b.top, b.height), (540 - 216, 432));
+        assert!(!b.bottom_row);
+    }
+
+    /// Mirrored, a moved bucket reports its whole column: the bar reaches
+    /// both ways from the middle
+    #[test]
+    fn a_mirrored_row_damages_whole_columns() {
+        let (w, h) = (1000u32, 100u32);
+        let (bw, stride) = bar_geometry(4, 0.0);
+        let map = DamageMap::new(4, bw, stride, (w, h), false, true);
+        let mut out = [0; DAMAGE_BUCKETS * 4];
+        let n = damage_rects(&raw(&[0.0, -1.0, -1.0, -1.0]), &raw(&[-1.0; 4]), &map, &mut out);
+        assert_eq!(n, 4);
+        assert_eq!((out[1], out[3]), (0, h as i32));
+    }
+
     /// A hanging row counts its damage down from the top edge
     #[test]
     fn a_hanging_row_damages_from_the_top() {
         let (w, h) = (1000u32, 100u32);
         let (bw, stride) = bar_geometry(4, 0.0);
-        let map = DamageMap::new(4, bw, stride, (w, h), true);
+        let map = DamageMap::new(4, bw, stride, (w, h), true, false);
         let mut out = [0; DAMAGE_BUCKETS * 4];
         // NDC heights: -1 is silence, 0 is half the band
         let n = damage_rects(&raw(&[0.0, -1.0, -1.0, -1.0]), &raw(&[-1.0; 4]), &map, &mut out);
