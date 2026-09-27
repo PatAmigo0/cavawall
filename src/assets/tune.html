@@ -836,7 +836,7 @@ function buildInspector() {
 
   // Curve: layers and the link grid
   s = section('Layers', 'fig-curve', 'paths above, occluders below');
-  s.innerHTML += `<div class=layers id=pathList></div><div class=btns><button class="btn small" id=addPath>+ Path</button><button class="btn small ghost" id=pathUp title="Earlier: lower cava bands">↑</button><button class="btn small ghost" id=pathDown title="Later: higher cava bands">↓</button><button class="btn small ghost" id=delPath>Delete</button></div>
+  s.innerHTML += `<div class=layers id=pathList></div><div class=btns><button class="btn small" id=addPath>+ Path</button><button class="btn small ghost" id=pathUp title="Move up: lower frequencies">↑</button><button class="btn small ghost" id=pathDown title="Move down: higher frequencies">↓</button><button class="btn small ghost" id=delPath>Delete</button></div>
     <div class=layers id=occList style="margin-top:12px"></div><div class=btns><button class="btn small" id=addSky>+ Skyline</button><button class="btn small" id=addShape>+ Shape</button><button class="btn small ghost" id=delOcc>Delete</button></div>
     <table class=grid-links id=links></table><p class=note>A cell cuts that path by that occluder. Striped cells follow the default: a path that picks none is cut by all.</p>`;
   $('addPath').onclick = () => { snapshot(); S.paths.push(newPath()); S.cur = S.paths.length - 1; S.occEdit = false; S.sel = -1; commit(); renderLayers(); drawUI(); tools(); };
@@ -915,16 +915,14 @@ function buildInspector() {
   s = section('X-ray', '', 'bars show an image');
   row({k: 'reveal', label: 'Reveal', min: 0, max: 1, step: 0.01, hint: 'how much of the image replaces the gradient'}, s);
   const src = document.createElement('div'); src.className = 'row';
-  src.innerHTML = `<label>Image</label><select id=revealSrc style="grid-column:2/4"><option value=wallpaper>This wallpaper</option>${S.ctx.reveal_source ? `<option value=auto>${escapeHtml(S.ctx.reveal_source.split('/').pop())}</option>` : ''}</select>`;
+  src.innerHTML = `<label>Image</label><select id=revealSrc style="grid-column:2/4"></select><input type=file id=revealPick accept="image/png,image/jpeg,image/webp,image/gif,image/avif" hidden>`;
   s.appendChild(src);
-  // Only pictures that exist are listed, so say where the other one goes
-  if (!S.ctx.reveal_source) {
-    const wp = S.ctx.wallpaper || '', dir = wp.slice(0, wp.lastIndexOf('/') + 1).replace(/^\/home\/[^/]+\//, '~/');
-    const stem = wp.split('/').pop().replace(/\.[^.]+$/, '');
-    s.insertAdjacentHTML('beforeend', `<p class=note>To reveal a different picture, save it as <b>${escapeHtml(stem)}_reveal.png</b> (or .jpg, .webp) in <b>${escapeHtml(dir)}</b>, then reload this page.</p>`);
-  }
-  $('revealSrc').value = S.reveal.source;
-  $('revealSrc').onchange = e => { snapshot(); S.reveal.source = e.target.value; S.reveal.changed = true; revealSourceChanged(); commit(); };
+  fillRevealSources();
+  $('revealSrc').onchange = e => {
+    if (e.target.value === 'pick') { e.target.value = S.reveal.source; $('revealPick').click(); return; }
+    snapshot(); S.reveal.source = e.target.value; S.reveal.changed = true; revealSourceChanged(); commit();
+  };
+  $('revealPick').onchange = e => { const f = e.target.files[0]; e.target.value = ''; if (f) keepRevealPicture(f); };
   const FX = [['invert', 'Invert', 0, 100, 0, '%'], ['grayscale', 'Grey', 0, 100, 0, '%'], ['sepia', 'Sepia', 0, 100, 0, '%'], ['saturate', 'Saturate', 0, 300, 100, '%'],
     ['hue-rotate', 'Hue', -180, 180, 0, 'deg'], ['brightness', 'Brightness', 20, 250, 100, '%'], ['contrast', 'Contrast', 20, 250, 100, '%'], ['blur', 'Blur', 0, 12, 0, 'px']];
   for (const [k, label, min, max, dflt, unit] of FX) {
@@ -938,7 +936,6 @@ function buildInspector() {
     el.querySelector('.reset').onclick = () => { snapshot(); delete S.reveal.filter[k]; sync(); S.reveal.changed = true; bakeRevealCanvas(); commit(); };
     s.appendChild(el); ROWS.push(sync); sync();
   }
-  s.insertAdjacentHTML('beforeend', `<p class=note>The image is baked on save and read once when cavawall starts: a frame costs one texture read, nothing more.</p>`);
 
   s = section('View', '');
   s.innerHTML += `<div class=chips><button class=chip id=vFrame>Screen frame</button><button class=chip id=vHandles>Handles</button></div>
@@ -964,8 +961,8 @@ function refreshCount() {
   countEl.innerHTML = `${n}<small>bars, from ${from}</small>`;
   const note = $('countNote'), d = S.ctx.defaults || {};
   const shell = d.follow_shell_bars && isNum(S.ctx.shell_bars) ? `the shell's ${S.ctx.shell_bars}` : null;
-  note.innerHTML = S.fig === 'curve' ? 'The curve\'s total is what cava produces; paths share it by length unless they name their own.'
-    : `Order: ${S.fig === 'circle' ? 'the circle\'s own count, then ' : ''}this wallpaper, then ${shell ? shell + ', then ' : ''}config.toml.`;
+  note.innerHTML = S.fig === 'curve' ? 'Paths share the total by length unless they set their own count.'
+    : `First one set wins: ${S.fig === 'circle' ? 'the circle\'s own count, then ' : ''}this wallpaper, then ${shell ? shell + ', then ' : ''}config.toml.`;
   const t = $('curveTotal');
   if (t) { t.value = n; $('curveTotalV').textContent = isNum(S.curve.bars) ? n : n + '*'; t.closest('.row').classList.toggle('inherited', !isNum(S.curve.bars)); t.style.setProperty('--p', ((n - 1) / 255 * 100) + '%'); }
 }
@@ -1127,6 +1124,22 @@ function parseFilter(s) {
 function revealSourceChanged() {
   if (S.reveal.source === 'auto' && S.ctx.reveal_source) loadRevealSource();
   else { S.reveal.image = img; bakeRevealCanvas(); }
+}
+// The wallpaper, the picture kept for it if there is one, and a way to pick one
+function fillRevealSources() {
+  const kept = S.ctx.reveal_source;
+  $('revealSrc').innerHTML = `<option value=wallpaper>This wallpaper</option>${kept ? `<option value=auto>${escapeHtml(kept.split('/').pop())}</option>` : ''}<option value=pick>Choose a picture…</option>`;
+  $('revealSrc').value = S.reveal.source;
+  $('revealSrc').title = kept ? kept : `Chosen pictures are kept in ${S.ctx.reveal_dir || '~/Pictures/cavawall-xray'}`;
+}
+async function keepRevealPicture(file) {
+  try {
+    const r = await fetch('/reveal-source', {method: 'POST', body: file}).then(r => r.json());
+    if (!r.ok) throw new Error(r.error || 'the picture was refused');
+    snapshot(); S.ctx.reveal_source = r.path; S.reveal.source = 'auto'; S.reveal.changed = true;
+    fillRevealSources(); loadRevealSource(); commit();
+    toast(`Picture kept as ${r.path.split('/').pop()}`);
+  } catch (e) { toast('Could not use that picture: ' + e.message, true); }
 }
 function loadRevealSource() {
   const r = new Image(); r.onload = () => { S.reveal.image = r; bakeRevealCanvas(); }; r.onerror = () => toast('The reveal image did not load', true); r.src = '/reveal-source';

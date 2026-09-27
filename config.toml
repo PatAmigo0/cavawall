@@ -66,6 +66,8 @@ gap = 0.1
 # X-ray: bars show wallpapers/<key>.reveal.qoi instead of the gradient, 0 to
 # 1. cavawall-tune bakes that image; without it this does nothing.
 # reveal = 0.0
+# Where cavawall-tune keeps the pictures you pick for the x-ray
+# reveal_dir = "~/Pictures/cavawall-xray"
 
 # Only read when mode = "circle". Every key is optional.
 # [circle]

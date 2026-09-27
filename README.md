@@ -204,8 +204,9 @@ cut_by = ["ridge"]
 
 `bars.reveal` makes the bars windows onto an image instead of the gradient:
 the wallpaper itself through a filter (inverted, desaturated, hue-shifted,
-blurred), or a stylised twin saved beside it as `<name>_reveal.<ext>`.
-cavawall-tune bakes the result into `wallpapers/<key>.reveal.qoi`, which
+blurred), or a picture of your own, picked in the editor. Pictures are kept in
+`~/Pictures/cavawall-xray/`, named after the wallpaper; `bars.reveal_dir`
+moves that folder. cavawall-tune bakes the result into `wallpapers/<key>.reveal.qoi`, which
 cavawall decodes once at startup; a frame costs one texture read per bar
 pixel. Without `reveal` the feature is compiled out of the shaders
 

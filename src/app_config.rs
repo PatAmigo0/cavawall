@@ -62,6 +62,7 @@ impl BarOverride {
             grow: self.grow.or(base.grow),
             radius: self.radius.or(base.radius),
             reveal: self.reveal.or(base.reveal),
+            reveal_dir: base.reveal_dir.clone(),
         }
     }
 }
@@ -507,6 +508,9 @@ pub struct BarConfig {
     /// `wallpapers/<key>.reveal.qoi`, written by cavawall-tune. Zero, absent,
     /// or no image compiles it out
     pub reveal: Option<f32>,
+    /// Where cavawall-tune keeps x-ray pictures, one per wallpaper named
+    /// after it. `~/` is home. Absent is ~/Pictures/cavawall-xray
+    pub reveal_dir: Option<String>,
 }
 
 /// The mean of a palette, which is the tone a matte finish flattens toward

@@ -174,8 +174,7 @@ fn handle(stream: TcpStream, site: &Site) {
             let body = context(site).to_string();
             reply(&mut out, "200 OK", "application/json", body.as_bytes());
         }
-        // A stylised twin of the wallpaper, found by name as cava-bg does:
-        // <name>_reveal.<ext> beside it
+        // The x-ray picture the user keeps for this wallpaper, if any
         ("GET", "/reveal-source") => match reveal_source(&site.wallpaper) {
             Some(p) => match std::fs::read(&p) {
                 Ok(bytes) => reply(&mut out, "200 OK", mime(&p), &bytes),
@@ -183,6 +182,15 @@ fn handle(stream: TcpStream, site: &Site) {
             },
             None => reply(&mut out, "404 Not Found", "text/plain", b"none"),
         },
+        // A picture chosen in the page, kept in the x-ray folder under the
+        // wallpaper's name so it can be filtered again later
+        ("POST", "/reveal-source") => {
+            let body = match keep_reveal_source(&site.wallpaper, &req.body) {
+                Ok(p) => serde_json::json!({ "ok": true, "path": p.display().to_string() }),
+                Err(e) => serde_json::json!({ "ok": false, "error": e }),
+            };
+            reply(&mut out, "200 OK", "application/json", body.to_string().as_bytes());
+        }
         // The baked reveal: a QOI the page encoded, or an empty body to drop it
         ("POST", "/reveal") => {
             let path = config_dir().join("wallpapers").join(format!("{}.reveal.qoi", site.key));
@@ -222,17 +230,63 @@ fn handle(stream: TcpStream, site: &Site) {
     }
 }
 
-/// `<stem>_reveal.<any image extension>` in the wallpaper's own directory
+const IMAGE_EXTENSIONS: [&str; 6] = ["png", "jpg", "jpeg", "webp", "gif", "avif"];
+
+/// Where x-ray pictures live: `bars.reveal_dir` in config.toml, else
+/// ~/Pictures/cavawall-xray. Never the wallpaper folder - the shell's picker
+/// scans that one and would offer every x-ray picture as a wallpaper
+fn reveal_dir() -> PathBuf {
+    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+    let set = load_config().and_then(|c| c.bars.reveal_dir).filter(|d| !d.is_empty());
+    match set.as_deref() {
+        Some(d) => d.strip_prefix("~/").map_or_else(|| PathBuf::from(d), |rest| home.join(rest)),
+        None => home.join("Pictures/cavawall-xray"),
+    }
+}
+
+fn is_image(p: &Path) -> bool {
+    p.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| IMAGE_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
+}
+
+/// `<wallpaper stem>.<image extension>` in the x-ray folder
 fn reveal_source(wallpaper: &Path) -> Option<PathBuf> {
-    let stem = wallpaper.file_stem()?.to_str()?;
-    let want = format!("{stem}_reveal");
-    std::fs::read_dir(wallpaper.parent()?).ok()?.flatten().map(|e| e.path()).find(|p| {
-        p.file_stem().and_then(|s| s.to_str()) == Some(want.as_str())
-            && matches!(
-                p.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref(),
-                Some("png" | "jpg" | "jpeg" | "webp" | "gif" | "avif")
-            )
-    })
+    let stem = wallpaper.file_stem()?;
+    std::fs::read_dir(reveal_dir())
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| p.file_stem() == Some(stem) && is_image(p))
+}
+
+/// The extension a picture's own bytes call for, so a file named wrongly, or
+/// something that is no picture at all, is caught here
+fn sniff(bytes: &[u8]) -> Option<&'static str> {
+    match bytes {
+        [0x89, b'P', b'N', b'G', ..] => Some("png"),
+        [0xff, 0xd8, 0xff, ..] => Some("jpg"),
+        [b'G', b'I', b'F', b'8', ..] => Some("gif"),
+        [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'E', b'B', b'P', ..] => Some("webp"),
+        [_, _, _, _, b'f', b't', b'y', b'p', b'a', b'v', b'i', b'f' | b's', ..] => Some("avif"),
+        _ => None,
+    }
+}
+
+/// Store a chosen picture as this wallpaper's x-ray source, replacing any
+/// earlier one of another extension so exactly one is found
+fn keep_reveal_source(wallpaper: &Path, bytes: &[u8]) -> Result<PathBuf, String> {
+    let ext = sniff(bytes).ok_or("not a PNG, JPEG, WebP, GIF or AVIF picture")?;
+    let stem = wallpaper.file_stem().ok_or("the wallpaper has no name")?;
+    let dir = reveal_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    while let Some(old) = reveal_source(wallpaper) {
+        std::fs::remove_file(&old).map_err(|e| format!("{}: {e}", old.display()))?;
+    }
+    let path = dir.join(stem).with_extension(ext);
+    std::fs::write(&path, bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+    println!("cavawall-tune: x-ray picture {}", path.display());
+    Ok(path)
 }
 
 fn mime(path: &Path) -> &'static str {
@@ -267,10 +321,14 @@ fn config_dir() -> PathBuf {
 /// Everything the page shows besides the wallpaper's own file: what an unset
 /// field falls back to, the gradient the bars are drawn in, the image's size
 /// and what the running instance is doing
-fn context(site: &Site) -> serde_json::Value {
-    let config: Option<Config> = std::fs::read_to_string(config_dir().join("config.toml"))
+fn load_config() -> Option<Config> {
+    std::fs::read_to_string(config_dir().join("config.toml"))
         .ok()
-        .and_then(|s| toml::from_str(&s).ok());
+        .and_then(|s| toml::from_str(&s).ok())
+}
+
+fn context(site: &Site) -> serde_json::Value {
+    let config = load_config();
     let gradient = config.as_ref().map(|c| {
         let live = c.scheme.as_ref().and_then(|s| s.colors).unwrap_or(false);
         let stops = app_config::ordered_stops(&c.colors);
@@ -290,6 +348,7 @@ fn context(site: &Site) -> serde_json::Value {
         "image": curve::image_size(&site.wallpaper),
         "reveal_source": reveal_source(&site.wallpaper).map(|p| p.display().to_string()),
         "reveal_baked": baked.is_file(),
+        "reveal_dir": reveal_dir().display().to_string(),
         "defaults": config.as_ref().map(|c| serde_json::json!({
             "mode": c.general.mode,
             "bars": c.bars,
