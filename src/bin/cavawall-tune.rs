@@ -213,6 +213,18 @@ fn handle(stream: TcpStream, site: &Site) {
             };
             reply(&mut out, "200 OK", "application/json", body.to_string().as_bytes());
         }
+        // Settings that live in config.toml, shared by every wallpaper
+        ("POST", "/global") => {
+            let body = match edit_global(&req.body) {
+                Ok(applied) => serde_json::json!({ "ok": true, "applied": applied }),
+                Err(e) => serde_json::json!({ "ok": false, "error": e }),
+            };
+            reply(&mut out, "200 OK", "application/json", body.to_string().as_bytes());
+        }
+        ("GET", "/sources") => {
+            let body = serde_json::json!(audio_sources()).to_string();
+            reply(&mut out, "200 OK", "application/json", body.as_bytes());
+        }
         ("POST", "/save") => {
             let body = match save(&site.key, &req.body) {
                 Ok((path, applied)) => {
@@ -349,6 +361,10 @@ fn context(site: &Site) -> serde_json::Value {
         "reveal_source": reveal_source(&site.wallpaper).map(|p| p.display().to_string()),
         "reveal_baked": baked.is_file(),
         "reveal_dir": reveal_dir().display().to_string(),
+        "config": std::fs::read_to_string(config_dir().join("config.toml"))
+            .ok()
+            .and_then(|s| toml::from_str::<toml::Value>(&s).ok()),
+        "scheme": scheme::colours(),
         "defaults": config.as_ref().map(|c| serde_json::json!({
             "mode": c.general.mode,
             "bars": c.bars,
@@ -359,6 +375,111 @@ fn context(site: &Site) -> serde_json::Value {
         "gradient": gradient,
         "status": status,
     })
+}
+
+/// The tables the page may edit, so a request cannot write anything else
+const GLOBAL_TABLES: [&str; 5] = ["general", "smoothing", "colors", "scheme", "bars"];
+
+fn json_to_value(v: &serde_json::Value) -> Option<toml_edit::Value> {
+    use serde_json::Value as J;
+    Some(match v {
+        J::Bool(b) => (*b).into(),
+        J::Number(n) => match n.as_i64() {
+            Some(i) => i.into(),
+            None => n.as_f64()?.into(),
+        },
+        J::String(s) => s.as_str().into(),
+        J::Array(a) => toml_edit::Value::Array(a.iter().map(json_to_value).collect::<Option<_>>()?),
+        J::Object(o) => {
+            // A colour stop reads role, hex, alpha, as the example config
+            // writes it; anything else follows in name order
+            let rank = |k: &str| ["role", "hex", "alpha"].iter().position(|r| *r == k).unwrap_or(3);
+            let mut keys: Vec<&String> = o.keys().collect();
+            keys.sort_by_key(|k| (rank(k), k.as_str()));
+            let mut t = toml_edit::InlineTable::new();
+            for k in keys {
+                if !o[k].is_null() {
+                    t.insert(k, json_to_value(&o[k])?);
+                }
+            }
+            toml_edit::Value::InlineTable(t)
+        }
+        J::Null => return None,
+    })
+}
+
+/// Apply `{"set": [[table, key, value|null], ...], "reload": bool}` to
+/// config.toml in place: untouched lines, comments included, stay as they
+/// are. The result must parse as cavawall's own config before it is written
+fn edit_global(body: &[u8]) -> Result<String, String> {
+    #[derive(serde::Deserialize)]
+    struct Edit {
+        set: Vec<(String, String, serde_json::Value)>,
+        #[serde(default)]
+        reload: bool,
+    }
+    let edit: Edit = serde_json::from_slice(body).map_err(|e| e.to_string())?;
+    let path = config_dir().join("config.toml");
+    // Through the link to the real file: a stowed config.toml is a symlink,
+    // and renaming over it would replace the link with a copy
+    let real = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+    let text = std::fs::read_to_string(&real).unwrap_or_default();
+    let mut doc: toml_edit::DocumentMut = text.parse().map_err(|e| format!("config.toml: {e}"))?;
+    for (table, key, value) in &edit.set {
+        if !GLOBAL_TABLES.contains(&table.as_str()) {
+            return Err(format!("[{table}] is not editable here"));
+        }
+        if value.is_null() {
+            if let Some(t) = doc.get_mut(table).and_then(|t| t.as_table_like_mut()) {
+                t.remove(key);
+            }
+            continue;
+        }
+        let v = json_to_value(value).ok_or_else(|| format!("{table}.{key}: unsupported value"))?;
+        if doc.get(table).is_none() {
+            doc.insert(table, toml_edit::table());
+        }
+        let t = doc[table.as_str()].as_table_like_mut().ok_or_else(|| format!("[{table}] is not a table"))?;
+        match t.get_mut(key).and_then(|i| i.as_value_mut()) {
+            // Keeps the key's own spacing and trailing comment
+            Some(old) => {
+                let decor = old.decor().clone();
+                *old = v;
+                *old.decor_mut() = decor;
+            }
+            None => {
+                t.insert(key, toml_edit::Item::Value(v));
+            }
+        }
+    }
+    let new = doc.to_string();
+    toml::from_str::<Config>(&new).map_err(|e| format!("the result would not load: {e}"))?;
+    let dir = real.parent().ok_or("config.toml has no directory")?;
+    let tmp = dir.join(".config.toml.tune");
+    std::fs::write(&tmp, &new)
+        .and_then(|()| std::fs::rename(&tmp, &real))
+        .map_err(|e| format!("{}: {e}", real.display()))?;
+    println!("cavawall-tune: wrote {}", real.display());
+    if !edit.reload {
+        return Ok("written".to_owned());
+    }
+    Ok(match control::request(&Request::Reload) {
+        Ok(r) if r.ok => "reloaded".to_owned(),
+        Ok(r) => format!("not reloaded: {}", r.error.unwrap_or_default()),
+        Err(_) => "written; cavawall is not running".to_owned(),
+    })
+}
+
+/// Capture sources the sound server offers, for the page's source list.
+/// Empty when there is no pactl or no server
+fn audio_sources() -> Vec<String> {
+    let Ok(out) = Command::new("pactl").args(["list", "short", "sources"]).stderr(Stdio::null()).output() else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| l.split('\t').nth(1).map(str::to_owned))
+        .collect()
 }
 
 /// Store this wallpaper's settings, replacing its file, then apply them

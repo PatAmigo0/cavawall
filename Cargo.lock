@@ -116,6 +116,7 @@ dependencies = [
  "serde_json",
  "smithay-client-toolkit",
  "toml",
+ "toml_edit",
  "wayland-client",
  "wayland-egl",
  "wayland-protocols 0.31.2",
