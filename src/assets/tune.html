@@ -956,6 +956,16 @@ function buildSound() {
   chip(s, 'Waves', () => !!gVal('smoothing', 'waves', 0), on => gSet('smoothing', 'waves', on ? 1 : null), 'Monstercat as waves');
   s.insertAdjacentHTML('beforeend', '<p class=note>Saving restarts cava with these settings.</p>');
 
+  // Display: which monitor, and what a fullscreen window does to it
+  s = section('Display', '', 'every wallpaper', host);
+  const outs = (S.ctx.status && S.ctx.status.outputs) || [];
+  const cur = gVal('general', 'preferred_output', '');
+  gSelect(s, 'Monitor', 'general', 'preferred_output',
+    [['', 'Automatic (external first)'], ...[...new Set([...outs, ...(cur ? [cur] : [])])].map(o => [o, o])], '');
+  gSelect(s, 'Fullscreen', 'general', 'on_fullscreen',
+    [['ignore', 'Keep drawing'], ['move', 'Move to a free monitor'], ['pause', 'Pause']], 'ignore');
+  s.insertAdjacentHTML('beforeend', '<p class=note>Moving or pausing hides the bars and suspends cava while a fullscreen window covers the monitor.</p>');
+
   // Notifications: whether, how, and for which events
   s = section('Notifications', '', 'every wallpaper', host);
   gChip(s, 'Notify me', 'notify', 'enabled', true, 'Errors and crashes raise a desktop notification');
