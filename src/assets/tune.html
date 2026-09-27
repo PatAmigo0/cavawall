@@ -76,6 +76,14 @@ body:not([data-figure=curve]) .curve-only{display:none!important}
 .dock .tabs [role=tab][aria-selected=true]{color:var(--text);border-bottom-color:var(--accent)}
 .dock .tabs .grow{flex:1}
 .pane{overflow-y:auto;overscroll-behavior:contain;flex:1}
+.grip{margin-left:auto;cursor:grab;touch-action:none;color:var(--faint);letter-spacing:-2px}
+.grip:active{cursor:grabbing}
+.dock.placed{right:auto}
+.card .sec:first-child h2{cursor:pointer;user-select:none}
+.card .sec:first-child h2::before{content:'▾';font-size:10px;color:var(--faint);margin-right:2px;transition:transform .15s}
+.card.collapsed .sec:first-child h2::before{transform:rotate(-90deg)}
+.card.collapsed .sec:first-child > :not(h2),.card.collapsed .sec:not(:first-child){display:none}
+.card.collapsed .sec:first-child{padding-bottom:10px}
 body.folded .dock{transform:translateX(calc(100% - 40px))}
 body.folded .dock .pane{display:none}
 .card{position:absolute;left:12px;top:62px;width:268px;max-height:calc(100% - 112px);overflow-y:auto;z-index:2}
@@ -192,6 +200,7 @@ footer #status{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
       <div class=tabs role=tablist aria-label=Settings>
         <button class="btn ghost icon" id=dockFold title="Fold the panel" aria-label="Fold the panel">⟩</button>
         <button role=tab data-tab=shape aria-selected=true>Shape</button><button role=tab data-tab=look aria-selected=false>Look</button><button role=tab data-tab=sound aria-selected=false>Cava</button>
+        <button class="btn ghost icon grip" id=dockGrip title="Drag to move the panel; double-click to put it back" aria-label="Move the panel">⠿⠿</button>
       </div>
       <div class=pane id=paneShape></div><div class=pane id=paneLook hidden></div><div class=pane id=paneSound hidden></div>
     </aside>
@@ -973,6 +982,44 @@ $('dockFold').onclick = () => { const f = document.body.classList.toggle('folded
 function togglePop(id, btn) { const p = $(id), open = p.hidden; for (const o of ['viewPop', 'keysPop']) { $(o).hidden = true; } p.hidden = !open; for (const b of ['viewBtn', 'keysBtn']) $(b).setAttribute('aria-expanded', b === btn && open); }
 $('viewBtn').onclick = () => togglePop('viewPop', 'viewBtn');
 $('keysBtn').onclick = () => togglePop('keysPop', 'keysBtn');
+// The dock goes wherever it is dragged, and stays there next time
+function placeDock(x, y) {
+  const st = $('stage').getBoundingClientRect(), d = $('dock');
+  x = clamp(x, 8, st.width - d.offsetWidth - 8); y = clamp(y, 8, st.height - 48);
+  d.classList.add('placed'); d.style.left = x + 'px'; d.style.top = y + 'px';
+  d.style.maxHeight = `calc(100% - ${y + 12}px)`;
+  return [x, y];
+}
+function resetDock() {
+  const d = $('dock'); d.classList.remove('placed'); d.style.left = d.style.top = d.style.maxHeight = '';
+  try { localStorage.removeItem('dockPos'); } catch {}
+}
+{
+  const grip = $('dockGrip'); let from = null;
+  grip.addEventListener('pointerdown', e => {
+    const r = $('dock').getBoundingClientRect(), st = $('stage').getBoundingClientRect();
+    from = {dx: e.clientX - (r.left - st.left), dy: e.clientY - (r.top - st.top)}; grip.setPointerCapture(e.pointerId);
+  });
+  grip.addEventListener('pointermove', e => { if (from) placeDock(e.clientX - from.dx, e.clientY - from.dy); placePointPop(); });
+  grip.addEventListener('pointerup', () => {
+    if (!from) return; from = null;
+    const d = $('dock'); if (!d.classList.contains('placed')) return;
+    try { localStorage.setItem('dockPos', JSON.stringify([parseFloat(d.style.left), parseFloat(d.style.top)])); } catch {}
+  });
+  grip.addEventListener('dblclick', resetDock);
+  try { const p = JSON.parse(localStorage.getItem('dockPos') || 'null'); if (p) requestAnimationFrame(() => placeDock(p[0], p[1])); } catch {}
+  addEventListener('resize', () => { const d = $('dock'); if (d.classList.contains('placed')) placeDock(parseFloat(d.style.left), parseFloat(d.style.top)); });
+}
+// The layers card folds to its header
+function setCardCollapsed(on) {
+  $('layersCard').classList.toggle('collapsed', on);
+  try { localStorage.setItem('layersCollapsed', on ? '1' : ''); } catch {}
+}
+$('layersCard').addEventListener('click', e => {
+  if (e.target.closest('.sec:first-child > h2')) setCardCollapsed(!$('layersCard').classList.contains('collapsed'));
+});
+try { if (localStorage.getItem('layersCollapsed')) $('layersCard').classList.add('collapsed'); } catch {}
+
 // The point editor sits beside the point it edits
 function placePointPop() {
   const pop = $('pointPop'), q = S.fig === 'curve' ? selPoint() : null;
