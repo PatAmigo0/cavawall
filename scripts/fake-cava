@@ -1,0 +1,25 @@
+#!/usr/bin/env python3
+# Stands in for cava in tests: reads the config cavawall writes to its stdin,
+# then writes raw 16-bit frames of loud, moving bars at the configured rate.
+# Silent frames instead while the file named by $FAKE_CAVA_SILENT exists, so a
+# test can park and unpark the instance without playing any sound
+import math, os, re, struct, sys, time
+
+cfg = sys.stdin.read()
+bars = int((re.search(r"^bars\s*=\s*(\d+)", cfg, re.M) or [0, 12])[1])
+fps = int((re.search(r"^framerate\s*=\s*(\d+)", cfg, re.M) or [0, 45])[1])
+silent = os.environ.get("FAKE_CAVA_SILENT", "")
+out = sys.stdout.buffer
+t = 0
+while True:
+    if silent and os.path.exists(silent):
+        frame = [0] * bars
+    else:
+        frame = [int(40000 + 20000 * math.sin(t * 0.15 + i)) for i in range(bars)]
+    try:
+        out.write(struct.pack(f"<{bars}H", *frame))
+        out.flush()
+    except BrokenPipeError:
+        sys.exit(0)
+    t += 1
+    time.sleep(1 / fps)

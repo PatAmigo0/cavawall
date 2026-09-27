@@ -14,84 +14,129 @@ per-frame cost matters and startup cost does not.
 - Prefer recording a measurement over an adjective: "8 frames (0.18s)" beats
   "quickly".
 - **State what IS, never what WAS.** No history in comments: not what upstream
-  did, not what the old form allocated, not that a bug had no symptom until
-  something, not "used to be". Git holds that. A reader needs the code in
-  front of them explained, not its past.
+  did, not what the old form allocated, not "used to be". Git holds that.
 - No narration, no asides, no justification of a choice against alternatives
-  nobody proposed. If a constraint is real, name the constraint: "cava writes
-  a whole 24-byte frame at a time", not "we tried it the other way first".
-- Commit messages are where reasoning and history belong. Comments are facts
-  about the code as it stands.
-- **Abstract, not branded.** A comment names the mechanism, not the product:
-  "the external scheme source", not a vendor's name. Identifiers, paths and
-  file names in code are exempt - they have to match reality.
-- **No full stop at the end of a comment.** Interior sentences keep theirs;
-  the last one just ends.
+  nobody proposed. If a constraint is real, name the constraint.
+- Commit messages are where reasoning and history belong.
+- **Abstract, not branded.** A comment names the mechanism, not the product.
+  Identifiers, paths and file names in code are exempt.
+- **No full stop at the end of a comment.** Interior sentences keep theirs.
 
 ## Build and install
 
 ```bash
-export RUSTFLAGS="-C target-cpu=native"   # EXPORTED, see below
 cargo build --release
 cargo install --path . --force --root "$HOME/.local"
 ```
 
-`RUSTFLAGS` must be exported, not set per-command: `cargo install` is a separate
-invocation and would otherwise install a binary less optimised than the one just
-built. Verified by md5. `dotfiles/cavawall/build.sh` does this; match it.
+`.cargo/config.toml` asks for `target-cpu=native`: cavawall runs on the machine
+that built it. A packager overrides it with `RUSTFLAGS` in the environment,
+which wins over the file - the PKGBUILD does exactly that. On the author's
+machines the real build is `rust-pgo build cavawall` (PGO + BOLT).
 
-Never commit a `.cargo/config.toml` with `target-cpu=native`. The AUR PKGBUILD
-deliberately omits it so the package runs on any machine, and a config file in
-the source dir would silently override that during `makepkg`.
+## Testing against a live compositor
+
+**Never start a test instance by hand. Use `scripts/test-instance.sh`.**
+
+```bash
+scripts/test-instance.sh my-test.toml bash -c '$CTL status; touch $SILENT; sleep 2; $CTL status'
+TEST_ENV=CAVAWALL_DEBUG=1 TEST_LOG=1 scripts/test-instance.sh my-test.toml sleep 5
+```
+
+It gives the instance its own runtime dir - its own lock and control socket,
+so the session's cavawall is never touched - and `scripts/fake-cava` in place
+of cava, so nothing has to play sound and frames are loud and moving on
+demand (`touch $SILENT` makes them silent, to test parking). The command runs
+with `PID`, `CTL` (cavawallctl aimed at the test socket) and `SILENT` set.
+
+The EXIT/INT/TERM trap stops the instance, its cava and the command, and
+removes the runtime dir, however the command ends. **This matters because a
+forgotten instance is bars drawn on someone's screen** - it happened, from a
+measurement whose last step failed before its manual stop. Anything else you
+spawn in a test (a tuner, a browser) needs the same treatment: a trap, and a
+check afterwards that nothing is left:
+
+```bash
+pgrep -af 'release/cavawal[l]|fake-cav[a]|cavawall-tun[e]'   # must be empty
+```
+
+Bracket one letter of every `pgrep -f`/`pkill -f` pattern: an unbracketed one
+matches the shell running it and kills your own command.
 
 ## Running it
 
-`~/.local/bin/cavawall-launch` is the only thing that should ever start this.
-It holds an flock and kills stale instances first; starting the binary directly
-stacks a second layer surface.
+`~/.local/bin/cavawall-launch` is the only thing that should ever start the
+session's instance. It holds an flock and kills stale instances first.
 
 **argv must stay exactly `[binary]`.** The launcher, `cavawall-theme.fish` and
-`fullscreen-watch` all identify this process by an exact argv match. New knobs
-go in `config.toml` or an env var (`CAVAWALL_OUTPUT`, `CAVAWALL_DEBUG`), never a
-CLI flag.
+`fullscreen-watch` identify this process by an exact argv match. New knobs go
+in `config.toml` or an env var (`CAVAWALL_OUTPUT`, `CAVAWALL_DEBUG`), never a
+CLI flag. `--config` exists for tests only.
 
-**Stop with SIGTERM, never SIGKILL.** The handler paints one transparent frame
-and round-trips; a hard kill leaves the last bars burnt onto the wallpaper,
-because Hyprland does not reliably repaint under a layer surface that vanishes.
+**Stop with SIGTERM or `cavawallctl stop`, never SIGKILL.** The exit path
+paints one transparent frame and round-trips; a hard kill leaves the last bars
+burnt onto the wallpaper. cava is tied to us with `PR_SET_PDEATHSIG` and is
+killed on every exit path.
 
-## Hot path: `draw()` and `poll_resume()`
+## The loop
 
-- **No allocation.** `vertices` and `cava_buffer` are `Box<[T]>` on `AppState`,
-  sized from the bar count at startup. Adding a `vec![]` or a `format!` here
-  puts an allocation back into every frame.
-- **GL state is set once in `main`** - program, vertex array, blend mode, clear
-  colour - and `Uniform2f` only in `configure()`. `draw()` binds `ARRAY_BUFFER`
-  and nothing else. Anything that binds a vertex array or a program, or leaves
-  `ARRAY_BUFFER` pointing elsewhere, breaks that invariant silently.
-- **One float per bar is the entire per-frame vertex payload.** Bars are
-  instances of a static unit quad; width and stride are uniforms and the column
-  comes from `gl_InstanceID`. Do not reintroduce a per-bar vertex array.
-- **Silence is decided in exactly one place**, `is_silent()`, on the raw u16
-  samples. `draw()` parks on it and `poll_resume()` unparks on it; two copies
-  drift and the visualiser parks at one threshold and wakes at another.
+Everything is an event source and the loop sleeps with **no timeout**: cava's
+pipe (non-blocking), the inotify watch, the control socket, an eventfd the
+signal handler writes, and the Wayland connection. `tick()` runs after every
+dispatch.
+
+- **A frame is drawn when both halves are in**: a frame callback has arrived
+  (`redraw`) and cava has produced a frame since the last draw (`fresh`).
+  Whichever arrives second triggers `draw()`, from `tick()` or `on_cava()`.
+- **Never draw inside Wayland dispatch.** A swap reads the Wayland socket and
+  queues the next callback, so drawing in the frame handler kept dispatch
+  busy for as long as audio played and starved every other source - the
+  control socket went unanswered (measured: 4s timeouts). The frame handler
+  and configure only set flags.
+- **Parking** is decided per frame in `on_cava()`, against the one threshold
+  in `is_silent()`: after 23 silent frames nothing is drawn or committed, and
+  a loud frame unparks. `general.sleep_timer` makes cava itself sleep in long
+  silences, so a parked instance barely wakes.
+- **One callback in flight.** `frame_pending` guards it; `place_on` resets it,
+  since a new surface carries none.
+
+## Hot path
+
+- **No allocation.** `cava_buffer`, `prev_frame` and `cava_scratch` are
+  `Box<[u8]>` sized once from the bar count.
+- **Per frame: a 46-byte memcpy into the persistent height ring, one clear,
+  one instanced draw, one swap.** The ring is `glBufferStorage` + a coherent
+  persistent map (GL 4.4); the base instance picks the slot. A frame that
+  would draw the same heights is skipped entirely - no commit.
+- **GL state is set once** - program, VAO, blend, textures on units 0 and 1.
+  Only `MaskPass::rasterise` binds anything else, and it hands the bar program
+  and VAO back.
+- **Every mode is one draw call.** Curve occluders are rasterised once per
+  configure into an R16UI mask (a bit per occluder, XOR parity fill), and the
+  curve fragment stage discards against each bar's mask. There is no stencil
+  buffer in the EGL config at all.
+- **Optional features are compile-time variants.** `radius` and `reveal` are
+  `#define`d into the shaders at startup only when used, so a config without
+  them runs exactly the shaders it always did.
 
 ## Things that look wrong but are not
 
-- `surface.frame()` goes **before** `swap_buffers`, not after - the request is
-  double-buffered state and needs a commit after it, which the swap provides.
+- `surface.frame()` goes **before** the swap: the request is double-buffered
+  state and needs a commit after it, which the swap provides.
 - The park path deliberately does **not** commit. Hyprland damages a layer by
   its geometry on any commit, buffer attached or not.
 - The bar count is **startup-only**: it is written into cava's config at exec
-  time and baked into the index buffer. Changing it re-execs (`reexec()`), which
-  must kill and reap cava first - exec keeps the PID, so it keeps the children.
-- The inotify watch is polled from `draw()`, not registered with calloop. That
-  looks backwards and is not: calloop polls once at the top of `dispatch_events`
-  and then dispatches ready sources, while `WaylandSource::process_events` loops
-  on `dispatch_pending` until the queue drains - and every `draw()` in that loop
-  calls `eglSwapBuffers`, which reads the socket and refills it. The loop does
-  not end while audio plays, so no second poll happens and a registered source
-  would be starved exactly as the timeout callback is. Measured: `draw=29,
-  poll_resume=0` over the first second of playback.
+  time and sizes the instance buffers. Changing it re-execs (`reexec()`),
+  which kills and reaps cava first - exec keeps the PID, so it keeps the
+  children.
+- The swap interval is set on **every** new EGL surface (`rebind_egl`): it
+  belongs to the surface, and a new one is back at 1, which on NVIDIA means
+  FIFO - a second commit per frame and a vsync wait inside every swap.
+- `place_on` keeps the old `LayerSurface` alive until EGL has moved: dropping
+  one destroys its `wl_surface` too, and the EGL window still points there.
+- Configure only resizes the `wl_egl_window` and marks a redraw. Hyprland
+  sends a new surface two configures back to back, and drawing on the first
+  commits a frame at a size the second makes stale.
 - The fragment shader indexes `gradient_colors_size - 2` with no lower bound.
   That is safe only because `gradient_buffer()` uploads a lone configured stop
   twice; do not "optimise" that duplication away.
@@ -103,7 +148,7 @@ cargo clippy --release --all-targets   # must be silent
 cargo test --release
 ```
 
-Tests cover what the GPU cannot: the quad layout against the index buffer, the
-gap ratio, and the silence boundary against the f32 threshold it replaced.
-Changes to the GL or placement paths still need a real run - `cavawall-launch`,
-then `grim` the bottom band.
+Tests cover what the GPU cannot: placement maths, damage rects, the occluder
+resolution and triangulation, the QOI decoder, the reveal map. Changes to the
+GL or placement paths still need a real run through `scripts/test-instance.sh`
+and a `grim` of the result.
