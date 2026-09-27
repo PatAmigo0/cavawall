@@ -1,17 +1,20 @@
 #version 430 core
-// readonly: nothing here writes the palette
+// The circle's fragment stage plus occlusion: the gradient and alpha ramp run
+// along the bar by vRadial exactly as there
 layout(std430, binding = 0) readonly buffer GradientColors {
     int gradient_colors_size;
     vec4 gradient_colors[];
 };
-// 0 at a bar's base to 1 at the top of the surface
-in float vLevel;
-// A matte finish: every bar mixed toward one flat tone, so the gradient stops
-// reading as a lit ramp. The tone is the palette's own mean, computed on the
-// CPU, so matte = 1 is the palette flattened rather than an arbitrary grey
+// One bit per occluder, rasterised once per configure. Surface-sized, so a
+// fragment reads its own texel
+uniform usampler2D Occluders;
+// The occluders that cut this bar's path
+flat in uint vMask;
+in float vRadial;
+uniform float InnerAlpha;
+uniform float OuterAlpha;
 uniform vec3 MatteColor;
 uniform float Matte;
-// One multiplier over whatever alpha the stops already carry
 uniform float Opacity;
 #ifdef ROUND
 // A fraction of the bar's width; only the tip is rounded, the base stands
@@ -29,12 +32,17 @@ uniform float RevealMix;
 #endif
 out vec4 fragColor;
 void main() {
-    float findex = vLevel * float(gradient_colors_size - 1);
-    // Clamped before the fraction is taken, so the top row lands on the last
-    // stop rather than a step of 0.0 into the one below it. Branchless, and
-    // gradient_buffer guarantees at least two stops so this cannot go negative
+    // First, before any gradient work is spent on a fragment that is hidden
+    if ((texelFetch(Occluders, ivec2(gl_FragCoord.xy), 0).r & vMask) != 0u) {
+        discard;
+    }
+    float t = clamp(vRadial, 0.0, 1.0);
+    float findex = t * float(gradient_colors_size - 1);
+    // Safe with no lower bound only because gradient_buffer uploads a lone
+    // configured stop twice
     int index = min(int(findex), gradient_colors_size - 2);
     vec4 c = mix(gradient_colors[index], gradient_colors[index + 1], findex - float(index));
+    c.a *= mix(InnerAlpha, OuterAlpha, t);
 #ifdef REVEAL
     c.rgb = mix(c.rgb, texture(Reveal, gl_FragCoord.xy * RevealMap.xy + RevealMap.zw).rgb, RevealMix);
 #endif

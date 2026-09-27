@@ -4,6 +4,16 @@ use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
+use std::time::Duration;
+
+/// How long the instance waits on one client. It serves them on the render
+/// thread, so a client that connects and never writes costs this, not a hang
+pub const SERVE_TIMEOUT: Duration = Duration::from_millis(250);
+
+/// How long a client waits for an answer. A running instance answers within a
+/// frame; one that has not answered in this long is wedged, and a caller must
+/// not wedge with it
+pub const REPLY_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Beside the instance lock, one per session
 #[must_use]
@@ -23,7 +33,7 @@ pub enum Request {
     Move { output: Option<String> },
     /// Clear the surface and exit
     Stop,
-    /// Re-read config and palette without restarting
+    /// Re-read config by re-exec'ing in place: same pid, same environment
     Reload,
 }
 
@@ -82,9 +92,12 @@ pub fn write_response(mut stream: &UnixStream, response: &Response) {
 ///
 /// # Errors
 /// When the socket is absent or unreadable, which is how a caller learns
-/// there is no running instance.
+/// there is no running instance, or `WouldBlock`/`TimedOut` when one is
+/// listening but did not answer within [`REPLY_TIMEOUT`].
 pub fn request(req: &Request) -> std::io::Result<Response> {
     let stream = UnixStream::connect(socket_path())?;
+    stream.set_read_timeout(Some(REPLY_TIMEOUT))?;
+    stream.set_write_timeout(Some(REPLY_TIMEOUT))?;
     let mut body = serde_json::to_vec(req)?;
     body.push(b'\n');
     (&stream).write_all(&body)?;

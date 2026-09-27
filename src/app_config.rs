@@ -35,6 +35,16 @@ pub struct BarOverride {
     pub max_height: Option<f32>,
     pub opacity: Option<f32>,
     pub matte: Option<f32>,
+    pub left: Option<f32>,
+    pub span: Option<f32>,
+    pub baseline: Option<f32>,
+    pub grow: Option<Grow>,
+    pub radius: Option<f32>,
+    pub reveal: Option<f32>,
+    /// The recipe cavawall-tune baked the reveal image from, kept so the
+    /// next edit starts from it. The renderer reads only the image
+    pub reveal_source: Option<String>,
+    pub reveal_filter: Option<String>,
 }
 
 impl BarOverride {
@@ -46,8 +56,24 @@ impl BarOverride {
             max_height: self.max_height.or(base.max_height),
             opacity: self.opacity.or(base.opacity),
             matte: self.matte.or(base.matte),
+            left: self.left.or(base.left),
+            span: self.span.or(base.span),
+            baseline: self.baseline.or(base.baseline),
+            grow: self.grow.or(base.grow),
+            radius: self.radius.or(base.radius),
+            reveal: self.reveal.or(base.reveal),
         }
     }
+}
+
+/// Which way a row of bars grows from its baseline
+#[derive(Serialize, Deserialize, Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Grow {
+    #[default]
+    Up,
+    /// Hanging from the baseline, for a row along the top
+    Down,
 }
 
 /// Per-wallpaper overrides, one file each under `wallpapers/`.
@@ -159,9 +185,11 @@ pub struct CurveConfig {
     /// `points`. Anything BELOW it is discarded, so bars rise from behind a
     /// ridge rather than being placed to look as though they do
     ///
-    /// One per curve: it is the wallpaper's skyline, and every path on that
-    /// wallpaper hides behind the same one
+    /// The one-shape form, cutting every path; `occluder` is the general one
     pub occlude: Option<Vec<Vec<f32>>>,
+    /// Named shapes bars hide behind. A path names the ones that cut it in
+    /// `cut_by`; one that names none is cut by all of them
+    pub occluder: Option<Vec<OccluderConfig>>,
     /// How the wallpaper covers the output. Points are authored on the IMAGE
     /// and have to be cropped onto the screen the same way the image itself
     /// is, or a curve lands beside the ridge it was drawn on
@@ -199,7 +227,45 @@ pub struct PathConfig {
     pub occlude: Option<Vec<Vec<f32>>>,
     /// False leaves this path unclipped, ignoring every silhouette
     pub clip: Option<bool>,
+    /// The occluders that cut this path, by name. Absent is every one of
+    /// them; empty is none. Several cut by their union
+    pub cut_by: Option<Vec<String>>,
 }
+
+/// A shape bars hide behind, shared by every path that names it
+#[derive(Serialize, Deserialize, Debug, Default, Clone)]
+pub struct OccluderConfig {
+    /// What paths call it; also its label in the editor
+    pub name: Option<String>,
+    /// `[x, y]` in the same image coordinates as a path's points
+    pub points: Vec<Vec<f32>>,
+    pub shape: Option<OccluderShape>,
+}
+
+/// How an occluder's outline becomes an area
+#[derive(Serialize, Deserialize, Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum OccluderShape {
+    /// Closed straight down to the bottom edge: a ridge or a skyline, hiding
+    /// everything beneath it
+    #[default]
+    Skyline,
+    /// Closed on itself: a tree, a rock, anything with sky below it too. An
+    /// outline that crosses itself is filled by parity, so it can have holes
+    Closed,
+}
+
+/// Occluders, resolved: every shape and the set that cuts each path
+#[derive(Debug, Default, PartialEq)]
+pub struct Occlusion<'a> {
+    /// In bit order: shape `i` is bit `1 << i` of a path's mask
+    pub shapes: Vec<(&'a [Vec<f32>], OccluderShape)>,
+    /// One per path of `CurveConfig::paths`, in order
+    pub masks: Vec<u16>,
+}
+
+/// Shapes past this are dropped: the mask a bar tests is sixteen bits
+pub const MAX_OCCLUDERS: usize = 16;
 
 impl CurveConfig {
     /// How many bars this curve draws in total
@@ -237,8 +303,63 @@ impl CurveConfig {
                 // The shorthand is one path; its silhouette is the curve's
                 occlude: None,
                 clip: None,
+                cut_by: None,
             }]),
         }
+    }
+
+    /// Every shape and which of them cut each path, one form for all three ways
+    /// a config can say it: named `occluder`s, the one-shape `occlude`, and a
+    /// path's own `occlude`
+    ///
+    /// A path's own `occlude` cuts only that path. `clip = false` is cut by
+    /// nothing. Otherwise `cut_by` names the shapes, and without it every
+    /// shared shape applies. Shapes with fewer than two points are dropped,
+    /// and so is every name that matches none
+    #[must_use]
+    pub fn occlusion(&self) -> Occlusion<'_> {
+        let drawn = |p: &[Vec<f32>]| p.iter().filter(|v| v.len() >= 2).count() >= 2;
+        let mut shapes = Vec::new();
+        let mut names: Vec<Option<&str>> = Vec::new();
+        for o in self.occluder.iter().flatten().filter(|o| drawn(&o.points)) {
+            shapes.push((o.points.as_slice(), o.shape.unwrap_or_default()));
+            names.push(o.name.as_deref());
+        }
+        if let Some(pts) = self.occlude.as_deref().filter(|p| drawn(p)) {
+            shapes.push((pts, OccluderShape::Skyline));
+            names.push(None);
+        }
+        shapes.truncate(MAX_OCCLUDERS);
+        let bit = |i: usize| if i < MAX_OCCLUDERS { 1u16 << i } else { 0 };
+        let shared = (0..shapes.len()).fold(0u16, |m, i| m | bit(i));
+
+        // The single-path shorthand has no silhouette of its own: every
+        // shared shape cuts it
+        let paths = match &self.path {
+            Some(paths) if !paths.is_empty() => paths.as_slice(),
+            _ => return Occlusion { shapes, masks: vec![shared] },
+        };
+        let mut masks = Vec::with_capacity(paths.len());
+        for p in paths {
+            let own = p.occlude.as_deref().filter(|o| drawn(o));
+            let mask = if p.clip == Some(false) {
+                0
+            } else if let Some(cut_by) = &p.cut_by {
+                cut_by
+                    .iter()
+                    .filter_map(|n| names.iter().position(|m| *m == Some(n.as_str())))
+                    .fold(0, |m, i| m | bit(i))
+            } else if let Some(own) = own {
+                shapes.push((own, OccluderShape::Skyline));
+                names.push(None);
+                bit(shapes.len() - 1)
+            } else {
+                shared
+            };
+            masks.push(mask);
+        }
+        shapes.truncate(MAX_OCCLUDERS);
+        Occlusion { shapes, masks }
     }
 }
 
@@ -285,6 +406,9 @@ pub struct CircleConfig {
     /// nothing there
     pub margin_x: Option<u32>,
     pub margin_y: Option<u32>,
+    /// The centre as `[x, y]` fractions of the output, origin top left.
+    /// Overrides `anchor` and the margins, for a circle placed by hand
+    pub position: Option<[f32; 2]>,
 }
 
 /// What to take from the external scheme source rather than from this file
@@ -348,6 +472,11 @@ pub struct GeneralConfig {
     /// output switches (Bluetooth, speakers, headphones) without silently
     /// going dead
     pub audio_source: Option<String>,
+    /// Seconds of silence before cava sleeps: it stops analysing and nearly
+    /// stops writing, so this process parks with next to nothing to read.
+    /// The cost is waking - measured 480ms from a tone to the first loud frame
+    /// against 37ms awake - so only silences longer than this pay it
+    pub sleep_timer: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -362,6 +491,22 @@ pub struct BarConfig {
     /// written and 1 for the palette flattened to its own mean. A matte
     /// finish: the ramp stops reading as something lit
     pub matte: Option<f32>,
+    /// Where the row sits, as fractions of the output. Unset, it runs the full
+    /// width along the bottom. `left` and `span` are its horizontal extent;
+    /// `baseline` is where the bars stand, from the top
+    pub left: Option<f32>,
+    pub span: Option<f32>,
+    pub baseline: Option<f32>,
+    pub grow: Option<Grow>,
+    /// Rounds each bar's tip, as a fraction of its width: 0.5 is a full
+    /// semicircle. Bars and curve only; a circle's bars are wedges. Zero or
+    /// absent compiles the rounding out of the shader altogether
+    pub radius: Option<f32>,
+    /// How far bars show the wallpaper's reveal image instead of the
+    /// gradient, 0 to 1: an x-ray through the bars. The image is
+    /// `wallpapers/<key>.reveal.qoi`, written by cavawall-tune. Zero, absent,
+    /// or no image compiles it out
+    pub reveal: Option<f32>,
 }
 
 /// The mean of a palette, which is the tone a matte finish flattens toward
@@ -426,6 +571,8 @@ pub struct CavaGeneralConfig {
     pub bars: u32,
     pub autosens: Option<bool>,
     pub sensitivity: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sleep_timer: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -577,8 +724,7 @@ pub fn gradient_buffer(rgba: &[[f32; 4]]) -> Vec<u8> {
 }
 
 /// Stops as the GPU sees them: a single configured stop is uploaded twice, so
-/// the fragment shader always has a pair to mix between. `GradientScale` must
-/// be derived from this, not from the configured count
+/// the fragment shader always has a pair to mix between
 #[must_use]
 pub fn uploaded_stops(configured: usize) -> usize {
     configured.max(2)
@@ -757,6 +903,56 @@ mod tests {
         assert_eq!(paths[0].flip, None);
         assert_eq!(curve.occlude.as_ref().unwrap().len(), 2);
         assert!(curve.points.is_none(), "path blocks replace the shorthand");
+    }
+
+    /// Every way a config can name a silhouette lands in one list of bits,
+    /// and each path's mask says exactly which of them cut it
+    #[test]
+    fn occluders_resolve_to_bits_and_masks() {
+        let c: HashMap<String, CurveConfig> = toml::from_str(
+            r#"
+            [k]
+            occlude = [[0.0, 0.9], [1.0, 0.9]]
+            [[k.occluder]]
+            name = "ridge"
+            points = [[0.0, 0.5], [1.0, 0.5]]
+            [[k.occluder]]
+            name = "tree"
+            shape = "closed"
+            points = [[0.2, 0.2], [0.3, 0.2], [0.25, 0.4]]
+            [[k.occluder]]
+            name = "stray"
+            points = [[0.5, 0.5]]
+            [[k.path]]
+            points = [[0.0, 0.6], [1.0, 0.6]]
+            [[k.path]]
+            points = [[0.0, 0.6], [1.0, 0.6]]
+            cut_by = ["tree", "nope"]
+            [[k.path]]
+            points = [[0.0, 0.6], [1.0, 0.6]]
+            occlude = [[0.0, 0.3], [1.0, 0.3]]
+            [[k.path]]
+            points = [[0.0, 0.6], [1.0, 0.6]]
+            clip = false
+            [[k.path]]
+            points = [[0.0, 0.6], [1.0, 0.6]]
+            cut_by = []
+            "#,
+        )
+        .expect("parses");
+        let o = c["k"].occlusion();
+        // ridge, tree, the shared one, then the third path's own; the one
+        // point "stray" is no shape at all
+        assert_eq!(o.shapes.len(), 4);
+        assert_eq!(o.shapes[1].1, OccluderShape::Closed);
+        assert_eq!(o.shapes[3].1, OccluderShape::Skyline);
+        assert_eq!(o.masks, vec![0b0111, 0b0010, 0b1000, 0, 0]);
+
+        // The shorthand is one path, cut by every shared shape
+        let short: HashMap<String, CurveConfig> =
+            toml::from_str("[k]\npoints = [[0.0, 0.5], [1.0, 0.5]]\nocclude = [[0.0, 0.2], [1.0, 0.2]]")
+                .expect("parses");
+        assert_eq!(short["k"].occlusion().masks, vec![1]);
     }
 
     /// The shipped config is what install.sh copies into ~/.config, so a

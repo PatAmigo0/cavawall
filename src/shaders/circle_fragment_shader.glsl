@@ -16,6 +16,13 @@ uniform vec3 MatteColor;
 uniform float Matte;
 // One multiplier over whatever alpha the stops already carry
 uniform float Opacity;
+#ifdef REVEAL
+// The x-ray image, and the map from this fragment to its texel, composed on
+// the CPU from where the surface sits and how the image crops onto the output
+uniform sampler2D Reveal;
+uniform vec4 RevealMap;
+uniform float RevealMix;
+#endif
 out vec4 fragColor;
 void main() {
     float t = clamp(vRadial, 0.0, 1.0);
@@ -27,6 +34,9 @@ void main() {
     vec4 c = mix(gradient_colors[index], gradient_colors[index + 1], findex - float(index));
     // Radial alpha ramp, applied on top of whatever alpha the stop carries
     c.a *= mix(InnerAlpha, OuterAlpha, t);
+#ifdef REVEAL
+    c.rgb = mix(c.rgb, texture(Reveal, gl_FragCoord.xy * RevealMap.xy + RevealMap.zw).rgb, RevealMix);
+#endif
     c.rgb = mix(c.rgb, MatteColor, Matte);
     c.a *= Opacity;
     fragColor = c;

@@ -199,17 +199,15 @@ pub struct PathSpec {
     pub width: f32,
     pub flip: bool,
     pub upright: bool,
-    /// This path's own silhouette; absent falls back to the curve's
-    pub occlude: Option<Box<[Control]>>,
-    /// False is never clipped, whatever silhouettes exist
-    pub clip: bool,
+    /// The occluders that cut this path, one bit each
+    pub mask: u16,
 }
 
-/// One bar, ready for the GPU: base, the normal's angle, and the reach and
-/// width already multiplied by the per-point scale
+/// One bar, ready for the GPU: base, normal, and the reach and width already
+/// multiplied by the per-point scale
 ///
 /// The scale is folded in here because the shader has no per-path anything,
-/// just one bar after another
+/// just one bar after another - down to which occluders cut it
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Bar {
     pub pos: [f32; 2],
@@ -217,82 +215,108 @@ pub struct Bar {
     pub normal: [f32; 2],
     pub reach: f32,
     pub width: f32,
+    pub mask: u16,
 }
 
-/// The lowest any silhouette reaches, per x bucket, as a height above the
-/// bottom. Zero where none of them reach.
+/// A shape bars hide behind, in image coordinates
+#[derive(Clone, Debug, Default)]
+pub struct Occluder {
+    pub points: Box<[Control]>,
+    /// Closed on itself, rather than down to the bottom edge
+    pub closed: bool,
+}
+
+impl Occluder {
+    /// The outline as a polygon in the output's NDC. A skyline gains two
+    /// corners on the bottom edge, so it covers everything beneath it
+    #[must_use]
+    pub fn polygon(&self, fit: Fit) -> Vec<[f32; 2]> {
+        if self.points.len() < 2 {
+            return Vec::new();
+        }
+        let mut out: Vec<[f32; 2]> = Vec::with_capacity(self.points.len() + 2);
+        out.extend(self.points.iter().map(|c| {
+            let m = fit.map([c.x, c.y]);
+            Control { x: m[0], y: m[1], ..*c }.to_ndc()
+        }));
+        if !self.closed {
+            let (first, last) = (out[0][0], out[out.len() - 1][0]);
+            out.push([last, -1.0]);
+            out.push([first, -1.0]);
+        }
+        out
+    }
+}
+
+/// Every occluder as triangles, each vertex carrying its shape's bit
 ///
-/// Sound because every outline is closed down to the bottom edge, so below its
-/// lowest point is inside the shape. The minimum ACROSS outlines, because a
-/// path clipped high does not stop another path drawing lower.
+/// A fan from the first vertex, drawn with XOR into an integer target, fills a
+/// polygon by parity whatever its shape: every point inside is covered an odd
+/// number of times. No tessellation, and an outline that crosses itself, or
+/// winds back on itself as a ridge does, is still one shape
 #[must_use]
-pub fn occluder_floor(outlines: &[Box<[Control]>], fit: Fit) -> Vec<f32> {
+pub fn occluder_triangles(occluders: &[Occluder], fit: Fit) -> Vec<MaskVertex> {
+    let mut out = Vec::new();
+    for (i, o) in occluders.iter().enumerate().take(16) {
+        let poly = o.polygon(fit);
+        let bit = 1u32 << i;
+        out.reserve(poly.len().saturating_sub(2) * 3);
+        for w in poly.windows(2).skip(1) {
+            out.extend([poly[0], w[0], w[1]].map(|pos| MaskVertex { pos, bit }));
+        }
+    }
+    out
+}
+
+/// One vertex of an occluder triangle, laid out as the mask pass reads it:
+/// two floats of position and the shape's bit, 12 bytes
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[repr(C)]
+pub struct MaskVertex {
+    pub pos: [f32; 2],
+    pub bit: u32,
+}
+
+/// How far up every occluder that cuts ALL bars reaches, per x bucket, as a
+/// height above the bottom. Zero where none does
+///
+/// Only skylines count: they are closed down to the bottom edge, so below the
+/// lowest point of their outline is inside them. And only those in `common`,
+/// the bits every bar tests: a path cut by fewer is not hidden there. Within a
+/// bucket the highest floor wins, since each hides everything under its own
+#[must_use]
+pub fn occluder_floor(occluders: &[Occluder], common: u16, fit: Fit) -> Vec<f32> {
     let mut floor = vec![0.0f32; HORIZON_BUCKETS];
-    let mut seen = vec![false; HORIZON_BUCKETS];
     let last = (HORIZON_BUCKETS - 1) as f32;
-    for outline in outlines {
-        let pts: Vec<(f32, f32)> = outline
-            .iter()
-            .map(|c| {
-                let m = fit.map([c.x, c.y]);
-                (m[0].clamp(0.0, 1.0), 1.0 - m[1].clamp(0.0, 1.0))
-            })
-            .collect();
+    let mut own = vec![f32::NAN; HORIZON_BUCKETS];
+    for (i, o) in occluders.iter().enumerate().take(16) {
+        if o.closed || common & (1 << i) == 0 {
+            continue;
+        }
+        // This outline's floor per bucket, then its union with the others. A
+        // bucket it never spans hides nothing for it
+        own.fill(f32::NAN);
+        let pts = o.points.iter().map(|c| {
+            let m = fit.map([c.x, c.y]);
+            (m[0].clamp(0.0, 1.0), 1.0 - m[1].clamp(0.0, 1.0))
+        });
+        let pts: Vec<(f32, f32)> = pts.collect();
         for w in pts.windows(2) {
             let (a, b) = (w[0], w[1]);
-            let lo = (a.0.min(b.0) * last).floor() as usize;
-            let hi = (a.0.max(b.0) * last).ceil() as usize;
+            let lo = ((a.0.min(b.0) * last).floor() as usize).min(HORIZON_BUCKETS - 1);
+            let hi = ((a.0.max(b.0) * last).ceil() as usize).min(HORIZON_BUCKETS - 1);
             let low = a.1.min(b.1);
-            for i in lo.min(HORIZON_BUCKETS - 1)..=hi.min(HORIZON_BUCKETS - 1) {
-                floor[i] = if seen[i] { floor[i].min(low) } else { low };
-                seen[i] = true;
+            for slot in &mut own[lo..=hi] {
+                *slot = if slot.is_nan() { low } else { slot.min(low) };
+            }
+        }
+        for (f, o) in floor.iter_mut().zip(&own) {
+            if !o.is_nan() {
+                *f = f.max(*o);
             }
         }
     }
     floor
-}
-
-/// An occluder as a closed outline in the output's NDC, ready for a fan.
-///
-/// The line is closed down to the bottom edge, so a skyline covers everything
-/// beneath it. Parity fill then handles one that doubles back on itself, which
-/// a height-per-x array could not represent at all.
-#[must_use]
-pub fn occluder_outline(points: &[Control], fit: Fit) -> Vec<[f32; 2]> {
-    if points.len() < 2 {
-        return Vec::new();
-    }
-    let mut out: Vec<[f32; 2]> = points
-        .iter()
-        .map(|c| {
-            let m = fit.map([c.x, c.y]);
-            Control { x: m[0], y: m[1], ..*c }.to_ndc()
-        })
-        .collect();
-    let (first, last) = (out[0][0], out[out.len() - 1][0]);
-    out.push([last, -1.0]);
-    out.push([first, -1.0]);
-    out
-}
-
-/// Stencil bits are eight, so eight distinct silhouettes.
-pub const MAX_OCCLUDERS: usize = 8;
-
-/// One instanced draw: a run of bars and the silhouette they test against.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PathDraw {
-    pub first: u32,
-    pub count: u32,
-    /// Which occluder, and so which stencil bit. None is never clipped.
-    pub occ: Option<u8>,
-}
-
-/// Bars, the draws that cover them, and the outlines those draws test.
-pub struct Built {
-    pub bars: Vec<Bar>,
-    pub draws: Vec<PathDraw>,
-    /// Distinct outlines in bit order; index i is stencil bit 1 << i
-    pub occluders: Vec<Box<[Control]>>,
 }
 
 /// Split `count` bars between paths: whatever `fixed` asks for, and the rest
@@ -365,71 +389,68 @@ pub fn allocate(lengths: &[f32], fixed: &[Option<u32>], count: u32) -> Vec<u32> 
     out
 }
 
-/// Every bar of every path, in one buffer
+/// Every bar of every path, in one buffer and so one draw
 ///
-/// One draw call: the shader indexes per instance and has no idea paths
-/// exist, so a second curve costs only its own bars
+/// The shader indexes per instance and has no idea paths exist, so a second
+/// curve costs only its own bars. Each bar carries its path's occluder mask
 #[must_use]
-pub fn build(paths: &[PathSpec], shared: &[Control], count: u32, aspect: f32, fit: Fit) -> Built {
+pub fn build(paths: &[PathSpec], count: u32, aspect: f32, fit: Fit) -> Vec<Bar> {
     let usable: Vec<&PathSpec> = paths.iter().filter(|p| p.controls.len() >= 2).collect();
     if usable.is_empty() {
-        return Built { bars: Vec::new(), draws: Vec::new(), occluders: Vec::new() };
+        return Vec::new();
     }
-    // Shared first, so paths that do not override it all name bit 0
-    let drawn = |c: &[Control]| c.len() >= 2;
-    let mut occluders: Vec<Box<[Control]>> = Vec::new();
-    let shared_occ = drawn(shared).then(|| {
-        occluders.push(shared.into());
-        0u8
-    });
     // Densified once and kept: measuring a path and sampling it are the same
-    // walk, and build runs on every configure
-    let mapped: Vec<Box<[Control]>> = usable
+    // walk, and build runs on every placement
+    let arcs: Vec<Arc> = usable
         .iter()
         .map(|p| {
-            p.controls
+            let mapped: Vec<Control> = p
+                .controls
                 .iter()
                 .map(|c| {
                     let m = fit.map([c.x, c.y]);
                     Control { x: m[0], y: m[1], ..*c }
                 })
-                .collect()
+                .collect();
+            arc(&mapped, aspect)
         })
         .collect();
-    let arcs: Vec<Arc> = mapped.iter().map(|c| arc(c, aspect)).collect();
     let counts = allocate(
         &arcs.iter().map(|a| a.total).collect::<Vec<_>>(),
         &usable.iter().map(|p| p.bars).collect::<Vec<_>>(),
         count,
     );
     let mut out = Vec::with_capacity(count as usize);
-    let mut draws: Vec<PathDraw> = Vec::with_capacity(usable.len());
     for ((spec, a), n) in usable.iter().zip(&arcs).zip(counts) {
-        let occ = if !spec.clip { None } else { match spec.occlude.as_deref() {
-            Some(c) if drawn(c) && occluders.len() < MAX_OCCLUDERS => {
-                occluders.push(c.into());
-                u8::try_from(occluders.len() - 1).ok()
-            }
-            _ => shared_occ,
-        } };
-        let first = u32::try_from(out.len()).unwrap_or(0);
-        for (s, scale) in sample_arc(a, n as usize, spec.flip, spec.upright, aspect) {
-            out.push(Bar {
-                pos: s.pos,
-                normal: s.normal,
-                reach: spec.reach * scale,
-                width: spec.width * scale,
-            });
-        }
-        // Bars are contiguous, so neighbours wanting the same stencil bit are
-        // one range and one draw
-        let len = u32::try_from(out.len()).unwrap_or(0) - first;
-        match draws.last_mut() {
-            Some(prev) if prev.occ == occ => prev.count += len,
-            _ => draws.push(PathDraw { first, count: len, occ }),
-        }
+        let bars = sample_arc(a, n as usize, spec.flip, spec.upright, aspect);
+        out.extend(bars.into_iter().map(|(s, scale)| Bar {
+            pos: s.pos,
+            normal: s.normal,
+            reach: spec.reach * scale,
+            width: spec.width * scale,
+            mask: spec.mask,
+        }));
     }
-    Built { bars: out, draws, occluders }
+    out
+}
+
+/// A full-volume bar's four corners in the output's NDC, placed exactly as the
+/// curve vertex shader places them: base left, base right, tip left, tip right
+///
+/// `aspect` is the output's width / height. The normal is unit length in
+/// pixels and NDC stretches x by the aspect, so both vectors are mapped back
+/// before they are scaled
+#[must_use]
+pub fn corners(bar: &Bar, aspect: f32) -> [[f32; 2]; 4] {
+    let n = bar.normal;
+    let across = [-n[1] * bar.width, n[0] * aspect * bar.width];
+    let along = [n[0] / aspect * bar.reach, n[1] * bar.reach];
+    [(-0.5, 0.0), (0.5, 0.0), (-0.5, 1.0), (0.5, 1.0)].map(|(u, v)| {
+        [
+            bar.pos[0] + across[0] * u + along[0] * v,
+            bar.pos[1] + across[1] * u + along[1] * v,
+        ]
+    })
 }
 
 /// NDC bounding box of every bar at full volume: `(min_x, min_y, max_x,
@@ -438,24 +459,14 @@ pub fn build(paths: &[PathSpec], shared: &[Control], count: u32, aspect: f32, fi
 /// The hull of both ends of every bar, not of the path: a leaning bar reaches
 /// outside the path's own box. Lets the surface shrink to the curve
 #[must_use]
-pub fn bounds(bars: &[Bar]) -> (f32, f32, f32, f32) {
+pub fn bounds(bars: &[Bar], aspect: f32) -> (f32, f32, f32, f32) {
     let (mut x0, mut y0) = (f32::MAX, f32::MAX);
     let (mut x1, mut y1) = (f32::MIN, f32::MIN);
-    for bar in bars {
-        let n = bar.normal;
-        let t = [-n[1], n[0]];
-        let half = bar.width * 0.5;
-        let tip = [n[0] * bar.reach, n[1] * bar.reach];
-        for base in [[0.0, 0.0], tip] {
-            for side in [-half, half] {
-                let x = bar.pos[0] + base[0] + t[0] * side;
-                let y = bar.pos[1] + base[1] + t[1] * side;
-                x0 = x0.min(x);
-                y0 = y0.min(y);
-                x1 = x1.max(x);
-                y1 = y1.max(y);
-            }
-        }
+    for [x, y] in bars.iter().flat_map(|b| corners(b, aspect)) {
+        x0 = x0.min(x);
+        y0 = y0.min(y);
+        x1 = x1.max(x);
+        y1 = y1.max(y);
     }
     if x0 > x1 { (-1.0, -1.0, 1.0, 1.0) } else { (x0, y0, x1, y1) }
 }
@@ -755,16 +766,35 @@ mod tests {
     /// surface to it
     #[test]
     fn bounds_cover_bar_and_width() {
-        let bar = Bar {
-            pos: [0.0, 0.0],
-            normal: [0.0, 1.0],
-            reach: 0.5,
-            width: 0.2,
-        };
-        let (x0, y0, x1, y1) = bounds(&[bar]);
+        let bar = Bar { pos: [0.0, 0.0], normal: [0.0, 1.0], reach: 0.5, width: 0.2, mask: 0 };
+        let (x0, y0, x1, y1) = bounds(&[bar], 16.0 / 9.0);
         assert!((x0 - -0.1).abs() < 1e-6 && (x1 - 0.1).abs() < 1e-6, "width straddles the base");
         assert!((y0 - 0.0).abs() < 1e-6 && (y1 - 0.5).abs() < 1e-6, "reach sets the top");
-        assert_eq!(bounds(&[]), (-1.0, -1.0, 1.0, 1.0), "no bars claims everything");
+        assert_eq!(bounds(&[], 1.0), (-1.0, -1.0, 1.0, 1.0), "no bars claims everything");
+    }
+
+    /// A leaning bar has to stay a rectangle ON SCREEN, at the angle its normal
+    /// gives: the corners, taken to pixels, are perpendicular and the right
+    /// size. NDC is not square, so using the pixel-frame normal there directly
+    /// tilts the bar further and shears it into a parallelogram
+    #[test]
+    fn a_leaning_bar_is_a_rectangle_on_a_wide_output() {
+        let (ow, oh) = (1920.0f32, 1080.0f32);
+        let r = 30f32.to_radians();
+        let bar = Bar { pos: [0.1, -0.2], normal: [r.sin(), r.cos()], reach: 0.4, width: 0.02, mask: 0 };
+        let px = |p: [f32; 2]| [(p[0] + 1.0) * 0.5 * ow, (p[1] + 1.0) * 0.5 * oh];
+        let c = corners(&bar, ow / oh).map(px);
+        let across = [c[1][0] - c[0][0], c[1][1] - c[0][1]];
+        let along = [c[2][0] - c[0][0], c[2][1] - c[0][1]];
+        let dot = across[0] * along[0] + across[1] * along[1];
+        let (la, lb) = (across[0].hypot(across[1]), along[0].hypot(along[1]));
+        assert!(dot.abs() / (la * lb) < 1e-4, "sheared: cos = {}", dot / (la * lb));
+        // Reach is a fraction of output height and width of output width,
+        // whichever way the bar points
+        assert!((lb - 0.4 * 0.5 * oh).abs() < 0.05, "reach {lb}");
+        assert!((la - 0.02 * 0.5 * ow).abs() < 0.05, "width {la}");
+        // And it leans at the normal's own angle, 30 degrees from vertical
+        assert!((along[0].atan2(along[1]).to_degrees() - 30.0).abs() < 0.01);
     }
 
     /// The instance count, the SSBO and cava's channels all have to agree, so
@@ -804,146 +834,77 @@ mod tests {
         assert_eq!(allocate(&[1.0, 1.0], &[Some(7), Some(13)], 20), vec![7, 13]);
     }
 
-    /// Two paths share one buffer and one draw call, and each carries its own
-    /// reach - which is the whole reason a bar holds reach rather than the
-    /// shader holding a uniform
-    /// A path's own silhouette gets its own bit; one without shares the curve's
-    #[test]
-    fn occluders_are_deduplicated_into_bits() {
-        let line = |y: f32| -> Box<[Control]> {
-            vec![
-                Control { x: 0.0, y, scale: 1.0, angle: None },
-                Control { x: 1.0, y, scale: 1.0, angle: None },
-            ]
-            .into()
-        };
-        let path = |occlude: Option<Box<[Control]>>| PathSpec { clip: true,
-            occlude,
-            controls: line(0.5),
-            bars: Some(4),
-            reach: 0.1,
-            width: 0.01,
-            flip: false,
-            upright: true,
-        };
-        let shared = line(0.9);
-        let built = build(&[path(None), path(Some(line(0.2)))], &shared, 8, 1.0, Fit::STRETCH);
-
-        assert_eq!(built.occluders.len(), 2, "shared plus the one override");
-        assert_eq!(built.draws.len(), 2);
-        assert_eq!(built.draws[0].occ, Some(0), "no override falls back to the shared bit");
-        assert_eq!(built.draws[1].occ, Some(1), "its own silhouette, its own bit");
-        assert_eq!(built.draws[0].first, 0);
-        assert_eq!(built.draws[1].first, built.draws[0].count, "runs are contiguous");
-        assert_eq!(
-            built.draws.iter().map(|d| d.count).sum::<u32>(),
-            built.bars.len() as u32,
-            "every bar belongs to exactly one draw"
-        );
-
-        // No silhouette anywhere means nothing to test against
-        let bare = build(&[path(None)], &[], 4, 1.0, Fit::STRETCH);
-        assert!(bare.occluders.is_empty());
-        assert_eq!(bare.draws[0].occ, None);
+    fn seg(x0: f32, x1: f32, y: f32) -> Box<[Control]> {
+        vec![
+            Control { x: x0, y, scale: 1.0, angle: None },
+            Control { x: x1, y, scale: 1.0, angle: None },
+        ]
+        .into()
     }
 
+    /// Two paths share one buffer, and each bar carries its own reach and its
+    /// path's occluder mask - the shader has no idea paths exist
     #[test]
     fn build_splits_bars_and_keeps_per_path_reach() {
-        let line = |x0: f32, x1: f32| {
-            vec![
-                Control { x: x0, y: 0.5, scale: 1.0, angle: None },
-                Control { x: x1, y: 0.5, scale: 1.0, angle: None },
-            ]
-            .into_boxed_slice()
-        };
         let paths = vec![
-            PathSpec { clip: true, occlude: None, controls: line(0.0, 0.6), reach: 0.4, width: 0.01, ..Default::default() },
-            PathSpec { clip: true, occlude: None, controls: line(0.7, 1.0), reach: 0.1, width: 0.02, ..Default::default() },
+            PathSpec { controls: seg(0.0, 0.6, 0.5), reach: 0.4, width: 0.01, mask: 0b01, ..Default::default() },
+            PathSpec { controls: seg(0.7, 1.0, 0.5), reach: 0.1, width: 0.02, mask: 0b10, ..Default::default() },
         ];
-        let bars = build(&paths, &[], 20, 16.0 / 9.0, Fit::STRETCH).bars;
+        let bars = build(&paths, 20, 16.0 / 9.0, Fit::STRETCH);
         assert_eq!(bars.len(), 20);
         // Twice the length, twice the bars
-        let long = bars.iter().filter(|b| (b.reach - 0.4).abs() < 1e-6).count();
-        assert_eq!(long, 13, "0.6 against 0.3 of width");
-        assert!(bars.iter().filter(|b| (b.reach - 0.1).abs() < 1e-6).count() == 7);
+        let long: Vec<&Bar> = bars.iter().filter(|b| (b.reach - 0.4).abs() < 1e-6).collect();
+        assert_eq!(long.len(), 13, "0.6 against 0.3 of width");
+        assert!(long.iter().all(|b| b.mask == 0b01), "a bar keeps its path's mask");
+        assert!(bars.iter().filter(|b| b.mask == 0b10).all(|b| (b.reach - 0.1).abs() < 1e-6));
         // A path with too few points to be a curve is skipped, not drawn as a
         // point: one path left means it takes every bar
-        let broken = vec![
-            paths[0].clone(),
-            PathSpec { clip: true, occlude: None, controls: Box::new([]), ..Default::default() },
-        ];
-        assert_eq!(build(&broken, &[], 9, 1.0, Fit::STRETCH).bars.len(), 9);
-        assert!(build(&[], &[], 9, 1.0, Fit::STRETCH).bars.is_empty());
+        let broken = vec![paths[0].clone(), PathSpec::default()];
+        assert_eq!(build(&broken, 9, 1.0, Fit::STRETCH).len(), 9);
+        assert!(build(&[], 9, 1.0, Fit::STRETCH).is_empty());
     }
 
-    /// Opting a path out has to survive a silhouette being present, since
-    /// that is the only case where the flag does anything
+    /// Parity fill by XOR needs every point inside a polygon covered an odd
+    /// number of times: a fan of n - 2 triangles, all carrying the shape's bit
     #[test]
-    fn clip_false_leaves_a_path_unoccluded() {
-        let line = |x0: f32, x1: f32| {
-            vec![
-                Control { x: x0, y: 0.5, scale: 1.0, angle: None },
-                Control { x: x1, y: 0.5, scale: 1.0, angle: None },
+    fn occluders_triangulate_into_fans_by_bit() {
+        let ridge = Occluder { points: seg(0.1, 0.9, 0.5), closed: false };
+        let rock = Occluder {
+            points: vec![
+                Control { x: 0.2, y: 0.2, scale: 1.0, angle: None },
+                Control { x: 0.4, y: 0.2, scale: 1.0, angle: None },
+                Control { x: 0.3, y: 0.4, scale: 1.0, angle: None },
             ]
-            .into_boxed_slice()
+            .into(),
+            closed: true,
         };
-        let shared = [
-            Control { x: 0.0, y: 0.4, scale: 1.0, angle: None },
-            Control { x: 1.0, y: 0.4, scale: 1.0, angle: None },
-        ];
-        let paths = vec![
-            PathSpec { clip: true, occlude: None, controls: line(0.0, 0.5), ..Default::default() },
-            PathSpec { clip: false, occlude: None, controls: line(0.5, 1.0), ..Default::default() },
-            PathSpec { clip: false, occlude: Some(line(0.2, 0.8)), controls: line(0.0, 1.0), ..Default::default() },
-        ];
-        let built = build(&paths, &shared, 12, 1.0, Fit::STRETCH);
-        // The two opted-out paths share a bit, so they share a draw
-        assert_eq!(built.draws.len(), 2);
-        assert!(built.draws[0].occ.is_some(), "the shared silhouette still applies");
-        assert!(built.draws[1].occ.is_none(), "opting out beats its own silhouette");
+        // The skyline gains two bottom corners: four vertices, two triangles
+        assert_eq!(ridge.polygon(Fit::STRETCH).len(), 4);
+        let corner = ridge.polygon(Fit::STRETCH)[2];
+        assert!((corner[0] - 0.8).abs() < 1e-6 && corner[1] == -1.0, "down to the bottom edge");
+        assert_eq!(rock.polygon(Fit::STRETCH).len(), 3, "a closed shape gains nothing");
+        let tris = occluder_triangles(&[ridge, rock], Fit::STRETCH);
+        assert_eq!(tris.len(), (2 + 1) * 3);
+        assert!(tris[..6].iter().all(|v| v.bit == 1));
+        assert!(tris[6..].iter().all(|v| v.bit == 2));
+        assert_eq!(std::mem::size_of::<MaskVertex>(), 12, "the stride the VAO declares");
     }
 
-    /// Paths only need a draw of their own when the stencil bit changes, so
-    /// a run sharing one silhouette collapses to a single range
+    /// The surface may stop at an occluder's floor only where every bar is cut
+    /// by it: a skyline that one path ignores must not crop that path away
     #[test]
-    fn draws_coalesce_while_the_occluder_holds() {
-        let line = |x0: f32, x1: f32| {
-            vec![
-                Control { x: x0, y: 0.5, scale: 1.0, angle: None },
-                Control { x: x1, y: 0.5, scale: 1.0, angle: None },
-            ]
-            .into_boxed_slice()
-        };
-        let shared = [
-            Control { x: 0.0, y: 0.4, scale: 1.0, angle: None },
-            Control { x: 1.0, y: 0.4, scale: 1.0, angle: None },
-        ];
-        let shares = |n| {
-            (0..n)
-                .map(|i| PathSpec {
-                    clip: true,
-                    occlude: None,
-                    controls: line(i as f32 / n as f32, (i + 1) as f32 / n as f32),
-                    ..Default::default()
-                })
-                .collect::<Vec<_>>()
-        };
-        let built = build(&shares(3), &shared, 30, 1.0, Fit::STRETCH);
-        assert_eq!(built.draws.len(), 1, "three paths, one silhouette, one draw");
-        assert_eq!(built.draws[0].first, 0);
-        assert_eq!(built.draws[0].count, built.bars.len() as u32, "the whole range");
-
-        // An opted-out path in the middle breaks the run into three
-        let mut split = shares(3);
-        split[1].clip = false;
-        let built = build(&split, &shared, 30, 1.0, Fit::STRETCH);
-        assert_eq!(built.draws.len(), 3);
-        assert!(built.draws[1].occ.is_none());
-        let total: u32 = built.draws.iter().map(|d| d.count).sum();
-        assert_eq!(total, built.bars.len() as u32, "every bar still drawn once");
-        for w in built.draws.windows(2) {
-            assert_eq!(w[0].first + w[0].count, w[1].first, "ranges stay contiguous");
-        }
+    fn the_floor_counts_only_skylines_every_bar_tests() {
+        let low = Occluder { points: seg(0.0, 1.0, 0.8), closed: false };
+        let high = Occluder { points: seg(0.0, 0.5, 0.4), closed: false };
+        let rock = Occluder { points: seg(0.0, 1.0, 0.1), closed: true };
+        let set = [low, high, rock];
+        let all = occluder_floor(&set, 0b111, Fit::STRETCH);
+        assert!((all[0] - 0.6).abs() < 1e-6, "the higher skyline wins: {}", all[0]);
+        assert!((all[HORIZON_BUCKETS - 1] - 0.2).abs() < 1e-6, "only the low one spans the right");
+        assert!(all.iter().all(|h| *h <= 0.6 + 1e-6), "a closed shape hides nothing below it");
+        let partial = occluder_floor(&set, 0b001, Fit::STRETCH);
+        assert!((partial[0] - 0.2).abs() < 1e-6, "one not cutting every bar is ignored");
+        assert!(occluder_floor(&set, 0, Fit::STRETCH).iter().all(|h| *h == 0.0));
     }
 
     /// The same point in the file has to land on the same feature of the
