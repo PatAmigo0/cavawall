@@ -18,6 +18,7 @@ pub struct Config {
     /// Desktop notifications for errors, crashes and, if asked, starts and
     /// stops. Absent means errors and crashes, sent the automatic way
     pub notify: Option<NotifyConfig>,
+    pub wallpaper: Option<WallpaperSource>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -496,6 +497,23 @@ pub struct SchemeConfig {
     /// so following it live would mean respawning cava and rebuilding buffers.
     /// Colours have no such constraint, which is why only they update live
     pub bars: Option<bool>,
+    /// Where the live palette comes from: `caelestia` (the default), `pywal`,
+    /// or `file` with `path`. Any JSON works: every colour-valued entry is a
+    /// role named by its own key, however deep it sits
+    pub source: Option<String>,
+    /// The palette file, overriding the source's usual place. `~/` is home
+    pub path: Option<String>,
+}
+
+/// `[wallpaper]`: how cavawall learns which image is on screen, so it can use
+/// that wallpaper's own settings
+#[derive(Serialize, Deserialize, Debug, Default, Clone)]
+pub struct WallpaperSource {
+    /// `caelestia` (the default), `swww`, `waypaper`, `file` (a file holding
+    /// the path, with `path`), or `command` (prints the path, with `command`)
+    pub source: Option<String>,
+    pub path: Option<String>,
+    pub command: Option<Vec<String>>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]

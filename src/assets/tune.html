@@ -265,7 +265,7 @@ function load(W, ctx) {
   else S.out = {w: screen.width || 1920, h: screen.height || 1080};
   S.fig = W.mode || ctx.defaults?.mode || 'bars';
   const cfg = ctx.config || {};
-  S.g = {general: {...(cfg.general || {})}, smoothing: {...(cfg.smoothing || {})}, colors: {...(cfg.colors || {})}, scheme: {...(cfg.scheme || {})}, notify: {...(cfg.notify || {})}};
+  S.g = {general: {...(cfg.general || {})}, smoothing: {...(cfg.smoothing || {})}, colors: {...(cfg.colors || {})}, scheme: {...(cfg.scheme || {})}, notify: {...(cfg.notify || {})}, wallpaper: {...(cfg.wallpaper || {})}};
   S.g0 = JSON.stringify(S.g);
   S.bars = {...(W.bars || {})};
   S.circle = {...(W.circle || {})};
@@ -844,7 +844,7 @@ function gVal(table, key, dflt) { const v = S.g[table]?.[key]; return v ?? dflt;
 function gSet(table, key, v) { S.g[table] = S.g[table] || {}; if (v == null) delete S.g[table][key]; else S.g[table][key] = v; }
 function globalDiff() {
   const was = JSON.parse(S.g0 || '{}'), out = [];
-  for (const t of ['general', 'smoothing', 'colors', 'scheme', 'notify']) {
+  for (const t of ['general', 'smoothing', 'colors', 'scheme', 'notify', 'wallpaper']) {
     const a = was[t] || {}, b = S.g[t] || {};
     for (const k of new Set([...Object.keys(a), ...Object.keys(b)]))
       if (JSON.stringify(a[k]) !== JSON.stringify(b[k])) out.push([t, k, b[k] ?? null]);
@@ -867,6 +867,17 @@ function gRow(host, def) {
   input.addEventListener('change', commit);
   el.querySelector('.reset')?.addEventListener('click', () => { snapshot(); gSet(def.t, def.k, null); sync(); commit(); });
   host.appendChild(el); ROWS.push(sync); sync();
+}
+// A text field over config.toml; `list` stores it split on spaces
+function gText(host, label, table, key, placeholder, list) {
+  const el = document.createElement('div'); el.className = 'row';
+  el.innerHTML = `<label>${label}</label><input type=text style="grid-column:2/4;background:var(--ink2);border:1px solid var(--line);border-radius:6px;padding:3px 6px;min-width:0" placeholder="${escapeHtml(placeholder)}" spellcheck=false>`;
+  const input = el.querySelector('input');
+  const sync = () => { const v = gVal(table, key, ''); input.value = Array.isArray(v) ? v.join(' ') : v; };
+  input.onfocus = snapshot;
+  input.oninput = () => { const t = input.value.trim(); gSet(table, key, t ? (list ? t.split(/\s+/) : t) : null); status(); };
+  input.onchange = commit;
+  host.appendChild(el); ROWS.push(sync); sync(); return el;
 }
 function gChip(host, label, table, key, dflt, title, after) {
   return chip(host, label, () => !!gVal(table, key, dflt), on => { gSet(table, key, on === !!dflt ? null : on); after?.(); }, title);
@@ -897,7 +908,10 @@ function recomputeStops() {
 }
 function buildColours() {
   const s = section('Colours', '', 'every wallpaper', $('paneLook'));
-  if (S.ctx.scheme) gChip(s, 'Follow the shell\'s palette', 'scheme', 'colors', false, 'Stops with a role take the live colour of that role', () => { renderStops(); recomputeStops(); });
+  gChip(s, 'Follow the live palette', 'scheme', 'colors', false, 'Stops with a role take the live colour of that role', () => { renderStops(); recomputeStops(); });
+  gSelect(s, 'Palette from', 'scheme', 'source', [['caelestia', 'Caelestia'], ['pywal', 'pywal'], ['file', 'A JSON file']], 'caelestia', () => syncFields());
+  const palPath = gText(s, 'File', 'scheme', 'path', 'the source\'s usual place');
+  ROWS.push(() => { palPath.style.display = gVal('scheme', 'colors', false) ? '' : 'none'; });
   const list = document.createElement('div'); list.id = 'stopList'; s.appendChild(list);
   const add = document.createElement('div'); add.className = 'btns';
   add.innerHTML = '<button class="btn small" id=addStop>+ Stop</button>';
@@ -965,6 +979,11 @@ function buildSound() {
   gSelect(s, 'Fullscreen', 'general', 'on_fullscreen',
     [['ignore', 'Keep drawing'], ['move', 'Move to a free monitor'], ['pause', 'Pause']], 'ignore');
   s.insertAdjacentHTML('beforeend', '<p class=note>Moving or pausing hides the bars and suspends cava while a fullscreen window covers the monitor.</p>');
+  gSelect(s, 'Wallpaper', 'wallpaper', 'source', [['caelestia', 'Caelestia'], ['swww', 'swww'], ['waypaper', 'waypaper'], ['file', 'A file with its path'], ['command', 'A command']], 'caelestia', () => syncFields());
+  const wpPath = gText(s, 'Path', 'wallpaper', 'path', 'file holding the path');
+  const wpCmd = gText(s, 'Command', 'wallpaper', 'command', 'prints the path', true);
+  ROWS.push(() => { const src = gVal('wallpaper', 'source', 'caelestia'); wpPath.style.display = ['file', 'waypaper'].includes(src) ? '' : 'none'; wpCmd.style.display = src === 'command' ? '' : 'none'; });
+  s.insertAdjacentHTML('beforeend', '<p class=note>For a command, run <b>cavawall refresh</b> after changing the wallpaper.</p>');
 
   // Notifications: whether, how, and for which events
   s = section('Notifications', '', 'every wallpaper', host);

@@ -208,3 +208,15 @@ gradient_color_8 = '#f38ba8'
 # command = ["my-notifier", "--app", "cavawall"]   # via = "command"; the message is appended
 # events = ["error", "crash"]      # also "start", "stop"
 
+# Where the live palette comes from, with [scheme] colors = true. Any JSON
+# works: every colour-valued entry is a role named by its own key.
+# [scheme]
+# source = "pywal"                 # caelestia (default) | pywal | file
+# path = "~/.cache/wal/colors.json"
+
+# How cavawall knows which wallpaper is on screen, so each gets its own figure.
+# [wallpaper]
+# source = "swww"                  # caelestia (default) | swww | waypaper | file | command
+# path = "~/.cache/current-wallpaper"   # for file (a file holding the path) or waypaper
+# command = ["my-wallpaper", "--current"]   # for command; run `cavawall refresh` after a change
+

@@ -42,8 +42,13 @@ struct Site {
 }
 
 fn main() {
+    // The same palette and wallpaper sources the visualiser uses
+    let config = load_config();
+    let scheme_cfg = config.as_ref().and_then(|c| c.scheme.as_ref());
+    scheme::configure_colours(scheme_cfg.and_then(|s| s.source.as_deref()), scheme_cfg.and_then(|s| s.path.as_deref()));
+    cavawall::wallpaper::configure(config.as_ref().and_then(|c| c.wallpaper.as_ref()));
     let Some(wallpaper) = curve::current_wallpaper().filter(|p| p.is_file()) else {
-        eprintln!("cavawall-tune: no current wallpaper in the shell's state");
+        eprintln!("cavawall-tune: cannot tell which wallpaper is on screen; set [wallpaper] source in config.toml");
         std::process::exit(1);
     };
     let Some(key) = curve::content_key(&wallpaper) else {
@@ -378,7 +383,7 @@ fn context(site: &Site) -> serde_json::Value {
 }
 
 /// The tables the page may edit, so a request cannot write anything else
-const GLOBAL_TABLES: [&str; 6] = ["general", "smoothing", "colors", "scheme", "bars", "notify"];
+const GLOBAL_TABLES: [&str; 7] = ["general", "smoothing", "colors", "scheme", "bars", "notify", "wallpaper"];
 
 fn json_to_value(v: &serde_json::Value) -> Option<toml_edit::Value> {
     use serde_json::Value as J;

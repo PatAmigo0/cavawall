@@ -35,6 +35,9 @@ pub enum Request {
     Stop,
     /// Re-read config by re-exec'ing in place: same pid, same environment
     Reload,
+    /// Look again at which wallpaper is on screen: for a source cavawall
+    /// cannot watch, called by the script that changed it
+    Refresh,
 }
 
 /// What it gets back. `data` carries a Status payload, nothing otherwise

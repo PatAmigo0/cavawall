@@ -66,10 +66,12 @@ the circle, or the points of a curve; draw occluders and choose which ones hide
 which path; bake an x-ray; set cava's input, sensitivity and smoothing. Save
 applies it to the running visualiser in place.
 
-### Live colours
+### Live colours, any setup
 
-The gradient can follow your shell's palette - on Caelestia it changes with
-the wallpaper, in place, with no restart.
+The gradient can follow a live palette and changes in place, with no restart:
+Caelestia's, pywal's, or any JSON file a theme tool writes. The wallpaper is
+followed the same way - from Caelestia, swww, waypaper, a file, or a command
+of your own - so each wallpaper gets its own figure whatever sets it.
 
 ### Cheap to leave running
 
@@ -120,6 +122,7 @@ cavawall            # start the visualiser
 cavawall tune       # edit the current wallpaper's figure
 cavawall status     # what it is drawing
 cavawall reload     # re-read the config, in place
+cavawall refresh    # look again at the wallpaper, for a source it cannot watch
 cavawall move DP-1  # move to another monitor; no name picks automatically
 cavawall stop       # clear and exit
 cavawall log        # what happened; log last-exit says why it last stopped
@@ -164,7 +167,9 @@ per-wallpaper settings to `wallpapers/<key>.toml` beside it. The annotated
 | `circle.*` | size, hole, alpha ramp, anchor and margins, or `position` |
 | `curve.path`, `curve.occluder` | paths, and the named shapes that hide them (`cut_by`) |
 | `colors.*` | gradient stops, base to tip |
-| `scheme.colors`, `scheme.bars` | follow the shell's palette and bar count |
+| `scheme.colors`, `scheme.bars` | follow the live palette, and the shell's bar count |
+| `scheme.source`, `scheme.path` | where the palette comes from: `caelestia`, `pywal`, or any JSON `file` |
+| `wallpaper.source`, `.path`, `.command` | how it knows the wallpaper: `caelestia`, `swww`, `waypaper`, a `file` holding the path, or a `command` (then `cavawall refresh` after a change) |
 | `smoothing.*` | passed to cava |
 | `notify.*` | desktop notifications for errors, crashes, starts and stops, and how they are sent |
 
