@@ -911,9 +911,6 @@ pub(crate) fn run() {
     // started under a game does not flash onto its monitor first
     let on_fullscreen = config.general.on_fullscreen.unwrap_or_default();
     let hypr_events = (on_fullscreen != FullscreenPolicy::Ignore).then(hypr::events).flatten();
-    if on_fullscreen != FullscreenPolicy::Ignore && hypr_events.is_none() {
-        say!("on_fullscreen is set, but Hyprland's event socket is not there; ignoring fullscreen windows");
-    }
     let covered = hypr_events.as_ref().and_then(|_| hypr::covered()).unwrap_or_default();
     let pinned_output = env::var("CAVAWALL_OUTPUT")
         .ok()
@@ -993,6 +990,7 @@ pub(crate) fn run() {
         covered,
         hypr_partial: Vec::new(),
         cava_stopped: false,
+        toplevels: toplevel::Toplevels::default(),
         placed_on: None,
         placed_size: None,
         startup_settled: false,
@@ -1047,6 +1045,14 @@ pub(crate) fn run() {
                 Ok(PostAction::Continue)
             })
             .unwrap();
+    }
+    // Elsewhere, the standard protocol: bound only when the policy is on and
+    // Hyprland's IPC is not answering it more precisely
+    if on_fullscreen != FullscreenPolicy::Ignore && hypr_events.is_none() {
+        match globals.bind::<wayland_protocols_wlr::foreign_toplevel::v1::client::zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1, _, _>(&qh, 1..=3, ()) {
+            Ok(_) => say!("following fullscreen windows through foreign-toplevel"),
+            Err(_) => say!("on_fullscreen is set, but the compositor offers neither Hyprland IPC nor foreign-toplevel; ignoring fullscreen windows"),
+        }
     }
     if let Some(events) = hypr_events {
         loop_handle
