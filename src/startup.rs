@@ -500,6 +500,7 @@ pub(crate) fn run() {
     if reveal_mix > 0.0 && reveal_image.is_none() {
         eprintln!("cavawall: reveal is set but wallpapers/<key>.reveal.qoi will not read; drawing the gradient");
     }
+    let reveal_size = reveal_image.as_ref().map(|i| (i.width, i.height));
     let mut defines = String::new();
     if round {
         defines.push_str("#define ROUND\n");
@@ -726,7 +727,9 @@ pub(crate) fn run() {
         if round {
             gl::Uniform1f(gl::GetUniformLocation(shader_program, c"Radius".as_ptr()), radius);
         }
-        if let Some(img) = &reveal_image {
+        // Taken by value: the pixels are freed once GL has its copy, where a
+        // local of this function would live as long as the process
+        if let Some(img) = reveal_image {
             // Unit 1; unit 0 is the occluder mask's. Filtered, since the image
             // is scaled onto the output; clamped, so the crop never wraps
             let mut texture = 0u32;
@@ -888,7 +891,7 @@ pub(crate) fn run() {
         surface_px_location,
         output_px_location,
         surface_origin: (0, 0),
-        reveal_size: reveal_image.as_ref().map(|i| (i.width, i.height)),
+        reveal_size,
         reveal_map_location,
         ring,
         matte_color_location,
