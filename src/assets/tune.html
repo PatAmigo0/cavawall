@@ -1,849 +1,1270 @@
-<!doctype html><meta charset=utf8>
-<title>cavawall - tune</title>
+<!doctype html>
+<html lang=en>
+<meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<title>cavawall tune</title>
 <style>
-:root{color-scheme:dark}
+/* Graphite chrome that stays out of the way: the wallpaper is the subject.
+   The accent is the visualiser's own gradient, fetched live, so the controls
+   wear the colours the bars will. */
+:root{
+  color-scheme:dark;
+  --ink0:#0d0d11; --ink1:#15151b; --ink2:#1d1d25; --ink3:#262630;
+  --line:#2d2d38; --text:#ebe9f2; --muted:#8e8c9e; --faint:#5d5b6c;
+  --accent:#ffa726; --accent2:#ff7043; --grad:linear-gradient(90deg,#ffcc80,#e65100);
+  --good:#86d9a4; --warn:#ffb347; --bad:#ff6b6b;
+  --r:7px;
+  --display:"Fira Sans Compressed","Fira Sans Condensed","Roboto Condensed","Arial Narrow",sans-serif;
+  --body:"Fira Sans","Inter",system-ui,sans-serif;
+  --mono:"JetBrainsMono NF","JetBrains Mono",ui-monospace,monospace;
+}
 *{box-sizing:border-box}
-/* The page fills the viewport and never scrolls: a scrollbar sits exactly
-   where the last control point does */
-html,body{height:100%;overflow:hidden;overscroll-behavior:none}
-body{margin:0;background:#101014;color:#e6e6ea;font:13px/1.5 ui-sans-serif,system-ui,sans-serif;
-     display:flex;flex-direction:column}
-header{flex:none;display:flex;gap:16px;align-items:center;padding:10px 14px;border-bottom:1px solid #26262e;flex-wrap:wrap}
-h1{font-size:13px;margin:0;font-weight:600;letter-spacing:.02em}
-.key{font-family:ui-monospace,monospace;color:#8a8a99;font-size:12px}
-.spacer{flex:1}
-button{background:#1e1e26;color:#e6e6ea;border:1px solid #33333f;border-radius:6px;padding:5px 11px;font:inherit;cursor:pointer}
-button:hover{background:#26262f}
-button.primary{background:#3b6ea5;border-color:#4a82bd}
-button.primary:hover{background:#4880bd}
-/* The canvas takes whatever is left and is letterboxed inside it, so the
-   image never forces the page to grow in either direction. */
-#wrap{position:relative;flex:1;min-height:0;display:flex;align-items:center;justify-content:center;
-      line-height:0;overflow:hidden}
-canvas{max-width:100%;max-height:100%;object-fit:contain;cursor:crosshair;touch-action:none;
-       transform-origin:0 0;will-change:transform}
-#panel{flex:none;display:flex;gap:18px;align-items:center;padding:10px 14px;border-top:1px solid #26262e;flex-wrap:wrap}
-label{display:flex;gap:7px;align-items:center;white-space:nowrap;color:#b9b9c6}
-input[type=range]{width:130px}
-select{background:#1e1e26;color:#e6e6ea;border:1px solid #33333f;border-radius:6px;padding:3px 6px;font:inherit}
-.val{font-family:ui-monospace,monospace;color:#e6e6ea;min-width:42px;display:inline-block}
-#out{width:100%;height:132px;flex:none;background:#0b0b0e;color:#c8c8d4;border:0;border-top:1px solid #26262e;
-     font-family:ui-monospace,monospace;font-size:12px;padding:10px 14px;resize:vertical}
-.hint{color:#71717f;font-size:12px}
-.hint2{color:#71717f;font-size:12px;white-space:normal}
-/* The hint is the first thing worth losing when the window cannot hold a
-   row: the controls are not. */
-@media (max-width:1100px){.hint{display:none}}
-.pill{background:#1a1a22;border:1px solid #2c2c36;border-radius:999px;padding:2px 9px;font-size:12px}
-/* Fixed width, and the selection controls only hide - they keep their box.
-   Either one reflowing its bar resizes the canvas and shifts the view. */
-#count{min-width:132px;text-align:center}
-#pathlabel{min-width:86px;text-align:center}
-#selbox[hidden]{display:flex!important;visibility:hidden}
-/* Menus are absolutely positioned, so opening one never reflows a bar and
-   never moves the canvas underneath. */
-.menu{position:relative;display:inline-block}
- /* Fixed, and placed by JS: a menu anchored to its button's right edge runs
-    off the left of a narrow window */
-.pop{position:fixed;z-index:5;display:none;min-width:210px;max-width:calc(100vw - 16px);
-     max-height:72vh;overflow-y:auto;
-     background:#16161c;border:1px solid #33333f;border-radius:8px;padding:8px;
-     box-shadow:0 10px 30px #0008}
-.menu.open .pop{display:flex;flex-direction:column;gap:7px}
-.pop label{justify-content:space-between;gap:10px}
-.pop button{width:100%;text-align:left}
-.pop hr{border:0;border-top:1px solid #26262e;margin:2px 0;width:100%}
-.pop input[type=range]{width:96px}
+html,body{height:100%;margin:0;overflow:hidden;overscroll-behavior:none}
+body{background:var(--ink0);color:var(--text);font:13px/1.45 var(--body);display:grid;
+  grid-template-rows:auto 1fr auto;min-width:0}
+button,input,select{font:inherit;color:inherit}
+kbd{font:10px var(--mono);color:var(--muted);border:1px solid var(--line);border-radius:4px;padding:0 4px;margin-left:6px}
+.btn{background:var(--ink2);border:1px solid var(--line);border-radius:var(--r);padding:5px 11px;cursor:pointer;white-space:nowrap}
+.btn:hover{background:var(--ink3)}
+.btn:focus-visible,.seg button:focus-visible,.chip:focus-visible,input:focus-visible,select:focus-visible,.cell:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.btn.primary{background:var(--accent);color:#1a1208;border-color:transparent;font-weight:600}
+.btn.primary:disabled{background:var(--ink3);color:var(--faint);cursor:default}
+.btn.ghost{background:transparent;border-color:transparent;color:var(--muted)}
+.btn.ghost:hover{color:var(--text);background:var(--ink2)}
+.btn.small{padding:2px 8px;font-size:12px}
+.icon{width:26px;height:26px;padding:0;display:inline-grid;place-items:center}
+
+/* header */
+header{display:flex;align-items:center;gap:14px;padding:8px 14px;border-bottom:1px solid var(--line);background:var(--ink1);min-width:0}
+.brand{font:600 17px/1 var(--display);letter-spacing:.06em;text-transform:uppercase;display:flex;align-items:center;gap:8px}
+.brand b{font-weight:400;color:var(--muted)}
+.mark{width:18px;height:14px;display:inline-flex;gap:2px;align-items:flex-end}
+.mark i{display:block;width:4px;border-radius:1px;background:var(--grad)}
+.wp{display:flex;flex-direction:column;min-width:0;line-height:1.2}
+.wp #wpname{font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:28vw}
+.key{font:11px var(--mono);color:var(--faint)}
+.seg{display:inline-flex;background:var(--ink0);border:1px solid var(--line);border-radius:9px;padding:3px}
+.seg button{background:none;border:0;border-radius:6px;padding:4px 14px;cursor:pointer;color:var(--muted);font:500 13px var(--body)}
+.seg button[aria-selected=true]{background:var(--ink3);color:var(--text);box-shadow:inset 0 -2px 0 var(--accent)}
+.grow{flex:1}
+.live{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--muted);white-space:nowrap}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--faint)}
+.dot.on{background:var(--good);box-shadow:0 0 0 3px #86d9a422}
+.dot.off{background:var(--bad)}
+
+/* stage */
+main{display:grid;grid-template-columns:1fr 340px;min-height:0}
+.stage{position:relative;min-width:0;min-height:0;overflow:hidden;background:
+  radial-gradient(circle at 50% 50%,#17171e,var(--ink0) 70%)}
+.view{position:absolute;inset:0;display:grid;place-items:center;transform-origin:0 0}
+.view canvas{grid-area:1/1;max-width:100%;max-height:100%;display:block}
+#ui{cursor:crosshair;touch-action:none}
+body[data-figure=bars] #ui,body[data-figure=circle] #ui{cursor:default}
+.tools{position:absolute;top:12px;left:12px;display:flex;gap:6px;align-items:center;background:#15151bdd;
+  backdrop-filter:blur(8px);border:1px solid var(--line);border-radius:10px;padding:5px}
+.tools .sep{width:1px;height:20px;background:var(--line);margin:0 2px}
+.tool[aria-pressed=true]{background:var(--ink3);box-shadow:inset 0 -2px 0 var(--accent)}
 body:not([data-figure=curve]) .curve-only{display:none!important}
-body:not([data-figure=curve]) #wrap,body:not([data-figure=curve]) #panel{display:none}
-#notcurve{display:none;padding:56px 24px;text-align:center;color:#9a9aa8;font:14px/1.6 system-ui}
-#notcurve b{color:#d8d8e4}
-#fighere{display:inline-flex;flex-direction:column;gap:9px;margin-top:22px;text-align:left;
-  background:#16161c;border:1px solid #26262e;border-radius:10px;padding:16px 18px;min-width:280px}
-#fighere label{display:flex;justify-content:space-between;gap:14px;align-items:center}
-#fighere hr{border:0;border-top:1px solid #26262e;margin:2px 0;width:100%}
-body:not([data-figure=curve]) #notcurve{display:block}
+.zoom{font:11px var(--mono);color:var(--muted);min-width:40px;text-align:center}
+.hint{position:absolute;left:12px;bottom:10px;font-size:12px;color:var(--muted);background:#15151bcc;border-radius:6px;padding:3px 8px;pointer-events:none}
+
+/* inspector */
+.inspector{border-left:1px solid var(--line);background:var(--ink1);overflow-y:auto;overscroll-behavior:contain}
+.sec{border-bottom:1px solid var(--line);padding:12px 14px 14px}
+.sec h2{margin:0 0 10px;font:600 12px/1 var(--display);letter-spacing:.14em;text-transform:uppercase;color:var(--muted);display:flex;align-items:center;gap:8px}
+.sec h2 .aside{margin-left:auto;font:400 11px var(--body);letter-spacing:0;text-transform:none;color:var(--faint)}
+.readout{font:600 30px/1 var(--display);letter-spacing:.02em}
+.readout small{font:400 12px var(--body);color:var(--muted);margin-left:6px}
+.row{display:grid;grid-template-columns:86px 1fr 54px 18px;align-items:center;gap:8px;min-height:28px}
+.row label{color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.row output{font:12px var(--mono);text-align:right}
+.row.inherited output{color:var(--faint)}
+.row .reset{visibility:hidden;background:none;border:0;color:var(--faint);cursor:pointer;padding:0;font-size:13px}
+.row:not(.inherited) .reset{visibility:visible}
+.row .reset:hover{color:var(--text)}
+input[type=range]{-webkit-appearance:none;appearance:none;width:100%;height:18px;background:transparent;cursor:pointer}
+input[type=range]::-webkit-slider-runnable-track{height:4px;border-radius:2px;background:linear-gradient(90deg,var(--accent) var(--p,50%),var(--ink3) var(--p,50%))}
+input[type=range]::-moz-range-track{height:4px;border-radius:2px;background:var(--ink3)}
+input[type=range]::-moz-range-progress{height:4px;border-radius:2px;background:var(--accent)}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;height:14px;border-radius:50%;background:var(--text);margin-top:-5px;border:2px solid var(--ink1)}
+input[type=range]::-moz-range-thumb{width:12px;height:12px;border-radius:50%;background:var(--text);border:2px solid var(--ink1)}
+.row.inherited input[type=range]::-webkit-slider-thumb{background:var(--faint)}
+.row.inherited input[type=range]::-moz-range-thumb{background:var(--faint)}
+.chips{display:flex;flex-wrap:wrap;gap:6px}
+.chip{background:var(--ink2);border:1px solid var(--line);border-radius:999px;padding:3px 10px;cursor:pointer;font-size:12px;color:var(--muted)}
+.chip[aria-pressed=true]{color:var(--text);border-color:var(--accent);background:#ffa72614}
+.note{font-size:12px;color:var(--faint);margin:6px 0 0}
+.note b{color:var(--muted);font-weight:500}
+select{background:var(--ink2);border:1px solid var(--line);border-radius:6px;padding:3px 6px}
+
+/* anchor picker: the nine anchors as the output they pin to */
+.anchors{display:grid;grid-template-columns:repeat(3,26px);grid-template-rows:repeat(3,18px);gap:3px;
+  padding:5px;background:var(--ink0);border:1px solid var(--line);border-radius:6px;width:max-content}
+.anchors button{border:0;border-radius:3px;background:var(--ink3);cursor:pointer;padding:0}
+.anchors button[aria-pressed=true]{background:var(--accent)}
+.placement{display:flex;gap:12px;align-items:center}
+
+/* layers */
+.layers{display:grid;gap:3px}
+.layer{display:grid;grid-template-columns:14px 1fr auto;gap:8px;align-items:center;padding:5px 8px;border-radius:6px;cursor:pointer;border:1px solid transparent}
+.layer:hover{background:var(--ink2)}
+.layer[aria-selected=true]{background:var(--ink2);border-color:var(--line)}
+.swatch{width:12px;height:12px;border-radius:3px}
+.layer .meta{font:11px var(--mono);color:var(--faint)}
+.layer input{background:transparent;border:0;padding:0;width:100%;outline:none}
+.layer input:focus{border-bottom:1px solid var(--accent)}
+.grid-links{margin-top:10px;border-collapse:separate;border-spacing:3px;font-size:11px}
+.grid-links th{font-weight:400;color:var(--muted);text-align:center;max-width:70px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.grid-links th.rowh{text-align:right;padding-right:4px}
+.cell{width:26px;height:22px;border-radius:5px;border:1px solid var(--line);background:var(--ink0);cursor:pointer;padding:0}
+.cell[data-state=on]{background:var(--c);border-color:transparent}
+.cell[data-state=all]{background:repeating-linear-gradient(45deg,var(--c) 0 3px,transparent 3px 6px);opacity:.7}
+.btns{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+
+/* status */
+footer{display:flex;gap:14px;align-items:center;padding:5px 14px;border-top:1px solid var(--line);background:var(--ink1);font-size:12px;color:var(--muted);min-width:0}
+footer #status{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#dirty{font:11px var(--mono)}
+#dirty.on{color:var(--warn)}
+.toast{position:fixed;left:50%;bottom:46px;transform:translate(-50%,20px);opacity:0;background:var(--ink2);border:1px solid var(--line);
+  border-radius:9px;padding:8px 14px;box-shadow:0 10px 30px #0008;transition:transform .18s,opacity .18s;pointer-events:none}
+.toast.show{transform:translate(-50%,0);opacity:1}
+.toast.bad{border-color:var(--bad)}
+@media (max-width:900px){main{grid-template-columns:1fr}.inspector{position:fixed;right:0;top:48px;bottom:30px;width:min(340px,92vw);transform:translateX(100%);transition:transform .2s}
+  body.panel .inspector{transform:none}.panel-toggle{display:inline-grid!important}.wp #wpname{max-width:34vw}}
+.panel-toggle{display:none}
+@media (prefers-reduced-motion:reduce){.toast{transition:none}}
 </style>
+<body data-figure=bars>
 <header>
-  <h1>cavawall tune</h1>
-  <span class=key id=wpkey>__KEY__</span>
-  <span class="pill curve-only" id=count>0 points</span>
-  <span class=spacer></span>
-  <span class="hint curve-only">click add &middot; drag move &middot; right-click delete &middot; paint: drag to trace &middot; wheel zoom &middot; middle-drag pan &middot; see keys</span>
-  <span class="pill curve-only" id=pathlabel>path 1/1</span>
-  <button class=curve-only id=prevpath title="previous path">&lsaquo;</button>
-  <button class=curve-only id=nextpath title="next path">&rsaquo;</button>
-  <button class=curve-only id=addpath>+ path</button>
-  <button class=curve-only id=delpath title="delete this path">&times;</button>
-  <button class=curve-only id=pathup title="earlier in the order: this path takes lower cava bands">&uarr;</button>
-  <button class=curve-only id=pathdown title="later in the order: this path takes higher cava bands">&darr;</button>
-  <label class=curve-only title="clear to leave this path unclipped"><input type=checkbox id=occon> clip</label>
-  <button class=curve-only id=occbtn>occluder: off</button>
-  <button class=curve-only id=paintbtn>paint: off</button>
-  <div class="menu curve-only" id=viewmenu>
-    <button data-pop>view &#9662;</button>
-    <div class=pop>
-      <label><input type=checkbox id=showdots checked> handles</label>
-      <label>handle size <input type=range id=dotsize min=1 max=14 step=1 value=5></label>
-      <label>line width <input type=range id=linew min=1 max=12 step=1 value=3></label>
-      <label><input type=checkbox id=showbars checked> bar preview</label>
-      <label><input type=checkbox id=showcurve checked> curve line</label>
-      <label><input type=checkbox id=showocc checked> occluder</label>
-      <label>dim image <input type=range id=dim min=0 max=90 step=5 value=0></label>
-      <label>grab radius <input type=range id=grabr min=3 max=40 step=1 value=10></label>
-      <hr>
-      <button id=reset>reset view</button>
-    </div>
+  <div class=brand><span class=mark><i style="height:6px"></i><i style="height:13px"></i><i style="height:9px"></i></span>cavawall<b>tune</b></div>
+  <div class=wp><span id=wpname>…</span><span class=key id=wpkey>__KEY__</span></div>
+  <div class=seg id=figure role=tablist aria-label=Figure>
+    <button role=tab data-fig=bars>Bars</button><button role=tab data-fig=circle>Circle</button><button role=tab data-fig=curve>Curve</button>
   </div>
-  <div class="menu curve-only" id=editmenu>
-    <button data-pop>edit &#9662;</button>
-    <div class=pop>
-      <button id=undo>undo &nbsp;<span class=key>ctrl+z</span></button>
-      <hr>
-      <label>thin &#949; <input type=range id=thineps min=1 max=30 step=1 value=6></label>
-      <button id=thin>thin points in active list</button>
-      <hr>
-      <label>snap radius <input type=range id=snapr min=3 max=40 step=1 value=12></label>
-      <label>snap smoothness <input type=range id=snaplam min=1 max=24 step=1 value=6></label>
-      <label>snap detail <input type=range id=snapeps min=1 max=60 step=1 value=15></label>
-      <button id=trace>snap active list to the edge</button>
-      <hr>
-      <button id=clear>clear active list</button>
-      <button id=clearall>clear everything</button>
-    </div>
-  </div>
-  <div class="menu curve-only" id=keysmenu>
-    <button data-pop>keys &#9662;</button>
-    <div class=pop>
-      <label>force new point
-        <select id=kcreate><option value=shift>shift</option><option value=ctrl>ctrl</option><option value=alt>alt</option></select>
-      </label>
-      <label>drag to set angle
-        <select id=kangle><option value=alt>alt</option><option value=shift>shift</option><option value=ctrl>ctrl</option></select>
-      </label>
-      <hr>
-      <span class=hint2>left-drag moves a point &middot; right-click deletes one</span>
-      <span class=hint2>middle-drag pans &middot; wheel zooms &middot; ctrl+z undoes</span>
-    </div>
-  </div>
-  <div class=menu id=figmenu>
-    <button data-pop>figure &#9662;</button>
-    <div class=pop>
-     <div id=figbody>
-      <label>figure
-        <select id=figure>
-          <option value=curve>curve</option>
-          <option value=bars>bars</option>
-          <option value=circle>circle</option>
-        </select>
-      </label>
-      <hr>
-      <span class=hint2>circle</span>
-      <label>diameter <input type=number id=cdiam min=40 max=4000 step=10 placeholder=default></label>
-      <label>anchor
-        <select id=canchor>
-          <option value="">default</option>
-          <option value=top-left>top-left</option>
-          <option value=top-right>top-right</option>
-          <option value=bottom-left>bottom-left</option>
-          <option value=bottom-right>bottom-right</option>
-          <option value=center>center</option>
-        </select>
-      </label>
-      <label>inner radius <input type=number id=cinner min=0 max=0.95 step=0.05 placeholder=default></label>
-      <label>bars <input type=number id=cbars min=1 max=512 step=1 placeholder=default></label>
-      <hr>
-      <span class=hint2>bars (any figure)</span>
-      <label>count <input type=number id=bamount min=1 max=512 step=1 placeholder=default></label>
-      <label>gap <input type=number id=bgap min=0 max=2 step=0.05 placeholder=default></label>
-      <label>max height <input type=number id=bmaxh min=0.05 max=1 step=0.05 placeholder=default></label>
-      <label>opacity <input type=number id=bopac min=0 max=1 step=0.05 placeholder=default></label>
-     </div>
-    </div>
-  </div>
-  <button class=primary id=save>save to config</button>
+  <div class=grow></div>
+  <div class=live><span class=dot id=liveDot></span><span id=liveText>checking cavawall…</span></div>
+  <button class="btn icon panel-toggle" id=panelToggle aria-label="Settings">☰</button>
+  <button class="btn primary" id=save disabled>Save &amp; apply<kbd>Ctrl S</kbd></button>
 </header>
-<div id=wrap><canvas id=c></canvas></div>
-<div id=notcurve>
-  <p><b>This wallpaper is set to <span id=figname>bars</span>.</b></p>
-  <p>The path editor only applies to <b>curve</b>. Set this wallpaper's geometry under <b>figure &#9662;</b>, then save.</p>
-  <p>Any curve already saved is kept, and comes back if you switch this wallpaper to curve again.</p>
-  <div id=fighere></div>
-</div>
-
-<div id=panel>
-  <label>bars <input type=range id=bars min=1 max=200 step=1 value=64><span class=val id=barsv>64</span>
-    <input type=checkbox id=ownbars> <span class=hint>own</span></label>
-  <label>height <input type=range id=height min=1 max=40 step=1 value=10><span class=val id=heightv>0.10</span></label>
-  <label>width <input type=range id=width min=1 max=30 step=1 value=4><span class=val id=widthv>0.004</span></label>
-  <label>curve <input type=range id=opacity min=5 max=100 step=5 value=100><span class=val id=opacityv>1.00</span></label>
-  <label><input type=checkbox id=upright> upright</label>
-  <label><input type=checkbox id=flip> flip</label>
-  <span class=spacer></span>
-  <label id=selbox hidden>
-    point <span class=val id=selidx>-</span>
-    scale <input type=range id=scale min=10 max=150 step=5 value=100><span class=val id=scalev>1.00</span>
-    <label><input type=checkbox id=useangle> angle</label>
-    <input type=range id=angle min=-180 max=180 step=1 value=0><span class=val id=anglev>0</span>
-  </label>
-</div>
-<textarea id=out readonly spellcheck=false></textarea>
+<main>
+  <section class=stage id=stage>
+    <div class=view id=view><canvas id=base></canvas><canvas id=fx></canvas><canvas id=ui></canvas></div>
+    <div class=tools>
+      <button class="btn icon tool curve-only" id=toolSelect title="Add and move points (V)" aria-pressed=true>✚</button>
+      <button class="btn icon tool curve-only" id=toolPaint title="Paint a stroke (P)" aria-pressed=false>✎</button>
+      <button class="btn icon tool curve-only" id=toolOcc title="Edit the selected occluder (O)" aria-pressed=false>◭</button>
+      <span class="sep curve-only"></span>
+      <button class="btn icon" id=undo title="Undo (Ctrl Z)">↶</button>
+      <button class="btn icon" id=redo title="Redo (Ctrl Shift Z)">↷</button>
+      <span class=sep></span>
+      <button class="btn icon" id=fit title="Fit to window (0)">⤢</button>
+      <span class=zoom id=zoomv>100%</span>
+      <button class="btn icon" id=play title="Animate the preview (Space)" aria-pressed=true>❚❚</button>
+    </div>
+    <div class=hint id=hint></div>
+  </section>
+  <aside class=inspector id=inspector></aside>
+</main>
+<footer><span id=status>Loading the wallpaper…</span><span class=grow></span><span id=dirty>saved</span></footer>
+<div class=toast id=toast role=status></div>
 <script>
-const c=document.getElementById('c'),x=c.getContext('2d');
-// Zoom lives in a CSS transform, not in the drawing:
-// getBoundingClientRect reports the transformed box, so pos() needs no
-// maths of its own
-let zoom=1,panx=0,pany=0;
-function applyView(){c.style.transform=`translate(${panx}px,${pany}px) scale(${zoom})`;}
-function atCursor(e,f){
-  // Keep the point under the cursor fixed while the scale changes
-  const w=document.getElementById('wrap').getBoundingClientRect();
-  const cx=e.clientX-w.left, cy=e.clientY-w.top;
-  const before=zoom; zoom=Math.min(12,Math.max(1,f(zoom)));
-  const k=zoom/before;
-  panx=cx-(cx-panx)*k; pany=cy-(cy-pany)*k;
-  clampPan(); applyView();
-}
-function clampPan(){
-  // At zoom 1 the canvas is letterboxed and must not drift; beyond that, do
-  // not let the image be dragged entirely off its own frame
-  if(zoom<=1){panx=pany=0;return;}
-  const w=document.getElementById('wrap').getBoundingClientRect();
-  const r=c.getBoundingClientRect();
-  const sw=r.width, sh=r.height;
-  panx=Math.min(0,Math.max(w.width-sw+ (sw/zoom)*0 , panx));
-  pany=Math.min(0,Math.max(w.height-sh, pany));
-}
-const img=new Image();
-// A curve is a list of disconnected paths, each with its own bar geometry -
-// two ridges at different distances want different reaches. `pts` is the
-// active path's point array itself, not a copy, so every editing path below
-// keeps working on it unchanged.
-// `bn` is a path's own bar count, or null for a share of the total by
-// length - exactly the two forms the config has
-let paths=[{pts:[],occ:[],clip:true,h:10,w:4,up:false,fl:false,bn:null}], cur=0, barsTotal=64;
-let pts=paths[0].pts, occ=paths[0].occ, sel=-1, drag=-1, shift=false, hist=[];
-const cp=()=>paths[cur];
-// Which modifier does what. Kept in the browser so a choice survives a
-// reload; a blocked or private store just means the defaults every time
-const KEYS={create:'shift',angle:'alt'};
-function held(e,what){
-  const k=KEYS[what];
-  return k==='shift'?e.shiftKey:k==='ctrl'?(e.ctrlKey||e.metaKey):k==='alt'?e.altKey:false;
-}
-const KEY=document.getElementById('wpkey').textContent.trim();
-try{Object.assign(KEYS,JSON.parse(localStorage.getItem('cavawall.keys')||'{}'));}catch(e){}
-// The occluder is a second, independent polyline: the mountain silhouette
-// that bars have to hide behind. It is edited with the same handles, so the
-// mode flag decides which list a click lands in
-let occmode=false, paintmode=false, painting=false;
-const list=()=>occmode?occ:pts;
-const $=i=>document.getElementById(i);
-// A path is sampled along x; an occluder is a closed outline filled by parity,
-// so ordering its points would flatten the shape the clicks describe
-const keepOrder=()=>occmode;
-for(const m of document.querySelectorAll('.menu')){
-  m.querySelector('[data-pop]').onclick=e=>{
-    e.stopPropagation();
-    const was=m.classList.contains('open');
-    document.querySelectorAll('.menu').forEach(o=>o.classList.remove('open'));
-    m.classList.toggle('open',!was);
-    if(!was)place(m);
-  };
-  m.querySelector('.pop').onclick=e=>e.stopPropagation();
-}
-// Right-aligned to its button, then pushed back inside the window. Measured
-// after it is shown, because a display:none box measures zero
-function place(m){
-  const b=m.querySelector('[data-pop]').getBoundingClientRect();
-  const pop=m.querySelector('.pop');
-  pop.style.left='0px';pop.style.top='0px';
-  const w=pop.offsetWidth, h=pop.offsetHeight, pad=8;
-  pop.style.left=Math.max(pad,Math.min(b.right-w,innerWidth-w-pad))+'px';
-  pop.style.top=(b.bottom+6+h>innerHeight-pad?Math.max(pad,b.top-6-h):b.bottom+6)+'px';
-}
-addEventListener('click',()=>document.querySelectorAll('.menu').forEach(m=>m.classList.remove('open')));
-addEventListener('resize',()=>document.querySelectorAll('.menu.open').forEach(place));
-// Capped so a long session cannot grow it without bound
-function pushHist(){hist.push(JSON.stringify({p:paths,o:occ,c:cur}));if(hist.length>200)hist.shift();}
-img.onload=()=>{c.width=img.naturalWidth;c.height=img.naturalHeight;loadExisting();};
-img.src='/wallpaper';
+'use strict';
+// An error anywhere says so on the page instead of failing silently
+addEventListener('error', e => toast('Page error: ' + e.message, true));
+addEventListener('unhandledrejection', e => toast('Page error: ' + (e.reason && e.reason.message || e.reason), true));
+// ---------------------------------------------------------------- basics
+const $ = id => document.getElementById(id);
+const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+const r4 = v => Math.round(v * 1e4) / 1e4;
+const isNum = v => typeof v === 'number' && Number.isFinite(v);
+const img = new Image();
+const base = $('base'), fx = $('fx'), ui = $('ui');
+const bx = base.getContext('2d'), fxx = fx.getContext('2d'), ux = ui.getContext('2d');
+const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-let W={};
-const numOrNull=id=>{const v=$(id).value.trim();return v===''?null:parseFloat(v);};
-const intOrNull=id=>{const v=numOrNull(id);return v==null?null:Math.round(v);};
-function prune(o){for(const k of Object.keys(o))if(o[k]==null)delete o[k];return Object.keys(o).length?o:null;}
-const readCircle=()=>prune({diameter:intOrNull('cdiam'),anchor:$('canchor').value||null,
-                            inner_radius:numOrNull('cinner'),bars:intOrNull('cbars')});
-const readBars=()=>prune({amount:intOrNull('bamount'),gap:numOrNull('bgap'),
-                          max_height:numOrNull('bmaxh'),opacity:numOrNull('bopac')});
-function applyFigure(){
-  const m=$('figure').value;
-  document.body.dataset.figure=m;
-  $('figname').textContent=m;
-  // The dropdown is the right home while the canvas owns the screen; when it
-  // is hidden the fields are the only thing to look at, so show them inline
-  const body=$('figbody');
-  (m==='curve'?document.querySelector('#figmenu .pop'):$('fighere')).appendChild(body);
-}
-function loadFigure(){
-  $('figure').value=W.mode||'curve';
-  applyFigure();
-  const c=W.circle||{}, b=W.bars||{};
-  $('cdiam').value=c.diameter??''; $('canchor').value=c.anchor??'';
-  $('cinner').value=c.inner_radius??''; $('cbars').value=c.bars??'';
-  $('bamount').value=b.amount??''; $('bgap').value=b.gap??'';
-  $('bmaxh').value=b.max_height??''; $('bopac').value=b.opacity??'';
+// The renderer's own defaults, so an unset field previews as it will draw
+const RENDER = {path_height: 0.18, path_width: 0.006, circle_diameter: 520, inner_radius: 0.35,
+  inner_alpha: 1, outer_alpha: 1, max_height: 1, opacity: 1, matte: 0, radius: 0, reveal: 0,
+  left: 0, span: 1, baseline: 1};
+// Paths and occluders are told apart by colour in the editor and the grid
+const PATH_COLOURS = ['#ff5c5c', '#ffb14a', '#f7e36b', '#7fe0a0', '#5cc8ff', '#b28dff', '#ff7ad9', '#a0e0e0'];
+const OCC_COLOURS = ['#30d5c8', '#8ab4f8', '#f28b82', '#fdd663', '#81c995', '#c58af9', '#78d9ec', '#fcad70'];
+
+// ---------------------------------------------------------------- state
+const S = {
+  W: {}, ctx: {},
+  fig: 'bars',
+  bars: {}, circle: {},
+  curve: {bars: undefined, fit: 'cover', height: undefined, width: undefined},
+  paths: [], occ: [],
+  cur: 0, curOcc: -1, sel: -1,
+  tool: 'select', occEdit: false,
+  reveal: {source: 'wallpaper', filter: {}, image: null, canvas: null, changed: false},
+  out: {w: 1920, h: 1080},
+  view: {zoom: 1, panx: 0, pany: 0, dim: 0, frame: true, handles: true, play: !reduceMotion, lw: 3, dot: 5, grab: 10},
+};
+let saved = '', hist = [], future = [];
+const cp = () => S.paths[S.cur];
+
+// ---------------------------------------------------------------- loading
+img.onload = () => {
+  const k = Math.min(1, 2560 / img.naturalWidth);
+  for (const c of [base, fx, ui]) { c.width = Math.round(img.naturalWidth * k); c.height = Math.round(img.naturalHeight * k); }
+  Promise.all([fetch('/existing').then(r => r.json()), fetch('/context').then(r => r.json())])
+    .then(([w, ctx]) => { load(w || {}, ctx || {}); })
+    .catch(e => toast('Could not load settings: ' + e.message, true));
+};
+img.onerror = () => toast('The wallpaper did not load', true);
+img.src = '/wallpaper';
+
+function load(W, ctx) {
+  S.W = W; S.ctx = ctx;
+  const st = ctx.status || {};
+  if (Array.isArray(st.output_size)) S.out = {w: st.output_size[0], h: st.output_size[1]};
+  else S.out = {w: screen.width || 1920, h: screen.height || 1080};
+  S.fig = W.mode || ctx.defaults?.mode || 'bars';
+  S.bars = {...(W.bars || {})};
+  S.circle = {...(W.circle || {})};
+  S.reveal.source = S.bars.reveal_source || (ctx.reveal_source ? 'auto' : 'wallpaper');
+  S.reveal.filter = parseFilter(S.bars.reveal_filter || '');
+  const c = W.curve || {};
+  S.curve = {bars: c.bars, fit: c.fit || 'cover', height: c.height, width: c.width};
+  // Occluders, whichever way the file wrote them, become one list of named
+  // shapes, and each path says which cut it: null is "all of them"
+  S.occ = (c.occluder || []).filter(o => (o.points || []).length)
+    .map((o, i) => ({name: o.name || `shape ${i + 1}`, shape: o.shape === 'closed' ? 'closed' : 'skyline', pts: o.points.map(v => ({x: v[0], y: v[1]}))}));
+  const uniq = base => { let n = base, i = 2; while (S.occ.some(o => o.name === n)) n = `${base} ${i++}`; return n; };
+  if ((c.occlude || []).length > 1) S.occ.push({name: uniq('shared'), shape: 'skyline', pts: c.occlude.map(v => ({x: v[0], y: v[1]}))});
+  const src = (c.path && c.path.length) ? c.path : (c.points ? [c] : []);
+  S.paths = src.map((p, i) => {
+    let cut = Array.isArray(p.cut_by) ? p.cut_by.slice() : null;
+    if (p.clip === false) cut = [];
+    else if (!cut && (p.occlude || []).length > 1) {
+      const name = uniq(`path ${i + 1}`);
+      S.occ.push({name, shape: 'skyline', pts: p.occlude.map(v => ({x: v[0], y: v[1]}))});
+      cut = [name];
+    }
+    return {pts: (p.points || []).map(v => ({x: v[0], y: v[1], s: v[2] ?? 1, a: v.length > 3 ? v[3] : null})),
+      bars: src === c.path ? (p.bars ?? null) : null, height: p.height ?? null, width: p.width ?? null,
+      up: !!(p.upright ?? c.upright), fl: !!(p.flip ?? c.flip), cut};
+  }).filter(p => p.pts.length);
+  if (!S.paths.length) S.paths = [newPath()];
+  S.cur = 0; S.curOcc = S.occ.length ? 0 : -1;
+  $('wpname').textContent = (ctx.wallpaper || '').split('/').pop() || 'wallpaper';
+  setAccent(ctx.gradient);
+  live(st);
+  if (S.reveal.source === 'auto' && ctx.reveal_source) loadRevealSource();
+  else if (S.reveal.source === 'wallpaper') { S.reveal.image = img; bakeRevealCanvas(); }
+  saved = JSON.stringify(payload());
+  hist = []; future = [];
+  buildInspector(); setFigure(S.fig, true); fitView(); drawBase(); drawUI(); startLoop();
+  status();
 }
 
-// Any figure field, not just the selector: save posts the emitted JSON, so a
-// field that never re-emits is a field that never gets written
-document.addEventListener('input',e=>{
-  if(!e.target.closest||!e.target.closest('#figbody'))return;
-  if(e.target.id==='figure')applyFigure();
-  emit();
-});
+function newPath() {
+  const p = cp();
+  return {pts: [], bars: null, height: p ? p.height : null, width: p ? p.width : null, up: p ? p.up : true, fl: false, cut: null};
+}
 
-function loadExisting(){
-  fetch('/existing').then(r=>r.json()).then(w=>{
-    W=w||{};
-    const c=W.curve||{};
-    const src=(c.path&&c.path.length)?c.path:(c.points?[c]:[]);
-    paths=src.map(b=>({
-      pts:(b.points||[]).map(v=>({x:v[0],y:v[1],s:v[2]??1,a:v.length>3?v[3]:null})),
-      bn:b.bars??null,
-      h:Math.round((b.height??0.10)*100),
-      w:Math.round((b.width??0.004)*1000),
-      up:!!b.upright, fl:!!b.flip, clip:b.clip!==false,
-      occ:(b.occlude||c.occlude||[]).map(v=>({x:v[0],y:v[1],s:1,a:null}))})).filter(p=>p.pts.length);
-    if(!paths.length)paths=[{pts:[],occ:[],clip:true,h:10,w:4,up:false,fl:false,bn:null}];
-    cur=0;pts=cp().pts;occ=cp().occ;
-    barsTotal=Math.round(c.bars??64);
-    loadFigure();
-    showPath();
-    emit();
-  }).catch(draw);
+// ---------------------------------------------------------------- colour
+let STOPS = [[255, 204, 128, 1], [230, 81, 0, 1]];
+function setAccent(g) {
+  if (Array.isArray(g) && g.length) STOPS = g.length === 1 ? [g[0], g[0]] : g;
+  const css = STOPS.map(s => `rgb(${s[0]},${s[1]},${s[2]})`);
+  const mid = STOPS[Math.floor(STOPS.length / 2)];
+  document.documentElement.style.setProperty('--grad', `linear-gradient(90deg,${css.join(',')})`);
+  document.documentElement.style.setProperty('--accent', `rgb(${mid[0]},${mid[1]},${mid[2]})`);
 }
-// Everything that has to follow the active path: the sliders edit it, so they
-// have to be reloaded from it whenever it changes
-function showPath(){
-  pts=cp().pts;occ=cp().occ;$('occon').checked=cp().clip!==false;
-  $('pathlabel').textContent='path '+(cur+1)+'/'+paths.length;
-  $('height').value=cp().h; $('width').value=cp().w;
-  $('upright').checked=cp().up; $('flip').checked=cp().fl;
-  $('ownbars').checked=cp().bn!=null;
-  $('bars').value=cp().bn!=null?cp().bn:barsTotal;
-  $('barsv').textContent=$('bars').value+(cp().bn!=null?'':' all');
-  $('heightv').textContent=(cp().h/100).toFixed(2);
-  $('widthv').textContent=(cp().w/1000).toFixed(3);
-  sel=-1;showSel();draw();
+// Stop i of n at t, in the renderer's order: the first stop at the base
+function stopAt(t, alphaMul) {
+  const n = STOPS.length, f = clamp(t, 0, 1) * (n - 1), i = Math.min(Math.floor(f), n - 2), u = f - i;
+  const a = STOPS[i], b = STOPS[i + 1];
+  const mean = STOPS.reduce((m, s) => [m[0] + s[0] / n, m[1] + s[1] / n, m[2] + s[2] / n], [0, 0, 0]);
+  const matte = val('bars', 'matte');
+  const ch = k => (a[k] + (b[k] - a[k]) * u) * (1 - matte) + mean[k] * matte;
+  const al = ((a[3] ?? 1) + ((b[3] ?? 1) - (a[3] ?? 1)) * u) * val('bars', 'opacity') * (alphaMul ?? 1);
+  return `rgba(${ch(0) | 0},${ch(1) | 0},${ch(2) | 0},${clamp(al, 0, 1)})`;
 }
-// Catmull-Rom, matching curve.rs so the preview is the real placement
-function cr(p0,p1,p2,p3,t){const t2=t*t,t3=t2*t;return[0,1].map(i=>0.5*((2*p1[i])+(-p0[i]+p2[i])*t+(2*p0[i]-5*p1[i]+4*p2[i]-p3[i])*t2+(-p0[i]+3*p1[i]-3*p2[i]+p3[i])*t3));}
-function dense(pts){
-  if(pts.length<2)return[];
-  const o=[],n=pts.length;
-  for(let i=0;i<n-1;i++){
-    const P=j=>[pts[j].x*c.width,pts[j].y*c.height];
-    const p0=P(Math.max(0,i-1)),p1=P(i),p2=P(i+1),p3=P(Math.min(n-1,i+2));
-    for(let k=0;k<16;k++){const t=k/16;
-      const a1=pts[i].a,a2=pts[i+1].a;
-      let a=null; if(a1!=null&&a2!=null)a=a1+(a2-a1)*t; else if(a1!=null)a=a1; else if(a2!=null)a=a2;
-      o.push({p:cr(p0,p1,p2,p3,t),s:pts[i].s+(pts[i+1].s-pts[i].s)*t,a});}
+function gradient(ctx, x0, y0, x1, y1, alphaIn, alphaOut) {
+  const g = ctx.createLinearGradient(x0, y0, x1, y1);
+  for (let k = 0; k <= 8; k++) { const t = k / 8; g.addColorStop(t, stopAt(t, alphaIn == null ? 1 : alphaIn + (alphaOut - alphaIn) * t)); }
+  return g;
+}
+
+// ---------------------------------------------------------------- values
+// A field's value as the renderer will see it: this wallpaper's, else
+// config.toml's, else the renderer's default
+function val(group, k) {
+  const own = S[group][k];
+  if (own != null) return own;
+  const d = S.ctx.defaults?.[group]?.[k];
+  if (d != null) return d;
+  if (group === 'circle' && k === 'diameter') return RENDER.circle_diameter;
+  return RENDER[k] ?? 0;
+}
+function effectiveBars() {
+  const d = S.ctx.defaults || {};
+  if (S.fig === 'curve') {
+    if (isNum(S.curve.bars)) return [S.curve.bars, 'curve'];
+    if (S.paths.every(p => p.pts.length < 2 || p.bars != null) && S.paths.some(p => p.bars != null))
+      return [S.paths.reduce((a, p) => a + (p.bars || 0), 0), 'curve paths'];
   }
-  o.push({p:[pts[n-1].x*c.width,pts[n-1].y*c.height],s:pts[n-1].s,a:pts[n-1].a});
+  if (S.fig === 'circle' && isNum(S.circle.bars)) return [S.circle.bars, 'circle'];
+  if (isNum(S.bars.amount)) return [S.bars.amount, 'this wallpaper'];
+  if (d.follow_shell_bars && isNum(S.ctx.shell_bars)) return [S.ctx.shell_bars, 'the shell'];
+  return [d.bars?.amount ?? 24, 'config.toml'];
+}
+
+// ---------------------------------------------------------------- geometry
+// How the image covers the output, as the wallpaper daemon lays it down:
+// image fraction -> output fraction is v * s + o
+function fit() {
+  const iw = img.naturalWidth || 1, ih = img.naturalHeight || 1, {w: ow, h: oh} = S.out;
+  if (S.fig === 'curve' && S.curve.fit === 'stretch') return {sx: 1, sy: 1, ox: 0, oy: 0};
+  const s = Math.max(ow / iw, oh / ih), sx = iw * s / ow, sy = ih * s / oh;
+  return {sx, sy, ox: (1 - sx) / 2, oy: (1 - sy) / 2};
+}
+// Output pixels -> canvas pixels, through the crop
+function o2c(x, y) {
+  const f = fit();
+  return [((x / S.out.w - f.ox) / f.sx) * base.width, ((y / S.out.h - f.oy) / f.sy) * base.height];
+}
+function c2o(cx, cy) {
+  const f = fit();
+  return [(cx / base.width * f.sx + f.ox) * S.out.w, (cy / base.height * f.sy + f.oy) * S.out.h];
+}
+// Canvas pixels per output pixel
+function scale() { const f = fit(); return base.width / (S.out.w * f.sx); }
+
+// The row of bars, exactly as render.rs places it
+function placement() {
+  const left = clamp(val('bars', 'left'), 0, 0.99);
+  return {left, span: clamp(val('bars', 'span'), 0.01, Math.max(0.01, 1 - left)),
+    baseline: clamp(val('bars', 'baseline'), 0, 1), reach: clamp(val('bars', 'max_height'), 0.01, 1),
+    down: val('bars', 'grow') === 'down'};
+}
+function band() {
+  const p = placement(), {w, h} = S.out;
+  const width = clamp(Math.round(p.span * w), 1, w), left = Math.min(Math.round(p.left * w), w - width);
+  const height = clamp(Math.ceil(p.reach * h), 1, h), b = Math.round(p.baseline * h);
+  const top = clamp(p.down ? b : b - height, 0, h - height);
+  return {left, top, width, height, down: p.down};
+}
+// The circle's square surface, exactly as main.rs places it
+function circleBox() {
+  const {w, h} = S.out, d = Math.max(1, Math.min(val('circle', 'diameter'), w, h));
+  const fw = Math.max(0, w - d), fh = Math.max(0, h - d);
+  const pos = S.circle.position;
+  if (Array.isArray(pos)) return {d, left: clamp(Math.round(pos[0] * w - d / 2), 0, fw), top: clamp(Math.round(pos[1] * h - d / 2), 0, fh)};
+  const mx = val('circle', 'margin_x') || 0, my = val('circle', 'margin_y') || 0, cx = fw / 2 | 0, cy = fh / 2 | 0;
+  const a = S.circle.anchor || S.ctx.defaults?.circle?.anchor || 'center';
+  const at = {center: [cx, cy], top: [cx, my], bottom: [cx, fh - my], left: [mx, cy], right: [fw - mx, cy],
+    'top-left': [mx, my], 'top-right': [fw - mx, my], 'bottom-left': [mx, fh - my], 'bottom-right': [fw - mx, fh - my]}[a] || [cx, cy];
+  return {d, left: clamp(at[0], 0, fw), top: clamp(at[1], 0, fh)};
+}
+
+// Catmull-Rom through the points, matching curve.rs, in canvas pixels
+function cr(p0, p1, p2, p3, t) {
+  const t2 = t * t, t3 = t2 * t;
+  return [0, 1].map(i => 0.5 * ((2 * p1[i]) + (-p0[i] + p2[i]) * t + (2 * p0[i] - 5 * p1[i] + 4 * p2[i] - p3[i]) * t2 + (-p0[i] + 3 * p1[i] - 3 * p2[i] + p3[i]) * t3));
+}
+function dense(pts) {
+  if (pts.length < 2) return [];
+  const o = [], n = pts.length, W = base.width, H = base.height, P = j => [pts[j].x * W, pts[j].y * H];
+  for (let i = 0; i < n - 1; i++) {
+    const p0 = P(Math.max(0, i - 1)), p1 = P(i), p2 = P(i + 1), p3 = P(Math.min(n - 1, i + 2));
+    for (let k = 0; k < 16; k++) {
+      const t = k / 16, a1 = pts[i].a, a2 = pts[i + 1].a;
+      const a = a1 != null && a2 != null ? a1 + (a2 - a1) * t : a1 ?? a2;
+      o.push({p: cr(p0, p1, p2, p3, t), s: pts[i].s + (pts[i + 1].s - pts[i].s) * t, a});
+    }
+  }
+  o.push({p: [pts[n - 1].x * W, pts[n - 1].y * H], s: pts[n - 1].s, a: pts[n - 1].a});
   return o;
 }
-// The silhouette as the SHADER sees it: sampled into the same fixed number
-// of buckets, by the same rule, and read back with the same interpolation
-//
-// The resampling is the renderer's: clipping against the polyline
-// directly disagrees with the shader on steep stretches, where a bucket
-// is coarser than the line
-function occOutline(){
-  x.moveTo(occ[0].x*c.width,occ[0].y*c.height);
-  for(let i=1;i<occ.length;i++)x.lineTo(occ[i].x*c.width,occ[i].y*c.height);
-  x.lineTo(occ[occ.length-1].x*c.width,c.height);
-  x.lineTo(occ[0].x*c.width,c.height);
-  x.closePath();
-}
-// Parity fill, so a self-crossing outline reads the same here as in the shader
-function clipAboveHorizon(){
-  if(occ.length<2||cp().clip===false)return false;
-  x.save();x.beginPath();x.rect(0,0,c.width,c.height);occOutline();x.clip('evenodd');
-  return true;
-}
-// Paths that each name a count add up to the total; otherwise the total is
-// its own setting and they share it
-function totalBars(){
-  return paths.every(P=>P.bn!=null)
-    ? Math.max(1,paths.reduce((a,P)=>a+P.bn,0))
-    : barsTotal;
-}
-function pathLen(d){let t=0;for(let i=1;i<d.length;i++)t+=Math.hypot(d[i].p[0]-d[i-1].p[0],d[i].p[1]-d[i-1].p[1]);return t;}
-// The same rule curve::allocate uses: a path's own count comes off the top,
-// the rest split what is left by length, largest remainder, and the total is
-// exactly the bar count
-function alloc(lens,fixed,total){
-  const n=lens.length; if(!n)return[];
-  if(fixed&&fixed.some(v=>v!=null)){
-    const asked=fixed.reduce((a,v)=>a+(v||0),0);
-    if(asked>=total) return alloc(fixed.map(v=>v||0),null,total);
-    const out=fixed.map(v=>v||0);
-    const rest=lens.map((l,i)=>fixed[i]!=null?0:l);
-    if(rest.some(l=>l>0)){
-      const share=alloc(rest,null,total-asked);
-      for(let i=0;i<n;i++) if(!out[i]) out[i]=share[i];
-    }
+function arcLen(d) { let t = 0; for (let i = 1; i < d.length; i++) t += Math.hypot(d[i].p[0] - d[i - 1].p[0], d[i].p[1] - d[i - 1].p[1]); return t; }
+// curve::allocate: named counts come off the top, the rest by length,
+// largest remainder, so the total is exact
+function alloc(lens, fixed, total) {
+  const n = lens.length; if (!n) return [];
+  if (fixed.some(v => v != null)) {
+    const asked = fixed.reduce((a, v) => a + (v || 0), 0);
+    if (asked >= total) return alloc(fixed.map(v => v || 0), fixed.map(() => null), total);
+    const out = fixed.map(v => v || 0), rest = lens.map((l, i) => fixed[i] != null ? 0 : l);
+    if (rest.some(l => l > 0)) { const share = alloc(rest, rest.map(() => null), total - asked); for (let i = 0; i < n; i++) if (!out[i]) out[i] = share[i]; }
     return out;
   }
-  const sum=lens.reduce((a,b)=>a+b,0);
-  if(!(sum>0)){const e=Math.floor(total/n),o=new Array(n).fill(e);for(let i=0;i<total%n;i++)o[i]++;return o;}
-  const ideal=lens.map(l=>total*l/sum), out=ideal.map(v=>Math.floor(v));
-  let left=total-out.reduce((a,b)=>a+b,0);
-  const order=ideal.map((_,i)=>i).sort((a,b)=>
-    (ideal[b]-Math.floor(ideal[b]))-(ideal[a]-Math.floor(ideal[a]))||a-b);
-  for(let k=0;left>0;k++,left--)out[order[k%n]]++;
+  const sum = lens.reduce((a, b) => a + b, 0);
+  if (!(sum > 0)) { const e = Math.floor(total / n), o = new Array(n).fill(e); for (let i = 0; i < total % n; i++) o[i]++; return o; }
+  const ideal = lens.map(l => total * l / sum), out = ideal.map(Math.floor);
+  let left = total - out.reduce((a, b) => a + b, 0);
+  const order = ideal.map((_, i) => i).sort((a, b) => (ideal[b] - Math.floor(ideal[b])) - (ideal[a] - Math.floor(ideal[a])) || a - b);
+  for (let k = 0; left > 0; k++, left--) out[order[k % n]]++;
   return out;
 }
-// One place decides how thick a guide line is: at macro zoom a 3px line is
-// wider than the ridge you are tracing
-const lw=()=>+$('linew').value*c.width/1600;
-function draw(){
-  x.drawImage(img,0,0);
-  const alpha=+$('opacity').value/100;
-  const d0=+$('dim').value/100;
-  if(d0>0){x.fillStyle='rgba(16,16,20,'+d0+')';x.fillRect(0,0,c.width,c.height);}
-  const ds=paths.map(p=>dense(p.pts));
-  // Bars are split between paths by length, so the preview has to allocate
-  // them the same way the renderer does - over the paths that ARE paths,
-  // since curve::build drops a one-point path before it allocates anything
-  const usable=ds.map((d,i)=>d.length>1?i:-1).filter(i=>i>=0);
-  const share=alloc(usable.map(i=>pathLen(ds[i])),usable.map(i=>paths[i].bn),totalBars());
-  const counts=new Array(ds.length).fill(0);
-  usable.forEach((i,k)=>{counts[i]=share[k];});
-  if($('showcurve').checked) ds.forEach((d,i)=>{
-    if(d.length<2)return;
-    // The path you are not editing is still drawn, just quietly
-    x.globalAlpha=alpha*(i===cur?1:0.35);
-    x.strokeStyle='#ff3b30';x.lineWidth=lw();x.beginPath();
-    d.forEach((q,k)=>k?x.lineTo(q.p[0],q.p[1]):x.moveTo(q.p[0],q.p[1]));x.stroke();
+// Every curve bar: base, unit normal, full reach and width, all in canvas
+// pixels, and the path it belongs to
+function curveBars() {
+  const ds = S.paths.map(p => dense(p.pts));
+  const usable = ds.map((d, i) => d.length > 1 ? i : -1).filter(i => i >= 0);
+  const total = effectiveBars()[0];
+  const counts = alloc(usable.map(i => arcLen(ds[i])), usable.map(i => S.paths[i].bars), total);
+  const f = fit(), outH = base.height / f.sy, outW = base.width / f.sx, bars = [];
+  usable.forEach((pi, k) => {
+    const d = ds[pi], P = S.paths[pi], N = counts[k];
+    const reach = (P.height ?? S.curve.height ?? RENDER.path_height) * outH;
+    const width = (P.width ?? S.curve.width ?? RENDER.path_width) * outW;
+    const acc = [0]; let tot = 0;
+    for (let i = 1; i < d.length; i++) { tot += Math.hypot(d[i].p[0] - d[i - 1].p[0], d[i].p[1] - d[i - 1].p[1]); acc.push(tot); }
+    let seg = 0;
+    for (let i = 0; i < N; i++) {
+      const target = tot * (i + 0.5) / N;
+      while (seg + 2 < d.length && acc[seg + 1] < target) seg++;
+      const span = Math.max(acc[seg + 1] - acc[seg], 1e-6), t = clamp((target - acc[seg]) / span, 0, 1);
+      const a = d[seg].p, b = d[seg + 1].p, s = d[seg].s + (d[seg + 1].s - d[seg].s) * t;
+      let nx, ny;
+      if (d[seg].a != null) { const r = d[seg].a * Math.PI / 180; nx = Math.sin(r); ny = -Math.cos(r); }
+      else if (P.up) { nx = 0; ny = -1; }
+      else { const dx = b[0] - a[0], dy = b[1] - a[1], L = Math.hypot(dx, dy) || 1; nx = dy / L; ny = -dx / L; }
+      if (P.fl) { nx = -nx; ny = -ny; }
+      bars.push({x: a[0] + (b[0] - a[0]) * t, y: a[1] + (b[1] - a[1]) * t, nx, ny, reach: reach * s, width: width * s, path: pi});
+    }
   });
-  x.globalAlpha=1;
-  // Bar preview at the real sample positions, arc-length spaced
-  if($('showbars').checked){
-    // Bars are clipped exactly where the shader discards them, so the preview
-    // shows what the silhouette actually hides
-    const clipped=clipAboveHorizon();
-    x.strokeStyle='rgba(255,255,255,.85)';
-    ds.forEach((d,pi)=>{
-      const N=counts[pi];
-      if(d.length<2||!N)return;
-      const P=paths[pi], reach=(P.h/100)*c.height, wpx=(P.w/1000)*c.width;
-      let acc=[0],tot=0;
-      for(let i=1;i<d.length;i++){tot+=Math.hypot(d[i].p[0]-d[i-1].p[0],d[i].p[1]-d[i-1].p[1]);acc.push(tot);}
-      let seg=0;
-      for(let i=0;i<N;i++){
-        const target=tot*(i+0.5)/N;
-        while(seg+2<d.length&&acc[seg+1]<target)seg++;
-        const span=Math.max(acc[seg+1]-acc[seg],1e-6),t=Math.min(1,Math.max(0,(target-acc[seg])/span));
-        const a=d[seg].p,b=d[seg+1].p;
-        const px=a[0]+(b[0]-a[0])*t, py=a[1]+(b[1]-a[1])*t;
-        let nx,ny;
-        if(d[seg].a!=null){const r=d[seg].a*Math.PI/180;nx=Math.sin(r);ny=-Math.cos(r);}
-        else if(P.up){nx=0;ny=-1;}
-        else{const dx=b[0]-a[0],dy=b[1]-a[1],L=Math.hypot(dx,dy)||1;nx=dy/L;ny=-dx/L;}
-        if(P.fl){nx=-nx;ny=-ny;}
-        // Bar WIDTH has to be per bar, not one lineWidth for the batch: the
-        // renderer multiplies it by each bar's scale
-        x.lineWidth=Math.max(1,wpx*d[seg].s);
-        const len=d[seg].s*reach;
-        x.beginPath();x.moveTo(px,py);x.lineTo(px+nx*len,py+ny*len);x.stroke();
+  return bars;
+}
+// Which occluders cut path i, as indices
+function cutters(i) {
+  const cut = S.paths[i].cut;
+  if (cut === null) return S.occ.map((_, k) => k);
+  return cut.map(n => S.occ.findIndex(o => o.name === n)).filter(k => k >= 0);
+}
+function occPolygon(o, ctx) {
+  const W = base.width, H = base.height, p = o.pts;
+  ctx.moveTo(p[0].x * W, p[0].y * H);
+  for (let i = 1; i < p.length; i++) ctx.lineTo(p[i].x * W, p[i].y * H);
+  if (o.shape !== 'closed') { ctx.lineTo(p[p.length - 1].x * W, H); ctx.lineTo(p[0].x * W, H); }
+  ctx.closePath();
+}
+
+// ---------------------------------------------------------------- drawing
+// Three layers: the image (redrawn on view changes), the preview (every
+// animation frame), and the editing overlay (on edits)
+function drawBase() {
+  if (!img.naturalWidth) return;
+  bx.clearRect(0, 0, base.width, base.height);
+  bx.drawImage(img, 0, 0, base.width, base.height);
+  if (S.view.dim > 0) { bx.fillStyle = `rgba(13,13,17,${S.view.dim})`; bx.fillRect(0, 0, base.width, base.height); }
+  // The part of the image the output never shows
+  if (S.view.frame) {
+    const [x0, y0] = o2c(0, 0), [x1, y1] = o2c(S.out.w, S.out.h);
+    bx.fillStyle = 'rgba(13,13,17,.62)';
+    bx.fillRect(0, 0, base.width, Math.max(0, y0)); bx.fillRect(0, y1, base.width, base.height - y1);
+    bx.fillRect(0, y0, Math.max(0, x0), y1 - y0); bx.fillRect(x1, y0, base.width - x1, y1 - y0);
+  }
+}
+
+// A deterministic stand-in for music: every bar moves, none in step
+function level(i, t) {
+  if (!S.view.play) return 0.72;
+  const a = 0.5 + 0.5 * Math.sin(t * 2.3 + i * 0.61), b = 0.5 + 0.5 * Math.sin(t * 0.83 + i * 1.37);
+  return clamp(0.18 + 0.72 * a * (0.55 + 0.45 * b), 0.05, 1);
+}
+function roundedBar(ctx, x, y, w, h, up, r) {
+  // Only the tip is rounded, as the shader does
+  const rr = Math.min(r, w / 2, h);
+  if (rr <= 0.5) { ctx.rect(x, up ? y - h : y, w, h); return; }
+  if (up) { ctx.moveTo(x, y); ctx.lineTo(x, y - h + rr); ctx.arcTo(x, y - h, x + rr, y - h, rr); ctx.lineTo(x + w - rr, y - h); ctx.arcTo(x + w, y - h, x + w, y - h + rr, rr); ctx.lineTo(x + w, y); }
+  else { ctx.moveTo(x, y); ctx.lineTo(x, y + h - rr); ctx.arcTo(x, y + h, x + rr, y + h, rr); ctx.lineTo(x + w - rr, y + h); ctx.arcTo(x + w, y + h, x + w, y + h - rr, rr); ctx.lineTo(x + w, y); }
+  ctx.closePath();
+}
+function drawPreview(t) {
+  fxx.clearRect(0, 0, fx.width, fx.height);
+  if (!img.naturalWidth) return;
+  const [n] = effectiveBars(), gap = val('bars', 'gap'), radius = val('bars', 'radius');
+  fxx.save();
+  if (S.fig === 'bars') {
+    const b = band(), [x0, y0] = o2c(b.left, b.top), k = scale();
+    const W = b.width * k, H = b.height * k, bw = W / (n + (n - 1) * gap), stride = bw * (1 + gap);
+    const baseY = b.down ? y0 : y0 + H;
+    fxx.fillStyle = gradient(fxx, 0, baseY, 0, b.down ? baseY + H : baseY - H);
+    fxx.beginPath();
+    for (let i = 0; i < n; i++) roundedBar(fxx, x0 + i * stride, baseY, bw, H * level(i, t), !b.down, radius * bw);
+    fxx.fill();
+  } else if (S.fig === 'circle') {
+    const c = circleBox(), [x0, y0] = o2c(c.left, c.top), R = c.d / 2 * scale(), cx = x0 + R, cy = y0 + R;
+    const ir = clamp(val('circle', 'inner_radius'), 0, 0.95), step = 2 * Math.PI / n, half = step / (1 + gap) / 2;
+    const ia = val('circle', 'inner_alpha'), oa = val('circle', 'outer_alpha');
+    const g = fxx.createRadialGradient(cx, cy, 0, cx, cy, R);
+    for (let k = 0; k <= 8; k++) { const t2 = k / 8, r = ir + (1 - ir) * t2; g.addColorStop(r, stopAt(t2, ia + (oa - ia) * t2)); }
+    fxx.fillStyle = g; fxx.beginPath();
+    for (let i = 0; i < n; i++) {
+      // Bar 0 points up and the spectrum runs clockwise, as the shader has it
+      const th = step * i, r0 = ir * R, r1 = r0 + (1 - ir) * R * level(i, t);
+      const pt = (r, a) => [cx + r * Math.sin(a), cy - r * Math.cos(a)];
+      const q = [pt(r0, th - half), pt(r1, th - half), pt(r1, th + half), pt(r0, th + half)];
+      fxx.moveTo(...q[0]); q.slice(1).forEach(p => fxx.lineTo(...p)); fxx.closePath();
+    }
+    fxx.fill();
+  } else {
+    const bars = curveBars(), ia = val('circle', 'inner_alpha'), oa = val('circle', 'outer_alpha');
+    // One pass per distinct set of occluders: draw that set's bars, then
+    // punch every occluder in the set out of them - the union, like the mask
+    const groups = new Map();
+    bars.forEach((b, i) => { const key = cutters(b.path).join(','); if (!groups.has(key)) groups.set(key, []); groups.get(key).push([b, i]); });
+    for (const [key, list] of groups) {
+      const layer = key ? scratch() : fxx;
+      for (const [b, i] of list) {
+        const len = b.reach * level(i, t), tx = -b.ny, ty = b.nx;
+        layer.fillStyle = gradient(layer, b.x, b.y, b.x + b.nx * b.reach, b.y + b.ny * b.reach, ia, oa);
+        layer.save(); layer.translate(b.x, b.y); layer.transform(tx, ty, b.nx, b.ny, 0, 0);
+        layer.beginPath(); roundedBar(layer, -b.width / 2, 0, b.width, len, false, radius * b.width); layer.fill(); layer.restore();
       }
-    });
-    if(clipped)x.restore();
+      if (key) {
+        layer.globalCompositeOperation = 'destination-out'; layer.fillStyle = '#000';
+        for (const k of key.split(',').map(Number)) if (S.occ[k] && S.occ[k].pts.length > 1) { layer.beginPath(); occPolygon(S.occ[k], layer); layer.fill('evenodd'); }
+        layer.globalCompositeOperation = 'source-over';
+        fxx.drawImage(layer.canvas, 0, 0);
+      }
+    }
   }
-  if(occ.length>1&&$('showocc').checked){
-    x.globalAlpha=alpha;
-    x.beginPath();occOutline();
-    x.fillStyle='rgba(48,213,200,.18)';x.fill('evenodd');
-    x.strokeStyle='#30d5c8';x.lineWidth=lw();
-    x.beginPath();
-    x.moveTo(occ[0].x*c.width,occ[0].y*c.height);
-    for(let i=1;i<occ.length;i++)x.lineTo(occ[i].x*c.width,occ[i].y*c.height);
-    x.stroke();
-    // The sides close straight down to the bottom edge, as the outline does
-    x.save();x.setLineDash([lw()*3,lw()*3]);x.globalAlpha=alpha*0.45;
-    x.beginPath();
-    x.moveTo(occ[0].x*c.width,occ[0].y*c.height);x.lineTo(occ[0].x*c.width,c.height);
-    x.moveTo(occ[occ.length-1].x*c.width,occ[occ.length-1].y*c.height);
-    x.lineTo(occ[occ.length-1].x*c.width,c.height);
-    x.stroke();x.restore();
-    x.globalAlpha=1;
+  // The x-ray: the reveal image painted over the bars only, by its mix
+  const mix = val('bars', 'reveal');
+  if (mix > 0 && S.reveal.canvas) {
+    fxx.globalCompositeOperation = 'source-atop'; fxx.globalAlpha = mix;
+    fxx.drawImage(S.reveal.canvas, 0, 0, fx.width, fx.height);
   }
-  // Handles fade with the curve so they never sit on top of the landing spot
-  // you are trying to judge
-  x.globalAlpha=alpha;
-  const dot=(p,fill)=>{
-    const r=+$('dotsize').value*c.width/1600;
-    x.beginPath();x.arc(p.x*c.width,p.y*c.height,r,0,7);
-    x.fillStyle=fill;x.fill();
-    x.strokeStyle='#101014';x.lineWidth=2;x.stroke();
+  fxx.restore();
+}
+let scratchCanvas = null;
+function scratch() {
+  if (!scratchCanvas || scratchCanvas.width !== fx.width || scratchCanvas.height !== fx.height) {
+    scratchCanvas = document.createElement('canvas'); scratchCanvas.width = fx.width; scratchCanvas.height = fx.height;
+  }
+  const c = scratchCanvas.getContext('2d'); c.clearRect(0, 0, fx.width, fx.height); return c;
+}
+
+// The preview runs at 30fps, and only while the page is visible
+let last = 0, raf = 0;
+function startLoop() {
+  cancelAnimationFrame(raf);
+  const tick = now => {
+    raf = requestAnimationFrame(tick);
+    if (document.hidden || now - last < 33) return;
+    last = now; drawPreview(now / 1000);
   };
-  if($('showdots').checked){
-    if($('showcurve').checked){
-      paths.forEach((P,i)=>{
-        if(i===cur)return;
-        x.globalAlpha=alpha*0.35;
-        P.pts.forEach(q=>dot(q,'#ff3b30'));
-      });
-      x.globalAlpha=alpha;
-      pts.forEach((p,i)=>dot(p,!occmode&&i===sel?'#ffd60a':'#ff3b30'));
-    }
-    if($('showocc').checked){
-      x.globalAlpha=alpha;
-      occ.forEach((p,i)=>dot(p,occmode&&i===sel?'#ffd60a':'#30d5c8'));
-    }
+  if (S.view.play) raf = requestAnimationFrame(tick); else drawPreview(0);
+}
+document.addEventListener('visibilitychange', () => { if (!document.hidden && S.view.play) startLoop(); });
+
+function drawUI() {
+  ux.clearRect(0, 0, ui.width, ui.height);
+  if (!img.naturalWidth) return;
+  const lw = S.view.lw * ui.width / 1600, dot = S.view.dot * ui.width / 1600;
+  ux.lineWidth = lw;
+  if (S.fig === 'bars') {
+    const b = band(), [x0, y0] = o2c(b.left, b.top), [x1, y1] = o2c(b.left + b.width, b.top + b.height);
+    ux.setLineDash([lw * 3, lw * 2]); ux.strokeStyle = 'rgba(255,255,255,.55)'; ux.strokeRect(x0, y0, x1 - x0, y1 - y0); ux.setLineDash([]);
+    // Handles: the sides resize, the reach edge sets the height
+    for (const [x, y] of [[x0, (y0 + y1) / 2], [x1, (y0 + y1) / 2], [(x0 + x1) / 2, b.down ? y1 : y0]]) handle(x, y, dot * 1.2, '#fff');
+    // The baseline, where the bars stand
+    ux.strokeStyle = 'var(--accent)'; ux.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--accent');
+    ux.beginPath(); const by = b.down ? y0 : y1; ux.moveTo(x0, by); ux.lineTo(x1, by); ux.stroke();
+  } else if (S.fig === 'circle') {
+    const c = circleBox(), [x0, y0] = o2c(c.left, c.top), R = c.d / 2 * scale();
+    ux.setLineDash([lw * 3, lw * 2]); ux.strokeStyle = 'rgba(255,255,255,.5)';
+    ux.beginPath(); ux.arc(x0 + R, y0 + R, R, 0, 7); ux.stroke(); ux.setLineDash([]);
+    handle(x0 + R, y0 + R, dot * 1.2, '#fff'); handle(x0 + 2 * R, y0 + R, dot * 1.2, getComputedStyle(document.documentElement).getPropertyValue('--accent'));
+  } else {
+    // Occluders first, then paths on top
+    S.occ.forEach((o, k) => {
+      if (o.pts.length < 2) { if (S.view.handles) o.pts.forEach(p => handle(p.x * ui.width, p.y * ui.height, dot, OCC_COLOURS[k % 8])); return; }
+      const active = S.occEdit && k === S.curOcc;
+      ux.globalAlpha = active ? 1 : 0.55;
+      ux.beginPath(); occPolygon(o, ux); ux.fillStyle = OCC_COLOURS[k % 8] + '22'; ux.fill('evenodd');
+      ux.strokeStyle = OCC_COLOURS[k % 8]; ux.beginPath();
+      o.pts.forEach((p, i) => i ? ux.lineTo(p.x * ui.width, p.y * ui.height) : ux.moveTo(p.x * ui.width, p.y * ui.height));
+      if (o.shape === 'closed') ux.closePath();
+      ux.stroke(); ux.globalAlpha = 1;
+      if (S.view.handles && active) o.pts.forEach((p, i) => handle(p.x * ui.width, p.y * ui.height, dot, i === S.sel ? '#ffd60a' : OCC_COLOURS[k % 8]));
+    });
+    S.paths.forEach((P, i) => {
+      const d = dense(P.pts), active = !S.occEdit && i === S.cur;
+      ux.globalAlpha = active ? 1 : 0.45;
+      if (d.length > 1) { ux.strokeStyle = PATH_COLOURS[i % 8]; ux.beginPath(); d.forEach((q, k) => k ? ux.lineTo(q.p[0] * ui.width / base.width, q.p[1] * ui.height / base.height) : ux.moveTo(q.p[0] * ui.width / base.width, q.p[1] * ui.height / base.height)); ux.stroke(); }
+      if (S.view.handles && (active || !S.occEdit)) P.pts.forEach((p, k) => handle(p.x * ui.width, p.y * ui.height, dot * (active ? 1 : 0.7), active && k === S.sel ? '#ffd60a' : PATH_COLOURS[i % 8]));
+      ux.globalAlpha = 1;
+    });
   }
-  x.globalAlpha=1;
-  $('count').textContent=pts.length+' pts'+(occ.length?' / '+occ.length+' occ':'');
-  emit();
+  status();
 }
-function pos(e){const b=c.getBoundingClientRect();return{x:(e.clientX-b.left)/b.width,y:(e.clientY-b.top)/b.height};}
-function grabPx(){
-  const r=c.getBoundingClientRect();
-  return +$('grabr').value*(c.width/Math.max(1,r.width));
+function handle(x, y, r, fill) { ux.beginPath(); ux.arc(x, y, r, 0, 7); ux.fillStyle = fill; ux.fill(); ux.lineWidth = Math.max(1, r / 3); ux.strokeStyle = '#0d0d11'; ux.stroke(); }
+
+// ---------------------------------------------------------------- view
+function applyView() { $('view').style.transform = `translate(${S.view.panx}px,${S.view.pany}px) scale(${S.view.zoom})`; $('zoomv').textContent = Math.round(S.view.zoom * 100) + '%'; }
+function fitView() { S.view.zoom = 1; S.view.panx = S.view.pany = 0; applyView(); }
+$('stage').addEventListener('wheel', e => {
+  e.preventDefault();
+  const r = $('stage').getBoundingClientRect(), cx = e.clientX - r.left, cy = e.clientY - r.top, before = S.view.zoom;
+  S.view.zoom = clamp(before * (e.deltaY < 0 ? 1.15 : 1 / 1.15), 1, 16);
+  const k = S.view.zoom / before; S.view.panx = cx - (cx - S.view.panx) * k; S.view.pany = cy - (cy - S.view.pany) * k;
+  if (S.view.zoom === 1) S.view.panx = S.view.pany = 0;
+  applyView();
+}, {passive: false});
+
+// ---------------------------------------------------------------- pointer
+// Canvas-normalised position of a pointer event: getBoundingClientRect
+// already includes the zoom transform
+function pos(e) { const b = ui.getBoundingClientRect(); return {x: (e.clientX - b.left) / b.width, y: (e.clientY - b.top) / b.height}; }
+function grabPx() { const r = ui.getBoundingClientRect(); return S.view.grab * ui.width / Math.max(1, r.width); }
+function activeList() { return S.occEdit ? (S.occ[S.curOcc]?.pts ?? null) : cp().pts; }
+function nearest(p, list) {
+  let bi = -1, bd = Infinity;
+  (list || []).forEach((q, i) => { const d = Math.hypot((q.x - p.x) * ui.width, (q.y - p.y) * ui.height); if (d < bd) { bd = d; bi = i; } });
+  return bd < grabPx() ? bi : -1;
 }
-function near(p){
-  let bi=-1,bd=1e9;
-  list().forEach((q,i)=>{const d=Math.hypot((q.x-p.x)*c.width,(q.y-p.y)*c.height);if(d<bd){bd=d;bi=i;}});
-  return bd<grabPx()?bi:-1;
-}
-c.addEventListener('pointerdown',e=>{
-  // Left button only. Middle pans and right deletes, and both used to fall
-  // through to "add a point" here
-  if(e.button!==0)return;
-  const p=pos(e);const L=list();
-  // Forced creation wins over grabbing: on a snapped line the points are
-  // close enough together that there is no gap left to click in
-  const i=held(e,'create')?-1:near(p);
-  shift=held(e,'angle');
-  if(paintmode){
-    pushHist();painting=true;sel=-1;showSel();
-    L.push({x:p.x,y:p.y,s:1,a:null});if(!keepOrder())L.sort((a,b)=>a.x-b.x);
-    c.setPointerCapture(e.pointerId);draw();return;
-  }
-  if(i>=0){pushHist();sel=drag=i;showSel();}
-  else{pushHist();
-       // A path stays ordered along x so its spline never doubles back
-       L.push({x:p.x,y:p.y,s:1,a:null});if(!keepOrder())L.sort((a,b)=>a.x-b.x);
-       sel=L.findIndex(q=>q.x===p.x&&q.y===p.y);drag=sel;showSel();}
-  c.setPointerCapture(e.pointerId);draw();
-});
-c.addEventListener('pointermove',e=>{
-  if(painting){
-    const p=pos(e),L=list(),last=L[L.length-1];
-    // One point per step along the stroke, not one per mouse event: a slow
-    // drag would otherwise bury the list in near-identical points
-    const step=Math.max(6,c.width/160);
-    if(!last||Math.hypot((p.x-last.x)*c.width,(p.y-last.y)*c.height)>=step){
-      L.push({x:Math.min(1,Math.max(0,p.x)),y:Math.min(1,Math.max(0,p.y)),s:1,a:null});
-      if(!keepOrder())L.sort((a,b)=>a.x-b.x);draw();
-    }
+let drag = null, panning = null;
+ui.addEventListener('pointerdown', e => {
+  if (e.button === 1) { e.preventDefault(); panning = {x: e.clientX - S.view.panx, y: e.clientY - S.view.pany}; ui.setPointerCapture(e.pointerId); return; }
+  if (e.button !== 0) return;
+  const p = pos(e); ui.setPointerCapture(e.pointerId);
+  if (S.fig === 'bars') {
+    const b = band(), [x0, y0] = o2c(b.left, b.top), [x1, y1] = o2c(b.left + b.width, b.top + b.height);
+    const px = p.x * ui.width, py = p.y * ui.height, g = grabPx();
+    const edge = Math.abs(px - x0) < g ? 'l' : Math.abs(px - x1) < g ? 'r' : Math.abs(py - (b.down ? y1 : y0)) < g && px > x0 && px < x1 ? 'reach' : (px > x0 && px < x1 && py > y0 && py < y1) ? 'move' : null;
+    if (edge) { snapshot(); drag = {kind: 'band', edge, start: c2o(px, py), band: b}; }
     return;
   }
-  if(drag<0)return;const p=pos(e);const L=list();
-  if(shift&&!occmode){const q=L[drag];const dx=p.x-q.x,dy=p.y-q.y;
-    q.a=Math.round(Math.atan2(dx*c.width,-dy*c.height)*180/Math.PI);
-    $('useangle').checked=true;$('angle').value=q.a;$('anglev').textContent=q.a;}
-  else{L[drag].x=Math.min(1,Math.max(0,p.x));L[drag].y=Math.min(1,Math.max(0,p.y));
-       if(!keepOrder()){const held=L[drag];L.sort((a,b)=>a.x-b.x);drag=L.indexOf(held);sel=drag;}}
-  draw();
-});
-c.addEventListener('pointerup',()=>{drag=-1;shift=false;painting=false;});
-// Wheel zooms about the cursor; middle button pans
-document.getElementById('wrap').addEventListener('wheel',e=>{
-  e.preventDefault(); atCursor(e,z=>e.deltaY<0?z*1.15:z/1.15);
-},{passive:false});
-let panning=null;
-c.addEventListener('pointerdown',e=>{
-  if(e.button!==1)return; e.preventDefault();
-  panning={x:e.clientX-panx,y:e.clientY-pany}; c.setPointerCapture(e.pointerId);
-});
-c.addEventListener('pointermove',e=>{
-  if(!panning)return;
-  panx=e.clientX-panning.x; pany=e.clientY-panning.y; clampPan(); applyView();
-});
-c.addEventListener('pointerup',e=>{if(e.button===1)panning=null;});
-$('reset').onclick=()=>{zoom=1;panx=pany=0;applyView();};
-c.addEventListener('contextmenu',e=>{e.preventDefault();const i=near(pos(e));
-  if(i>=0){pushHist();list().splice(i,1);sel=-1;showSel();draw();}});
-function showSel(){
-  const b=$('selbox');
-  if(sel<0||occmode){b.hidden=true;return;}
-  b.hidden=false;$('selidx').textContent=sel;
-  $('scale').value=Math.round(pts[sel].s*100);$('scalev').textContent=pts[sel].s.toFixed(2);
-  $('useangle').checked=pts[sel].a!=null;
-  $('angle').value=pts[sel].a??0;$('anglev').textContent=pts[sel].a??0;
-}
-$('scale').oninput=e=>{if(sel<0)return;pts[sel].s=+e.target.value/100;$('scalev').textContent=pts[sel].s.toFixed(2);draw();};
-$('angle').oninput=e=>{if(sel<0||!$('useangle').checked)return;pts[sel].a=+e.target.value;$('anglev').textContent=e.target.value;draw();};
-$('useangle').onchange=e=>{if(sel<0)return;pts[sel].a=e.target.checked?+$('angle').value:null;draw();};
-$('opacity').oninput=()=>{$('opacityv').textContent=(+$('opacity').value/100).toFixed(2);draw();};
-for(const id of ['showdots','showbars','showocc','showcurve']) $(id).onchange=draw;
-for(const id of ['dotsize','dim','linew']) $(id).oninput=draw;
-// Ramer-Douglas-Peucker: a painted stroke lands hundreds of points where a
-// dozen describe the same line, and every one of them is a handle in the way
-function rdp(list,eps){
-  if(list.length<3)return list;
-  const P=q=>[q.x*c.width,q.y*c.height];
-  const keep=new Array(list.length).fill(false);
-  keep[0]=keep[list.length-1]=true;
-  const stack=[[0,list.length-1]];
-  while(stack.length){
-    const [a,b]=stack.pop();
-    if(b-a<2)continue;
-    const A=P(list[a]),B=P(list[b]);
-    const dx=B[0]-A[0],dy=B[1]-A[1],L=Math.hypot(dx,dy)||1;
-    let worst=-1,wd=0;
-    for(let i=a+1;i<b;i++){
-      const C=P(list[i]);
-      const d=Math.abs(dy*C[0]-dx*C[1]+B[0]*A[1]-B[1]*A[0])/L;
-      if(d>wd){wd=d;worst=i;}
-    }
-    if(wd>eps&&worst>0){keep[worst]=true;stack.push([a,worst],[worst,b]);}
+  if (S.fig === 'circle') {
+    const c = circleBox(), [x0, y0] = o2c(c.left, c.top), R = c.d / 2 * scale(), px = p.x * ui.width, py = p.y * ui.height;
+    const dc = Math.hypot(px - (x0 + R), py - (y0 + R));
+    if (Math.abs(dc - R) < grabPx() * 1.2) { snapshot(); drag = {kind: 'rim'}; }
+    else if (dc < R) { snapshot(); drag = {kind: 'circle', off: [px - (x0 + R), py - (y0 + R)]}; }
+    return;
   }
-  return list.filter((_,i)=>keep[i]);
+  const L = activeList();
+  if (!L) { toast('Add an occluder first'); return; }
+  if (S.tool === 'paint') { snapshot(); drag = {kind: 'paint'}; L.push(pt(p)); order(L); S.sel = -1; drawUI(); return; }
+  const i = e.shiftKey ? -1 : nearest(p, L);
+  snapshot();
+  if (i >= 0) { S.sel = i; drag = {kind: 'point', held: L[i], angle: e.altKey && !S.occEdit}; }
+  else { const q = pt(p); L.push(q); order(L); S.sel = L.indexOf(q); drag = {kind: 'point', held: q, angle: false}; }
+  refreshPoint(); drawUI();
+});
+ui.addEventListener('pointermove', e => {
+  if (panning) { S.view.panx = e.clientX - panning.x; S.view.pany = e.clientY - panning.y; applyView(); return; }
+  if (!drag) { hover(e); return; }
+  const p = pos(e), px = p.x * ui.width, py = p.y * ui.height;
+  if (drag.kind === 'band') {
+    const [ox, oy] = c2o(px, py), {w, h} = S.out, b = drag.band, dx = ox - drag.start[0], dy = oy - drag.start[1];
+    const snap = v => Math.abs(v) < 0.006 ? 0 : Math.abs(v - 1) < 0.006 ? 1 : v;
+    if (drag.edge === 'move') {
+      S.bars.left = r4(snap(clamp((b.left + dx) / w, 0, 1 - b.width / w)));
+      S.bars.baseline = r4(snap(clamp((b.down ? b.top + dy : b.top + b.height + dy) / h, 0, 1)));
+      if (S.bars.span == null) S.bars.span = r4(b.width / w);
+    } else if (drag.edge === 'l') {
+      const right = b.left + b.width, nl = clamp(snap(ox / w) * w, 0, right - 8);
+      S.bars.left = r4(nl / w); S.bars.span = r4((right - nl) / w);
+    } else if (drag.edge === 'r') {
+      S.bars.span = r4(clamp(snap(ox / w) * w - b.left, 8, w - b.left) / w);
+      if (S.bars.left == null) S.bars.left = r4(b.left / w);
+    } else {
+      const baseY = b.down ? b.top : b.top + b.height, reach = b.down ? oy - baseY : baseY - oy;
+      S.bars.max_height = r4(clamp(reach / h, 0.02, 1));
+      if (S.bars.baseline == null) S.bars.baseline = r4(baseY / h);
+    }
+    syncFields(); drawUI(); return;
+  }
+  if (drag.kind === 'circle') {
+    const [ox, oy] = c2o(px - drag.off[0], py - drag.off[1]);
+    S.circle.position = [r4(clamp(ox / S.out.w, 0, 1)), r4(clamp(oy / S.out.h, 0, 1))];
+    syncFields(); drawUI(); return;
+  }
+  if (drag.kind === 'rim') {
+    const c = circleBox(), [x0, y0] = o2c(c.left, c.top), R0 = c.d / 2 * scale();
+    const r = Math.hypot(px - (x0 + R0), py - (y0 + R0)) / scale();
+    if (!Array.isArray(S.circle.position)) S.circle.position = [r4((c.left + c.d / 2) / S.out.w), r4((c.top + c.d / 2) / S.out.h)];
+    S.circle.diameter = Math.round(clamp(2 * r, 40, Math.min(S.out.w, S.out.h)));
+    syncFields(); drawUI(); return;
+  }
+  const L = activeList();
+  if (drag.kind === 'paint') {
+    const last = L[L.length - 1], step = Math.max(6, ui.width / 160);
+    if (!last || Math.hypot((p.x - last.x) * ui.width, (p.y - last.y) * ui.height) >= step) { L.push(pt(p)); order(L); drawUI(); }
+    return;
+  }
+  const q = drag.held;
+  if (drag.angle) { q.a = Math.round(Math.atan2((p.x - q.x) * ui.width, -(p.y - q.y) * ui.height) * 180 / Math.PI); refreshPoint(); }
+  else { q.x = clamp(p.x, 0, 1); q.y = clamp(p.y, 0, 1); order(L); S.sel = L.indexOf(q); }
+  drawUI();
+});
+const endDrag = () => { if (drag || panning) { drag = null; panning = null; commit(); } };
+ui.addEventListener('pointerup', endDrag); ui.addEventListener('pointercancel', endDrag);
+ui.addEventListener('contextmenu', e => {
+  e.preventDefault();
+  if (S.fig !== 'curve') return;
+  const L = activeList(), i = nearest(pos(e), L);
+  if (i >= 0) { snapshot(); L.splice(i, 1); S.sel = -1; refreshPoint(); drawUI(); commit(); }
+});
+function pt(p) { return S.occEdit ? {x: clamp(p.x, 0, 1), y: clamp(p.y, 0, 1)} : {x: clamp(p.x, 0, 1), y: clamp(p.y, 0, 1), s: 1, a: null}; }
+// A path stays ordered along x so its spline never doubles back; an occluder
+// is an outline, and its order is its shape
+function order(L) { if (!S.occEdit) L.sort((a, b) => a.x - b.x); }
+function hover(e) {
+  if (S.fig !== 'curve') return;
+  const i = nearest(pos(e), activeList());
+  ui.style.cursor = i >= 0 ? 'grab' : S.tool === 'paint' ? 'cell' : 'crosshair';
 }
-$('thin').onclick=()=>{
-  pushHist();
-  const eps=+$('thineps').value;
-  if(occmode){occ=rdp(occ,eps);cp().occ=occ;}else{cp().pts=rdp(pts,eps);pts=cp().pts;}
-  sel=-1;showSel();draw();
-};
-// Snap a roughly traced line onto the edge that is actually in the image
-//
-// The strongest edge in a wallpaper is usually its subject, not its
-// horizon, so the search is confined to a corridor around the line
-// drawn by hand
-//
-// Inside the corridor it is a shortest path, not a per-column maximum:
-// a column-by-column pick alternates between two strong edges and comes
-// out a comb. Charging for vertical movement buys continuity
-function snapToEdge(q){
-  if(q.length<2)return null;
-  const W=Math.min(960,c.width), H=Math.max(4,Math.round(c.height*W/c.width));
-  const o=document.createElement('canvas');o.width=W;o.height=H;
-  const ox=o.getContext('2d',{willReadFrequently:true});
-  ox.drawImage(img,0,0,W,H);
-  let px;
-  try{px=ox.getImageData(0,0,W,H).data;}catch(e){alert('cannot read the image: '+e.message);return null;}
-  const lum=(cx,y)=>{const i=((y*W)+cx)*4;return 0.2126*px[i]+0.7152*px[i+1]+0.0722*px[i+2];};
-  // Strength of the horizontal edge at (cx, y): how much the image changes
-  // across three rows, in either direction
-  const edge=(cx,y)=>Math.abs(lum(cx,y)-lum(cx,Math.min(H-1,y+3)));
 
-  const sorted=q.slice().sort((a,b)=>a.x-b.x);
-  const lo=Math.max(0,Math.round(sorted[0].x*W)), hi=Math.min(W-1,Math.round(sorted[sorted.length-1].x*W));
-  if(hi-lo<2)return null;
-  const guide=cx=>{
-    const fx=cx/W;
-    for(let i=1;i<sorted.length;i++){
-      if(fx<=sorted[i].x){
-        const a=sorted[i-1],b=sorted[i],span=Math.max(b.x-a.x,1e-6);
-        return (a.y+(b.y-a.y)*(fx-a.x)/span)*H;
-      }
-    }
-    return sorted[sorted.length-1].y*H;
+// ---------------------------------------------------------------- history
+function state() { return JSON.stringify({fig: S.fig, bars: S.bars, circle: S.circle, curve: S.curve, paths: S.paths, occ: S.occ, cur: S.cur, curOcc: S.curOcc, rf: S.reveal.filter, rs: S.reveal.source}); }
+let pending = null;
+function snapshot() { pending = pending ?? state(); }
+function commit() {
+  if (pending != null && pending !== state()) { hist.push(pending); if (hist.length > 300) hist.shift(); future = []; }
+  pending = null; status();
+  // Point and bar counts in the layer list follow every edit
+  if (S.fig === 'curve') renderLayers();
+}
+function restore(s) {
+  const o = JSON.parse(s);
+  Object.assign(S, {fig: o.fig, bars: o.bars, circle: o.circle, curve: o.curve, paths: o.paths, occ: o.occ, cur: o.cur, curOcc: o.curOcc});
+  if (JSON.stringify(o.rf) !== JSON.stringify(S.reveal.filter) || o.rs !== S.reveal.source) { S.reveal.filter = o.rf; S.reveal.source = o.rs; S.reveal.changed = true; revealSourceChanged(); }
+  S.sel = -1; setFigure(S.fig, true); syncFields(); renderLayers(); refreshPoint(); drawBase(); drawUI(); if (!S.view.play) drawPreview(0);
+}
+function undo() { if (!hist.length) return; future.push(state()); restore(hist.pop()); status(); }
+function redo() { if (!future.length) return; hist.push(state()); restore(future.pop()); status(); }
+$('undo').onclick = undo; $('redo').onclick = redo;
+
+// ---------------------------------------------------------------- inspector
+// Every numeric field is one row: label, slider, value, and a reset that
+// unsets it, so it inherits config.toml or the renderer default again
+const FIELDS = {
+  count: {bars: {k: 'amount', label: 'Bars', min: 1, max: 256, step: 1, int: true}, circle: {k: 'bars', label: 'Bars', min: 1, max: 256, step: 1, int: true, group: 'circle'}},
+  bars: [
+    {k: 'gap', label: 'Gap', min: 0, max: 2, step: 0.01, hint: 'fraction of a bar'},
+    {k: 'max_height', label: 'Height', min: 0.02, max: 1, step: 0.01, hint: 'of the screen'},
+  ],
+  place: [
+    {k: 'left', label: 'Left', min: 0, max: 0.99, step: 0.001},
+    {k: 'span', label: 'Width', min: 0.01, max: 1, step: 0.001},
+    {k: 'baseline', label: 'Baseline', min: 0, max: 1, step: 0.001},
+  ],
+  circle: [
+    {k: 'diameter', label: 'Diameter', min: 40, max: 2000, step: 1, int: true, group: 'circle', unit: 'px'},
+    {k: 'inner_radius', label: 'Hole', min: 0, max: 0.95, step: 0.01, group: 'circle'},
+    {k: 'inner_alpha', label: 'Inner alpha', min: 0, max: 1, step: 0.01, group: 'circle'},
+    {k: 'outer_alpha', label: 'Outer alpha', min: 0, max: 1, step: 0.01, group: 'circle'},
+    {k: 'gap', label: 'Gap', min: 0, max: 2, step: 0.01},
+  ],
+  margins: [
+    {k: 'margin_x', label: 'Margin x', min: 0, max: 800, step: 1, int: true, group: 'circle', unit: 'px'},
+    {k: 'margin_y', label: 'Margin y', min: 0, max: 800, step: 1, int: true, group: 'circle', unit: 'px'},
+  ],
+  finish: [
+    {k: 'opacity', label: 'Opacity', min: 0, max: 1, step: 0.01},
+    {k: 'matte', label: 'Matte', min: 0, max: 1, step: 0.01},
+    {k: 'radius', label: 'Round tips', min: 0, max: 0.5, step: 0.01, hint: 'bars and curve'},
+  ],
+};
+const ROWS = [];
+function row(def, host) {
+  const group = def.group || 'bars', el = document.createElement('div');
+  el.className = 'row';
+  el.innerHTML = `<label title="${def.hint || def.label}">${def.label}</label><input type=range min=${def.min} max=${def.max} step=${def.step} aria-label="${def.label}"><output></output><button class=reset title="Inherit the default" aria-label="Reset ${def.label}">↺</button>`;
+  const input = el.querySelector('input'), out = el.querySelector('output');
+  const sync = () => {
+    const own = S[group][def.k], v = val(group, def.k);
+    el.classList.toggle('inherited', own == null);
+    input.value = v;
+    input.style.setProperty('--p', ((v - def.min) / (def.max - def.min) * 100) + '%');
+    out.textContent = def.int ? Math.round(v) + (def.unit || '') : (+v).toFixed(def.step < 0.01 ? 3 : 2);
   };
-  const R=+$('snapr').value, LAM=+$('snaplam').value, K=3;
-  const cols=hi-lo+1, span=2*R+1;
-  // Flat arrays indexed [col*span + (y - top)], so the whole search is one
-  // pass over typed memory rather than a map per column
-  const top=new Int32Array(cols), cost=new Float32Array(cols*span), back=new Int32Array(cols*span);
-  for(let i=0;i<cols;i++) top[i]=Math.round(guide(lo+i))-R;
-  for(let i=0;i<cols;i++){
-    for(let k=0;k<span;k++){
-      const y=top[i]+k, at=i*span+k;
-      if(y<0||y>=H){cost[at]=1e18;back[at]=0;continue;}
-      const e=-edge(lo+i,y);
-      if(i===0){cost[at]=e;back[at]=k;continue;}
-      let best=1e18,bi=k;
-      for(let d=-K;d<=K;d++){
-        const pk=y-top[i-1]+d;
-        if(pk<0||pk>=span)continue;
-        const v=cost[(i-1)*span+pk]+LAM*Math.abs(y-(top[i-1]+pk));
-        if(v<best){best=v;bi=pk;}
-      }
-      cost[at]=(best>=1e18?0:best)+e;back[at]=bi;
-    }
-  }
-  let k=0;
-  for(let j=1;j<span;j++) if(cost[(cols-1)*span+j]<cost[(cols-1)*span+k]) k=j;
-  const ys=new Array(cols);
-  for(let i=cols-1;i>=0;i--){ys[i]=top[i]+k;k=back[i*span+k];}
-  // The backtrack lands on a whole row, and a line of whole rows is a
-  // staircase. A parabola through the edge strength either side puts the
-  // point back between rows
-  const sub=ys.map((y,i)=>{
-    if(y<1||y>=H-1)return y;
-    const a=edge(lo+i,y-1),b=edge(lo+i,y),cc=edge(lo+i,y+1);
-    const den=a-2*b+cc;
-    return Math.abs(den)<1e-6?y:y+Math.max(-1,Math.min(1,0.5*(a-cc)/den));
-  });
-  // Five columns of averaging: enough to take the last of the jitter out,
-  // short enough to leave a summit pointed
-  const sm=sub.map((_,i)=>{
-    let t=0,n=0;
-    for(let j=Math.max(0,i-2);j<=Math.min(sub.length-1,i+2);j++){t+=sub[j];n++;}
-    return t/n;
-  });
-  return sm.map((y,i)=>({x:(lo+i)/(W-1),y:(y+1.5)/H,s:1,a:null}));
+  input.addEventListener('pointerdown', snapshot);
+  input.addEventListener('keydown', snapshot);
+  input.addEventListener('input', () => { const v = +input.value; S[group][def.k] = def.int ? Math.round(v) : v; sync(); changed(def); });
+  input.addEventListener('change', commit);
+  el.querySelector('.reset').onclick = () => { snapshot(); delete S[group][def.k]; sync(); changed(def); commit(); };
+  host.appendChild(el); ROWS.push(sync); sync();
 }
-$('trace').onclick=()=>{
-  const q=occmode?occ:pts;
-  const found=snapToEdge(q);
-  if(!found){alert('draw a rough line across the edge first, then snap');return;}
-  pushHist();
-  // Finer than a hand-edited path: the horizon between two points is a
-  // straight chord, so a coarse epsilon cuts the corners worth keeping.
-  // Points cost nothing at runtime - the renderer resamples to a fixed
-  // number of buckets whatever the count
-  const traced=rdp(found,+$('snapeps').value/10);
-  // Per-point scale and angle overrides are worth keeping: the snap moves
-  // where a bar stands, not how it is drawn. Nearest old point wins
-  if(!occmode&&q.length){
-    for(const t of traced){
-      let best=q[0];
-      for(const p of q) if(Math.abs(p.x-t.x)<Math.abs(best.x-t.x)) best=p;
-      t.s=best.s; t.a=best.a;
-    }
-  }
-  if(occmode){occ=traced;cp().occ=occ;}else{cp().pts=traced;pts=cp().pts;}
-  sel=-1;showSel();draw();
-};
-$('clearall').onclick=()=>{
-  pushHist();paths=[{pts:[],occ:[],clip:cp().clip,h:cp().h,w:cp().w,up:cp().up,fl:cp().fl,bn:cp().bn}];cur=0;occ=cp().occ;showPath();
-};
-$('ownbars').onchange=()=>{
-  cp().bn=$('ownbars').checked?+$('bars').value:null;
-  $('bars').value=cp().bn!=null?cp().bn:barsTotal;
-  $('barsv').textContent=$('bars').value+(cp().bn!=null?'':' all');
-  draw();
-};
-for(const id of ['bars','height','width']) $(id).oninput=()=>{
-  cp().h=+$('height').value; cp().w=+$('width').value;
-  if(cp().bn!=null) cp().bn=+$('bars').value; else barsTotal=+$('bars').value;
-  $('barsv').textContent=$('bars').value+(cp().bn!=null?'':' all');
-  $('heightv').textContent=(cp().h/100).toFixed(2);
-  $('widthv').textContent=(cp().w/1000).toFixed(3);draw();};
-$('upright').onchange=()=>{cp().up=$('upright').checked;draw();};
-$('flip').onchange=()=>{cp().fl=$('flip').checked;draw();};
-for(const [id,what] of [['kcreate','create'],['kangle','angle']]){
-  $(id).value=KEYS[what];
-  $(id).onchange=()=>{
-    KEYS[what]=$(id).value;
-    // Both on one modifier would make every forced point set an angle
-    const other=what==='create'?'angle':'create';
-    if(KEYS[other]===KEYS[what]){
-      KEYS[other]=['shift','ctrl','alt'].find(k=>k!==KEYS[what]);
-      $(other==='create'?'kcreate':'kangle').value=KEYS[other];
-    }
-    try{localStorage.setItem('cavawall.keys',JSON.stringify(KEYS));}catch(e){}
+function changed(def) {
+  if (def.k === 'amount' || def.k === 'bars') refreshCount();
+  drawUI(); if (!S.view.play) drawPreview(0); status();
+}
+function syncFields() { ROWS.forEach(f => f()); refreshCount(); refreshAnchors(); refreshGrow(); }
+
+function section(title, cls, aside) {
+  const s = document.createElement('section');
+  s.className = 'sec ' + (cls || '');
+  s.innerHTML = `<h2>${title}${aside ? `<span class=aside>${aside}</span>` : ''}</h2>`;
+  $('inspector').appendChild(s); return s;
+}
+let countEl;
+function buildInspector() {
+  $('inspector').innerHTML = ''; ROWS.length = 0;
+  // Figure: the count first, with where it comes from
+  let s = section('Bars', '');
+  countEl = document.createElement('div'); countEl.className = 'readout'; s.appendChild(countEl);
+  const countBars = document.createElement('div'); countBars.className = 'fig-bars'; s.appendChild(countBars); row(FIELDS.count.bars, countBars);
+  const countCircle = document.createElement('div'); countCircle.className = 'fig-circle'; s.appendChild(countCircle); row(FIELDS.count.circle, countCircle);
+  const countCurve = document.createElement('div'); countCurve.className = 'fig-curve'; s.appendChild(countCurve);
+  countCurve.innerHTML = `<div class=row><label>Total</label><input type=range min=1 max=256 step=1 id=curveTotal aria-label="Curve bars"><output id=curveTotalV></output><button class=reset id=curveTotalReset title="Sum of the paths' own counts">↺</button></div>`;
+  const ct = countCurve.querySelector('#curveTotal');
+  ct.addEventListener('pointerdown', snapshot);
+  ct.oninput = () => { S.curve.bars = +ct.value; refreshCount(); drawUI(); status(); };
+  ct.onchange = commit;
+  countCurve.querySelector('#curveTotalReset').onclick = () => { snapshot(); delete S.curve.bars; refreshCount(); commit(); drawUI(); };
+  const note = document.createElement('p'); note.className = 'note'; note.id = 'countNote'; s.appendChild(note);
+  FIELDS.bars.forEach(d => { const w = document.createElement('div'); w.className = 'fig-bars'; s.appendChild(w); row(d, w); });
+
+  // Placement: drag on the image, or set exactly here
+  s = section('Placement', 'fig-bars', 'drag the band to move it');
+  FIELDS.place.forEach(d => row(d, s));
+  const grow = document.createElement('div'); grow.className = 'chips'; grow.style.marginTop = '6px';
+  grow.innerHTML = `<button class=chip data-grow=up>Stands on its line</button><button class=chip data-grow=down>Hangs from it</button><button class=chip id=placeReset>Bottom row</button>`;
+  s.appendChild(grow);
+  grow.querySelectorAll('[data-grow]').forEach(b => b.onclick = () => { snapshot(); if (b.dataset.grow === 'down') S.bars.grow = 'down'; else delete S.bars.grow; refreshGrow(); drawUI(); commit(); });
+  grow.querySelector('#placeReset').onclick = () => { snapshot(); for (const k of ['left', 'span', 'baseline', 'grow']) delete S.bars[k]; syncFields(); drawUI(); commit(); };
+
+  s = section('Circle', 'fig-circle', 'drag it; drag the rim to resize');
+  FIELDS.circle.forEach(d => row(d, s));
+  const place = document.createElement('div'); place.className = 'placement'; place.style.marginTop = '8px';
+  place.innerHTML = `<div class=anchors role=group aria-label=Anchor>${['top-left', 'top', 'top-right', 'left', 'center', 'right', 'bottom-left', 'bottom', 'bottom-right'].map(a => `<button data-anchor=${a} title=${a} aria-label=${a}></button>`).join('')}</div><div class=note id=anchorNote></div>`;
+  s.appendChild(place);
+  place.querySelectorAll('[data-anchor]').forEach(b => b.onclick = () => { snapshot(); S.circle.anchor = b.dataset.anchor; delete S.circle.position; syncFields(); drawUI(); commit(); });
+  FIELDS.margins.forEach(d => { const w = document.createElement('div'); w.className = 'margin-row'; s.appendChild(w); row(d, w); });
+
+  // Curve: layers and the link grid
+  s = section('Layers', 'fig-curve', 'paths above, occluders below');
+  s.innerHTML += `<div class=layers id=pathList></div><div class=btns><button class="btn small" id=addPath>+ Path</button><button class="btn small ghost" id=pathUp title="Earlier: lower cava bands">↑</button><button class="btn small ghost" id=pathDown title="Later: higher cava bands">↓</button><button class="btn small ghost" id=delPath>Delete</button></div>
+    <div class=layers id=occList style="margin-top:12px"></div><div class=btns><button class="btn small" id=addSky>+ Skyline</button><button class="btn small" id=addShape>+ Shape</button><button class="btn small ghost" id=delOcc>Delete</button></div>
+    <table class=grid-links id=links></table><p class=note>A cell cuts that path by that occluder. Striped cells follow the default: a path that picks none is cut by all.</p>`;
+  $('addPath').onclick = () => { snapshot(); S.paths.push(newPath()); S.cur = S.paths.length - 1; S.occEdit = false; S.sel = -1; commit(); renderLayers(); drawUI(); tools(); };
+  $('delPath').onclick = () => { snapshot(); S.paths.splice(S.cur, 1); if (!S.paths.length) S.paths.push(newPath()); S.cur = Math.min(S.cur, S.paths.length - 1); commit(); renderLayers(); drawUI(); };
+  $('pathUp').onclick = () => movePath(-1); $('pathDown').onclick = () => movePath(1);
+  $('addSky').onclick = () => addOcc('skyline'); $('addShape').onclick = () => addOcc('closed');
+  $('delOcc').onclick = () => {
+    if (S.curOcc < 0) return; snapshot();
+    const gone = S.occ[S.curOcc].name; S.occ.splice(S.curOcc, 1);
+    S.paths.forEach(p => { if (p.cut) p.cut = p.cut.filter(n => n !== gone); });
+    S.curOcc = Math.min(S.curOcc, S.occ.length - 1); if (S.curOcc < 0) S.occEdit = false;
+    commit(); renderLayers(); drawUI(); tools();
   };
+
+  s = section('Path', 'fig-curve', '');
+  s.id = 'pathSec';
+  const pathRows = [
+    {k: 'height', label: 'Reach', min: 0.01, max: 0.6, step: 0.005, def: () => S.curve.height ?? RENDER.path_height},
+    {k: 'width', label: 'Width', min: 0.001, max: 0.04, step: 0.0005, def: () => S.curve.width ?? RENDER.path_width},
+    {k: 'bars', label: 'Own bars', min: 1, max: 256, step: 1, int: true, def: () => null},
+  ];
+  for (const d of pathRows) {
+    const el = document.createElement('div'); el.className = 'row';
+    el.innerHTML = `<label>${d.label}</label><input type=range min=${d.min} max=${d.max} step=${d.step}><output></output><button class=reset title="${d.k === 'bars' ? 'Share the total by length' : 'Inherit'}">↺</button>`;
+    const input = el.querySelector('input'), out = el.querySelector('output');
+    const sync = () => {
+      const own = cp()[d.k]; let v = own ?? d.def();
+      if (d.k === 'bars' && v == null) { const bs = curveBars(); v = bs.filter(b => b.path === S.cur).length || 1; }
+      el.classList.toggle('inherited', own == null);
+      input.value = v; input.style.setProperty('--p', ((v - d.min) / (d.max - d.min) * 100) + '%');
+      out.textContent = d.int ? (own == null ? v + '*' : v) : (+v).toFixed(3);
+    };
+    input.addEventListener('pointerdown', snapshot);
+    input.oninput = () => { cp()[d.k] = d.int ? Math.round(+input.value) : +input.value; sync(); refreshCount(); drawUI(); status(); };
+    input.onchange = commit;
+    el.querySelector('.reset').onclick = () => { snapshot(); cp()[d.k] = null; sync(); refreshCount(); commit(); drawUI(); };
+    s.appendChild(el); ROWS.push(sync); sync();
+  }
+  const pchips = document.createElement('div'); pchips.className = 'chips'; pchips.style.marginTop = '6px';
+  pchips.innerHTML = `<button class=chip id=up>Upright</button><button class=chip id=flip>Flip side</button>`;
+  s.appendChild(pchips);
+  $('up').onclick = () => { snapshot(); cp().up = !cp().up; refreshPathChips(); drawUI(); commit(); };
+  $('flip').onclick = () => { snapshot(); cp().fl = !cp().fl; refreshPathChips(); drawUI(); commit(); };
+  const fitRow = document.createElement('div'); fitRow.className = 'row';
+  fitRow.innerHTML = `<label>Image fit</label><select id=fitSel style="grid-column:2/4"><option value=cover>Cover, as the wallpaper</option><option value=stretch>Stretch</option></select>`;
+  s.appendChild(fitRow);
+  $('fitSel').onchange = e => { snapshot(); S.curve.fit = e.target.value; commit(); drawBase(); drawUI(); };
+
+  s = section('Point', 'fig-curve', 'alt-drag sets the angle');
+  s.id = 'pointSec';
+  s.innerHTML += `<div class=row><label>Scale</label><input type=range min=0.1 max=1.5 step=0.05 id=pScale><output id=pScaleV></output><span></span></div>
+    <div class=row><label>Angle</label><input type=range min=-180 max=180 step=1 id=pAngle><output id=pAngleV></output><button class=reset id=pAngleReset title="Follow the path">↺</button></div>
+    <p class=note id=pointNote>Click a point to edit it. Shift-click always adds; right-click deletes.</p>`;
+  $('pScale').addEventListener('pointerdown', snapshot);
+  $('pScale').oninput = e => { const q = selPoint(); if (!q) return; q.s = +e.target.value; refreshPoint(); drawUI(); };
+  $('pScale').onchange = commit;
+  $('pAngle').addEventListener('pointerdown', snapshot);
+  $('pAngle').oninput = e => { const q = selPoint(); if (!q) return; q.a = +e.target.value; refreshPoint(); drawUI(); };
+  $('pAngle').onchange = commit;
+  $('pAngleReset').onclick = () => { const q = selPoint(); if (!q) return; snapshot(); q.a = null; refreshPoint(); commit(); drawUI(); };
+
+  s = section('Edit', 'fig-curve', 'the active list');
+  s.innerHTML += `<div class=btns><button class="btn small" id=thin title="Drop points that barely bend the line">Thin points</button><button class="btn small" id=snap title="Pull the line onto the strongest edge near it">Snap to edge</button><button class="btn small ghost" id=clearList>Clear</button></div>
+    <div class=row style="margin-top:6px"><label>Thin ε</label><input type=range min=1 max=30 step=1 value=6 id=thinEps><output id=thinEpsV>6</output><span></span></div>
+    <div class=row><label>Snap reach</label><input type=range min=3 max=40 step=1 value=12 id=snapR><output id=snapRV>12</output><span></span></div>
+    <div class=row><label>Smoothness</label><input type=range min=1 max=24 step=1 value=6 id=snapLam><output id=snapLamV>6</output><span></span></div>`;
+  for (const id of ['thinEps', 'snapR', 'snapLam']) $(id).oninput = e => { $(id + 'V').textContent = e.target.value; };
+  $('thin').onclick = () => { const L = activeList(); if (!L) return; snapshot(); const t = rdp(L, +$('thinEps').value); L.splice(0, L.length, ...t); S.sel = -1; commit(); drawUI(); };
+  $('snap').onclick = snapActive;
+  $('clearList').onclick = () => { const L = activeList(); if (!L) return; snapshot(); L.length = 0; S.sel = -1; commit(); drawUI(); };
+
+  s = section('Finish', '');
+  FIELDS.finish.forEach(d => row(d, s));
+
+  // The x-ray
+  s = section('X-ray', '', 'bars show an image');
+  row({k: 'reveal', label: 'Reveal', min: 0, max: 1, step: 0.01, hint: 'how much of the image replaces the gradient'}, s);
+  const src = document.createElement('div'); src.className = 'row';
+  src.innerHTML = `<label>Image</label><select id=revealSrc style="grid-column:2/4"><option value=wallpaper>This wallpaper</option>${S.ctx.reveal_source ? `<option value=auto>${S.ctx.reveal_source.split('/').pop()}</option>` : ''}</select>`;
+  s.appendChild(src);
+  $('revealSrc').value = S.reveal.source;
+  $('revealSrc').onchange = e => { snapshot(); S.reveal.source = e.target.value; S.reveal.changed = true; revealSourceChanged(); commit(); };
+  const FX = [['invert', 'Invert', 0, 100, 0, '%'], ['grayscale', 'Grey', 0, 100, 0, '%'], ['sepia', 'Sepia', 0, 100, 0, '%'], ['saturate', 'Saturate', 0, 300, 100, '%'],
+    ['hue-rotate', 'Hue', -180, 180, 0, 'deg'], ['brightness', 'Brightness', 20, 250, 100, '%'], ['contrast', 'Contrast', 20, 250, 100, '%'], ['blur', 'Blur', 0, 12, 0, 'px']];
+  for (const [k, label, min, max, dflt, unit] of FX) {
+    const el = document.createElement('div'); el.className = 'row';
+    el.innerHTML = `<label>${label}</label><input type=range min=${min} max=${max} step=1><output></output><button class=reset>↺</button>`;
+    const input = el.querySelector('input'), out = el.querySelector('output');
+    const sync = () => { const v = S.reveal.filter[k] ?? dflt; el.classList.toggle('inherited', S.reveal.filter[k] == null); input.value = v; input.style.setProperty('--p', ((v - min) / (max - min) * 100) + '%'); out.textContent = v + unit; };
+    input.addEventListener('pointerdown', snapshot);
+    input.oninput = () => { const v = +input.value; if (v === dflt) delete S.reveal.filter[k]; else S.reveal.filter[k] = v; sync(); S.reveal.changed = true; bakeRevealCanvas(); status(); };
+    input.onchange = commit;
+    el.querySelector('.reset').onclick = () => { snapshot(); delete S.reveal.filter[k]; sync(); S.reveal.changed = true; bakeRevealCanvas(); commit(); };
+    s.appendChild(el); ROWS.push(sync); sync();
+  }
+  s.insertAdjacentHTML('beforeend', `<p class=note>The image is baked on save and read once when cavawall starts: a frame costs one texture read, nothing more. A <b>${escapeHtml(((S.ctx.wallpaper || '').split('/').pop() || '').replace(/\.[^.]+$/, ''))}_reveal.*</b> file beside the wallpaper is offered as the image.</p>`);
+
+  s = section('View', '');
+  s.innerHTML += `<div class=chips><button class=chip id=vFrame>Screen frame</button><button class=chip id=vHandles>Handles</button></div>
+    <div class=row style="margin-top:6px"><label>Dim image</label><input type=range min=0 max=0.9 step=0.05 id=vDim><output id=vDimV></output><span></span></div>
+    <div class=row><label>Line width</label><input type=range min=1 max=12 step=1 id=vLw><output id=vLwV></output><span></span></div>
+    <div class=row><label>Handle size</label><input type=range min=2 max=14 step=1 id=vDot><output id=vDotV></output><span></span></div>
+    <div class=row><label>Grab radius</label><input type=range min=3 max=40 step=1 id=vGrab><output id=vGrabV></output><span></span></div>`;
+  const bindView = (id, k, redraw) => { const e = $(id); e.value = S.view[k]; $(id + 'V').textContent = S.view[k]; e.oninput = () => { S.view[k] = +e.value; $(id + 'V').textContent = e.value; redraw(); }; };
+  bindView('vDim', 'dim', drawBase); bindView('vLw', 'lw', drawUI); bindView('vDot', 'dot', drawUI); bindView('vGrab', 'grab', () => {});
+  $('vFrame').onclick = () => { S.view.frame = !S.view.frame; refreshViewChips(); drawBase(); };
+  $('vHandles').onclick = () => { S.view.handles = !S.view.handles; refreshViewChips(); drawUI(); };
+
+  s = section('Keys', '');
+  s.innerHTML += `<p class=note style="line-height:1.9"><b>V</b> add/move · <b>P</b> paint · <b>O</b> occluder · <b>[ ]</b> path · <b>Delete</b> point · <b>Esc</b> deselect<br><b>Ctrl Z</b> undo · <b>Ctrl Shift Z</b> redo · <b>Ctrl S</b> save · <b>0</b> fit · <b>Space</b> pause · wheel zoom · middle-drag pan</p>`;
+
+  renderLayers(); refreshPoint(); syncFields(); refreshViewChips(); refreshPathChips();
 }
-$('grabr').oninput=()=>{};
-$('prevpath').onclick=()=>{cur=(cur+paths.length-1)%paths.length;showPath();};
-$('nextpath').onclick=()=>{cur=(cur+1)%paths.length;showPath();};
-$('addpath').onclick=()=>{
-  pushHist();
-  // A new path inherits the current one's geometry: a second ridge on the
-  // same wallpaper usually wants the same look, not the defaults
-  paths.push({pts:[],occ:[],clip:true,h:cp().h,w:cp().w,up:cp().up,fl:cp().fl,bn:cp().bn});
-  cur=paths.length-1;occmode=false;syncOcc();showPath();
-};
-// Bars are handed to cava in path order, not left-to-right, so a path drawn
-// out of sequence carries the wrong end of the spectrum for where it sits
-function movePath(d){
-  const j=cur+d;
-  if(j<0||j>=paths.length)return;
-  pushHist();
-  [paths[cur],paths[j]]=[paths[j],paths[cur]];
-  cur=j;
-  showPath();
+function escapeHtml(s) { return s.replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c])); }
+
+function refreshCount() {
+  if (!countEl) return;
+  const [n, from] = effectiveBars();
+  countEl.innerHTML = `${n}<small>bars, from ${from}</small>`;
+  const note = $('countNote'), d = S.ctx.defaults || {};
+  const shell = d.follow_shell_bars && isNum(S.ctx.shell_bars) ? `the shell's ${S.ctx.shell_bars}` : null;
+  note.innerHTML = S.fig === 'curve' ? 'The curve\'s total is what cava produces; paths share it by length unless they name their own.'
+    : `Order: ${S.fig === 'circle' ? 'the circle\'s own count, then ' : ''}this wallpaper, then ${shell ? shell + ', then ' : ''}config.toml.`;
+  const t = $('curveTotal');
+  if (t) { t.value = n; $('curveTotalV').textContent = isNum(S.curve.bars) ? n : n + '*'; t.closest('.row').classList.toggle('inherited', !isNum(S.curve.bars)); t.style.setProperty('--p', ((n - 1) / 255 * 100) + '%'); }
 }
-$('pathup').onclick=()=>movePath(-1);
-$('pathdown').onclick=()=>movePath(1);
-$('delpath').onclick=()=>{
-  pushHist();
-  paths.splice(cur,1);
-  if(!paths.length)paths=[{pts:[],occ:[],clip:true,h:10,w:4,up:false,fl:false,bn:null}];
-  cur=Math.min(cur,paths.length-1);showPath();
-};
-function undo(){
-  const h=hist.pop();
-  if(!h)return;
-  const st=JSON.parse(h);
-  paths=st.p;occ=st.o;cur=Math.min(st.c,paths.length-1);showPath();
+function refreshAnchors() {
+  const pos = Array.isArray(S.circle.position), a = S.circle.anchor || S.ctx.defaults?.circle?.anchor || 'center';
+  document.querySelectorAll('[data-anchor]').forEach(b => b.setAttribute('aria-pressed', !pos && b.dataset.anchor === a));
+  const n = $('anchorNote'); if (n) n.innerHTML = pos ? `Placed by hand at <b>${(S.circle.position[0] * 100).toFixed(1)}%, ${(S.circle.position[1] * 100).toFixed(1)}%</b>. Pick an anchor to pin it instead.` : `Pinned <b>${a}</b>, by the margins below.`;
+  document.querySelectorAll('.margin-row').forEach(r => r.style.display = pos ? 'none' : '');
 }
-$('undo').onclick=undo;
-// Ctrl+Z anywhere on the page, not just with the canvas focused - the canvas
-// takes no keyboard focus of its own
-addEventListener('keydown',e=>{
-  if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='z'&&e.target.tagName!=='TEXTAREA'){
-    e.preventDefault();undo();
+function refreshGrow() { document.querySelectorAll('[data-grow]').forEach(b => b.setAttribute('aria-pressed', (val('bars', 'grow') === 'down') === (b.dataset.grow === 'down'))); }
+function refreshPathChips() { if (!$('up')) return; $('up').setAttribute('aria-pressed', !!cp().up); $('flip').setAttribute('aria-pressed', !!cp().fl); if ($('fitSel')) $('fitSel').value = S.curve.fit; }
+function refreshViewChips() { $('vFrame').setAttribute('aria-pressed', S.view.frame); $('vHandles').setAttribute('aria-pressed', S.view.handles); }
+function selPoint() { const L = activeList(); return !S.occEdit && L && S.sel >= 0 ? L[S.sel] : null; }
+function refreshPoint() {
+  const q = selPoint(), sec = $('pointSec'); if (!sec) return;
+  for (const id of ['pScale', 'pAngle']) $(id).disabled = !q;
+  $('pointNote').style.display = q ? 'none' : '';
+  if (q) { $('pScale').value = q.s; $('pScaleV').textContent = (+q.s).toFixed(2); $('pAngle').value = q.a ?? 0; $('pAngleV').textContent = q.a == null ? 'path' : q.a + '°'; }
+}
+function renderLayers() {
+  const pl = $('pathList'), ol = $('occList'), links = $('links'); if (!pl) return;
+  const counts = {}; curveBars().forEach(b => counts[b.path] = (counts[b.path] || 0) + 1);
+  pl.innerHTML = S.paths.map((p, i) => `<div class=layer role=button tabindex=0 data-path=${i} aria-selected=${!S.occEdit && i === S.cur}><span class=swatch style="background:${PATH_COLOURS[i % 8]}"></span><span>Path ${i + 1}</span><span class=meta>${p.pts.length}pt · ${counts[i] || 0} bars</span></div>`).join('');
+  ol.innerHTML = S.occ.length ? S.occ.map((o, k) => `<div class=layer role=button tabindex=0 data-occ=${k} aria-selected=${S.occEdit && k === S.curOcc}><span class=swatch style="background:${OCC_COLOURS[k % 8]}"></span><input value="${escapeHtml(o.name)}" aria-label="Occluder name" data-name=${k}><span class=meta>${o.shape === 'closed' ? 'shape' : 'skyline'} · ${o.pts.length}pt</span></div>`).join('')
+    : `<p class=note>No occluders. A skyline hides bars below a ridge; a shape hides them inside an outline.</p>`;
+  pl.querySelectorAll('[data-path]').forEach(e => e.onclick = () => { S.cur = +e.dataset.path; S.occEdit = false; S.sel = -1; renderLayers(); refreshPathChips(); syncFields(); refreshPoint(); drawUI(); tools(); });
+  ol.querySelectorAll('[data-occ]').forEach(e => e.onclick = ev => { if (ev.target.tagName === 'INPUT') return; S.curOcc = +e.dataset.occ; S.occEdit = true; S.sel = -1; renderLayers(); refreshPoint(); drawUI(); tools(); });
+  ol.querySelectorAll('[data-name]').forEach(inp => {
+    inp.onfocus = snapshot;
+    inp.onchange = () => {
+      const k = +inp.dataset.name, old = S.occ[k].name; let name = inp.value.trim() || old;
+      if (S.occ.some((o, j) => j !== k && o.name === name)) name = old;
+      S.occ[k].name = name; S.paths.forEach(p => { if (p.cut) p.cut = p.cut.map(n => n === old ? name : n); });
+      commit(); renderLayers();
+    };
+  });
+  // The link grid: rows are paths, columns occluders
+  if (!S.occ.length) { links.innerHTML = ''; return; }
+  links.innerHTML = `<tr><th></th>${S.occ.map((o, k) => `<th style="color:${OCC_COLOURS[k % 8]}" title="${escapeHtml(o.name)}">${escapeHtml(o.name)}</th>`).join('')}</tr>` +
+    S.paths.map((p, i) => `<tr><th class=rowh style="color:${PATH_COLOURS[i % 8]}">Path ${i + 1}</th>${S.occ.map((o, k) => {
+      const st = p.cut === null ? 'all' : p.cut.includes(o.name) ? 'on' : 'off';
+      return `<td><button class=cell data-p=${i} data-o=${k} data-state=${st} style="--c:${OCC_COLOURS[k % 8]}" aria-label="Path ${i + 1} cut by ${escapeHtml(o.name)}: ${st}"></button></td>`;
+    }).join('')}</tr>`).join('');
+  links.querySelectorAll('.cell').forEach(c => c.onclick = () => {
+    snapshot();
+    const p = S.paths[+c.dataset.p], o = S.occ[+c.dataset.o];
+    // The first click on a default row makes it explicit: all but this one
+    if (p.cut === null) p.cut = S.occ.map(x => x.name).filter(n => n !== o.name);
+    else if (p.cut.includes(o.name)) p.cut = p.cut.filter(n => n !== o.name);
+    else p.cut.push(o.name);
+    // Back to the default once it names every one again
+    if (S.occ.every(x => p.cut.includes(x.name))) p.cut = null;
+    commit(); renderLayers(); if (!S.view.play) drawPreview(0);
+  });
+}
+function addOcc(shape) {
+  snapshot();
+  let i = S.occ.length + 1, name = shape === 'closed' ? `shape ${i}` : `ridge ${i}`;
+  while (S.occ.some(o => o.name === name)) name = (shape === 'closed' ? 'shape ' : 'ridge ') + (++i);
+  S.occ.push({name, shape, pts: []});
+  S.curOcc = S.occ.length - 1; S.occEdit = true; S.sel = -1;
+  commit(); renderLayers(); drawUI(); tools();
+  toast(shape === 'closed' ? 'Click around the shape to outline it' : 'Click along the ridge, left to right');
+}
+function movePath(d) {
+  const j = S.cur + d; if (j < 0 || j >= S.paths.length) return;
+  snapshot(); [S.paths[S.cur], S.paths[j]] = [S.paths[j], S.paths[S.cur]]; S.cur = j; commit(); renderLayers(); drawUI();
+}
+
+// ---------------------------------------------------------------- tools
+function setTool(t) { S.tool = t; tools(); }
+function tools() {
+  $('toolSelect').setAttribute('aria-pressed', S.tool === 'select' && !S.occEdit);
+  $('toolPaint').setAttribute('aria-pressed', S.tool === 'paint');
+  $('toolOcc').setAttribute('aria-pressed', S.occEdit);
+  status();
+}
+$('toolSelect').onclick = () => { S.occEdit = false; setTool('select'); renderLayers(); drawUI(); };
+$('toolPaint').onclick = () => setTool(S.tool === 'paint' ? 'select' : 'paint');
+$('toolOcc').onclick = () => { if (!S.occ.length) { addOcc('skyline'); return; } S.occEdit = !S.occEdit; if (S.curOcc < 0) S.curOcc = 0; S.sel = -1; tools(); renderLayers(); drawUI(); };
+$('fit').onclick = fitView;
+$('play').onclick = () => { S.view.play = !S.view.play; $('play').setAttribute('aria-pressed', S.view.play); $('play').textContent = S.view.play ? '❚❚' : '▶'; startLoop(); };
+
+function setFigure(f, quiet) {
+  if (!quiet) snapshot();
+  S.fig = f; document.body.dataset.figure = f;
+  document.querySelectorAll('#figure button').forEach(b => b.setAttribute('aria-selected', b.dataset.fig === f));
+  document.querySelectorAll('.fig-bars').forEach(e => e.style.display = f === 'bars' ? '' : 'none');
+  document.querySelectorAll('.fig-circle').forEach(e => e.style.display = f === 'circle' ? '' : 'none');
+  document.querySelectorAll('.fig-curve').forEach(e => e.style.display = f === 'curve' ? '' : 'none');
+  refreshCount(); syncFields(); drawBase(); drawUI(); if (!S.view.play) drawPreview(0);
+  if (!quiet) commit();
+}
+document.querySelectorAll('#figure button').forEach(b => b.onclick = () => setFigure(b.dataset.fig));
+
+// ---------------------------------------------------------------- snapping
+// Ramer-Douglas-Peucker: a painted stroke lands hundreds of points where a
+// dozen describe the same line
+function rdp(list, eps) {
+  if (list.length < 3) return list.slice();
+  const P = q => [q.x * base.width, q.y * base.height], keep = new Array(list.length).fill(false);
+  keep[0] = keep[list.length - 1] = true;
+  const stack = [[0, list.length - 1]];
+  while (stack.length) {
+    const [a, b] = stack.pop(); if (b - a < 2) continue;
+    const A = P(list[a]), B = P(list[b]), dx = B[0] - A[0], dy = B[1] - A[1], L = Math.hypot(dx, dy) || 1;
+    let worst = -1, wd = 0;
+    for (let i = a + 1; i < b; i++) { const C = P(list[i]), d = Math.abs(dy * C[0] - dx * C[1] + B[0] * A[1] - B[1] * A[0]) / L; if (d > wd) { wd = d; worst = i; } }
+    if (wd > eps && worst > 0) { keep[worst] = true; stack.push([a, worst], [worst, b]); }
+  }
+  return list.filter((_, i) => keep[i]);
+}
+// Pull a rough line onto the image's own edge, inside a corridor around it:
+// the strongest edge in a wallpaper is usually its subject, not its horizon.
+// A shortest path through the corridor rather than a per-column maximum, which
+// alternates between two edges and comes out a comb
+function snapActive() {
+  const q = activeList(); if (!q || q.length < 2) { toast('Draw a rough line across the edge first'); return; }
+  const W = Math.min(960, img.naturalWidth), H = Math.max(4, Math.round(img.naturalHeight * W / img.naturalWidth));
+  const o = document.createElement('canvas'); o.width = W; o.height = H;
+  const ox = o.getContext('2d', {willReadFrequently: true}); ox.drawImage(img, 0, 0, W, H);
+  const px = ox.getImageData(0, 0, W, H).data;
+  const lum = (x, y) => { const i = (y * W + x) * 4; return 0.2126 * px[i] + 0.7152 * px[i + 1] + 0.0722 * px[i + 2]; };
+  const edge = (x, y) => Math.abs(lum(x, y) - lum(x, Math.min(H - 1, y + 3)));
+  const sorted = q.slice().sort((a, b) => a.x - b.x);
+  const lo = Math.max(0, Math.round(sorted[0].x * W)), hi = Math.min(W - 1, Math.round(sorted[sorted.length - 1].x * W));
+  if (hi - lo < 2) { toast('The line is too short to snap'); return; }
+  const guide = cx => { const fx0 = cx / W; for (let i = 1; i < sorted.length; i++) if (fx0 <= sorted[i].x) { const a = sorted[i - 1], b = sorted[i]; return (a.y + (b.y - a.y) * (fx0 - a.x) / Math.max(b.x - a.x, 1e-6)) * H; } return sorted[sorted.length - 1].y * H; };
+  const R = +$('snapR').value, LAM = +$('snapLam').value, K = 3, cols = hi - lo + 1, span = 2 * R + 1;
+  const top = new Int32Array(cols), cost = new Float32Array(cols * span), back = new Int32Array(cols * span);
+  for (let i = 0; i < cols; i++) top[i] = Math.round(guide(lo + i)) - R;
+  for (let i = 0; i < cols; i++) for (let k = 0; k < span; k++) {
+    const y = top[i] + k, at = i * span + k;
+    if (y < 0 || y >= H) { cost[at] = 1e18; continue; }
+    const e = -edge(lo + i, y);
+    if (i === 0) { cost[at] = e; back[at] = k; continue; }
+    let best = 1e18, bi = k;
+    for (let d = -K; d <= K; d++) { const pk = y - top[i - 1] + d; if (pk < 0 || pk >= span) continue; const v = cost[(i - 1) * span + pk] + LAM * Math.abs(y - (top[i - 1] + pk)); if (v < best) { best = v; bi = pk; } }
+    cost[at] = (best >= 1e18 ? 0 : best) + e; back[at] = bi;
+  }
+  let k = 0; for (let j = 1; j < span; j++) if (cost[(cols - 1) * span + j] < cost[(cols - 1) * span + k]) k = j;
+  const ys = new Array(cols); for (let i = cols - 1; i >= 0; i--) { ys[i] = top[i] + k; k = back[i * span + k]; }
+  const sub = ys.map((y, i) => { if (y < 1 || y >= H - 1) return y; const a = edge(lo + i, y - 1), b = edge(lo + i, y), c = edge(lo + i, y + 1), den = a - 2 * b + c; return Math.abs(den) < 1e-6 ? y : y + clamp(0.5 * (a - c) / den, -1, 1); });
+  const sm = sub.map((_, i) => { let t = 0, n = 0; for (let j = Math.max(0, i - 2); j <= Math.min(sub.length - 1, i + 2); j++) { t += sub[j]; n++; } return t / n; });
+  let traced = rdp(sm.map((y, i) => ({x: (lo + i) / (W - 1), y: (y + 1.5) / H, s: 1, a: null})), 1.5);
+  if (S.occEdit) traced = traced.map(p => ({x: p.x, y: p.y}));
+  else for (const t of traced) { let best = q[0]; for (const p of q) if (Math.abs(p.x - t.x) < Math.abs(best.x - t.x)) best = p; t.s = best.s ?? 1; t.a = best.a ?? null; }
+  snapshot(); q.splice(0, q.length, ...traced); S.sel = -1; commit(); drawUI();
+}
+
+// ---------------------------------------------------------------- reveal
+const FX_ORDER = ['invert', 'grayscale', 'sepia', 'saturate', 'hue-rotate', 'brightness', 'contrast', 'blur'];
+function filterString(f) {
+  return FX_ORDER.filter(k => f[k] != null).map(k => `${k}(${f[k]}${k === 'hue-rotate' ? 'deg' : k === 'blur' ? 'px' : '%'})`).join(' ');
+}
+function parseFilter(s) {
+  const f = {}; for (const m of s.matchAll(/([a-z-]+)\(([-\d.]+)[a-z%]*\)/g)) if (FX_ORDER.includes(m[1])) f[m[1]] = +m[2]; return f;
+}
+function revealSourceChanged() {
+  if (S.reveal.source === 'auto' && S.ctx.reveal_source) loadRevealSource();
+  else { S.reveal.image = img; bakeRevealCanvas(); }
+}
+function loadRevealSource() {
+  const r = new Image(); r.onload = () => { S.reveal.image = r; bakeRevealCanvas(); }; r.onerror = () => toast('The reveal image did not load', true); r.src = '/reveal-source';
+}
+// The reveal as cavawall will sample it: the source, filtered, at no more
+// than the output's width - more would be texture memory nobody sees
+function bakeRevealCanvas() {
+  const src = S.reveal.image; if (!src || !src.naturalWidth) return;
+  const w = Math.min(src.naturalWidth, Math.max(640, S.out.w)), h = Math.round(src.naturalHeight * w / src.naturalWidth);
+  const c = S.reveal.canvas && S.reveal.canvas.width === w && S.reveal.canvas.height === h ? S.reveal.canvas : document.createElement('canvas');
+  c.width = w; c.height = h;
+  const x = c.getContext('2d', {willReadFrequently: true}); x.clearRect(0, 0, w, h);
+  x.filter = filterString(S.reveal.filter) || 'none'; x.drawImage(src, 0, 0, w, h); x.filter = 'none';
+  S.reveal.canvas = c; if (!S.view.play) drawPreview(0);
+}
+// QOI, the format cavawall decodes: one pass, a 64-entry colour index, runs
+function encodeQoi(canvas) {
+  const w = canvas.width, h = canvas.height, px = canvas.getContext('2d').getImageData(0, 0, w, h).data;
+  const out = new Uint8Array(14 + w * h * 5 + 8), dv = new DataView(out.buffer);
+  out.set([113, 111, 105, 102]); dv.setUint32(4, w); dv.setUint32(8, h); out[12] = 4; out[13] = 0;
+  const index = new Uint32Array(64); let p = 14, run = 0, pr = 0, pg = 0, pb = 0, pa = 255;
+  const n = w * h * 4;
+  for (let i = 0; i < n; i += 4) {
+    const r = px[i], g = px[i + 1], b = px[i + 2], a = px[i + 3];
+    if (r === pr && g === pg && b === pb && a === pa) { if (++run === 62 || i === n - 4) { out[p++] = 0xc0 | (run - 1); run = 0; } continue; }
+    if (run) { out[p++] = 0xc0 | (run - 1); run = 0; }
+    const s = (r * 3 + g * 5 + b * 7 + a * 11) & 63, packed = ((r << 24) | (g << 16) | (b << 8) | a) >>> 0;
+    if (index[s] === packed) out[p++] = s;
+    else {
+      index[s] = packed;
+      if (a === pa) {
+        const d = (x, y) => ((x - y + 384) & 255) - 128, dr = d(r, pr), dg = d(g, pg), db = d(b, pb), dr_dg = dr - dg, db_dg = db - dg;
+        if (dr > -3 && dr < 2 && dg > -3 && dg < 2 && db > -3 && db < 2) out[p++] = 0x40 | (dr + 2) << 4 | (dg + 2) << 2 | (db + 2);
+        else if (dg > -33 && dg < 32 && dr_dg > -9 && dr_dg < 8 && db_dg > -9 && db_dg < 8) { out[p++] = 0x80 | (dg + 32); out[p++] = (dr_dg + 8) << 4 | (db_dg + 8); }
+        else { out[p++] = 0xfe; out[p++] = r; out[p++] = g; out[p++] = b; }
+      } else { out[p++] = 0xff; out[p++] = r; out[p++] = g; out[p++] = b; out[p++] = a; }
+    }
+    pr = r; pg = g; pb = b; pa = a;
+  }
+  out.set([0, 0, 0, 0, 0, 0, 0, 1], p); return out.subarray(0, p + 8);
+}
+
+// ---------------------------------------------------------------- saving
+function prune(o) { for (const k of Object.keys(o)) if (o[k] == null || (typeof o[k] === 'object' && !Array.isArray(o[k]) && !Object.keys(o[k]).length)) delete o[k]; return o; }
+function payload() {
+  // Starts from the file as loaded, so a field this page does not show is
+  // written back untouched
+  const W = JSON.parse(JSON.stringify(S.W || {}));
+  W.mode = S.fig;
+  const bars = {...S.bars};
+  if (val('bars', 'reveal') > 0) { bars.reveal_source = S.reveal.source === 'auto' ? 'auto' : undefined; bars.reveal_filter = filterString(S.reveal.filter) || undefined; }
+  else { delete bars.reveal_source; delete bars.reveal_filter; }
+  W.bars = prune(bars);
+  W.circle = prune({...S.circle});
+  const drawn = S.paths.filter(p => p.pts.length >= 2);
+  if (drawn.length) {
+    const c = {...(W.curve || {})};
+    for (const k of ['points', 'occlude', 'flip', 'upright']) delete c[k];
+    c.bars = isNum(S.curve.bars) ? S.curve.bars : undefined;
+    c.fit = S.curve.fit === 'stretch' ? 'stretch' : undefined;
+    c.height = S.curve.height; c.width = S.curve.width;
+    const names = new Set(S.occ.filter(o => o.pts.length >= 2).map(o => o.name));
+    c.occluder = S.occ.filter(o => o.pts.length >= 2).map(o => prune({name: o.name, shape: o.shape === 'closed' ? 'closed' : undefined, points: o.pts.map(p => [r4(p.x), r4(p.y)])}));
+    if (!c.occluder.length) delete c.occluder;
+    c.path = drawn.map(P => prune({
+      points: P.pts.map(p => { const v = [r4(p.x), r4(p.y), Math.round(p.s * 100) / 100]; if (p.a != null) v.push(Math.round(p.a)); return v; }),
+      bars: P.bars ?? undefined, height: P.height ?? undefined, width: P.width ?? undefined,
+      upright: P.up || undefined, flip: P.fl || undefined,
+      cut_by: P.cut === null ? undefined : P.cut.filter(n => names.has(n)),
+    }));
+    W.curve = prune(c);
+  } else delete W.curve;
+  return prune(W);
+}
+async function save() {
+  if (S.fig === 'curve' && !S.paths.some(p => p.pts.length >= 2)) { toast('A curve needs a path of at least two points', true); return; }
+  const btn = $('save'); btn.disabled = true; btn.firstChild.textContent = 'Saving…';
+  try {
+    // The reveal image first, so cavawall finds it when it reloads
+    if (val('bars', 'reveal') > 0 && S.reveal.canvas && (S.reveal.changed || !S.ctx.reveal_baked)) {
+      const r = await fetch('/reveal', {method: 'POST', body: encodeQoi(S.reveal.canvas)}).then(r => r.json());
+      if (!r.ok) throw new Error(r.error || 'the reveal image was refused');
+      S.ctx.reveal_baked = true; S.reveal.changed = false;
+    } else if (val('bars', 'reveal') <= 0 && S.ctx.reveal_baked) {
+      await fetch('/reveal', {method: 'POST', body: ''}); S.ctx.reveal_baked = false;
+    }
+    const body = payload();
+    const r = await fetch('/save', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)}).then(r => r.json());
+    if (!r.ok) throw new Error(r.error || 'the save was refused');
+    saved = JSON.stringify(body);
+    toast(`Saved · cavawall ${r.applied}`);
+    setTimeout(refreshLive, 900);
+  } catch (e) { toast('Save failed: ' + e.message, true); }
+  btn.firstChild.textContent = 'Save & apply'; status();
+}
+$('save').onclick = save;
+addEventListener('beforeunload', e => { if (isDirty()) { e.preventDefault(); e.returnValue = ''; } });
+
+// ---------------------------------------------------------------- status
+function isDirty() { return saved && (JSON.stringify(payload()) !== saved || S.reveal.changed && val('bars', 'reveal') > 0); }
+function status() {
+  const dirty = isDirty();
+  $('save').disabled = !dirty; $('dirty').textContent = dirty ? '● unsaved changes' : 'saved'; $('dirty').classList.toggle('on', !!dirty);
+  $('undo').disabled = !hist.length; $('redo').disabled = !future.length;
+  let hint = '';
+  if (S.fig === 'bars') hint = 'Drag the band to move it, its sides to resize, the dashed edge to set the height';
+  else if (S.fig === 'circle') hint = 'Drag the circle to place it, the rim to resize it';
+  else if (S.occEdit) hint = S.curOcc >= 0 ? `Editing ${S.occ[S.curOcc]?.name}: click adds, drag moves, right-click deletes` : 'Add an occluder in Layers';
+  else hint = S.tool === 'paint' ? 'Paint along the ridge; Thin points tidies it afterwards' : 'Click adds a point, drag moves one, right-click deletes, alt-drag sets its angle';
+  $('hint').textContent = hint;
+  const {w, h} = S.out;
+  $('status').textContent = `${S.fig} · ${effectiveBars()[0]} bars · output ${w}×${h}${S.ctx.image ? ` · image ${S.ctx.image[0]}×${S.ctx.image[1]}` : ''}`;
+}
+function live(st) {
+  const on = st && st.pid;
+  $('liveDot').className = 'dot ' + (on ? 'on' : 'off');
+  $('liveText').textContent = on ? `cavawall · ${st.mode} · ${st.bars} bars from ${st.bars_from || '?'}${st.placed_on ? ' · ' + st.placed_on : ''}` : 'cavawall is not running';
+}
+function refreshLive() { fetch('/context').then(r => r.json()).then(c => { S.ctx.status = c.status; live(c.status); }).catch(() => {}); }
+setInterval(refreshLive, 10000);
+let toastT = 0;
+function toast(msg, bad) { const t = $('toast'); t.textContent = msg; t.className = 'toast show' + (bad ? ' bad' : ''); clearTimeout(toastT); toastT = setTimeout(() => t.className = 'toast', bad ? 5000 : 2600); }
+$('panelToggle').onclick = () => document.body.classList.toggle('panel');
+
+// ---------------------------------------------------------------- keys
+addEventListener('keydown', e => {
+  const typing = /INPUT|SELECT|TEXTAREA/.test(e.target.tagName) && e.target.type !== 'range';
+  const mod = e.ctrlKey || e.metaKey;
+  if (mod && e.key.toLowerCase() === 's') { e.preventDefault(); if (isDirty()) save(); return; }
+  if (typing) return;
+  if (mod && e.key.toLowerCase() === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
+  if (mod && e.key.toLowerCase() === 'y') { e.preventDefault(); redo(); return; }
+  if (mod) return;
+  switch (e.key) {
+    case 'v': case 'V': S.occEdit = false; setTool('select'); renderLayers(); drawUI(); break;
+    case 'p': case 'P': if (S.fig === 'curve') setTool(S.tool === 'paint' ? 'select' : 'paint'); break;
+    case 'o': case 'O': if (S.fig === 'curve') $('toolOcc').click(); break;
+    case '[': if (S.fig === 'curve') { S.cur = (S.cur + S.paths.length - 1) % S.paths.length; S.occEdit = false; S.sel = -1; renderLayers(); syncFields(); refreshPathChips(); drawUI(); } break;
+    case ']': if (S.fig === 'curve') { S.cur = (S.cur + 1) % S.paths.length; S.occEdit = false; S.sel = -1; renderLayers(); syncFields(); refreshPathChips(); drawUI(); } break;
+    case 'Delete': case 'Backspace': { const L = activeList(); if (S.fig === 'curve' && L && S.sel >= 0) { snapshot(); L.splice(S.sel, 1); S.sel = -1; commit(); refreshPoint(); drawUI(); } break; }
+    case 'Escape': S.sel = -1; refreshPoint(); drawUI(); break;
+    case '0': fitView(); break;
+    case ' ': e.preventDefault(); $('play').click(); break;
+    default: return;
   }
 });
-// Every mutation pushes history first, so undo has something to pop
-$('clear').onclick=()=>{
-  pushHist();
-  if(occmode)occ=[];else{cp().pts=[];pts=cp().pts;}
-  sel=-1;showSel();draw();
-};
-$('paintbtn').onclick=()=>{paintmode=!paintmode;
-  $('paintbtn').textContent='paint: '+(paintmode?'ON':'off');
-  $('paintbtn').classList.toggle('primary',paintmode);
-  c.style.cursor=paintmode?'cell':'crosshair';};
-function syncOcc(){
-  $('occbtn').textContent='occluder: '+(occmode?'ON':'off');
-  $('occbtn').classList.toggle('primary',occmode);
-}
-$('occon').onchange=()=>{cp().clip=$('occon').checked;emit();};
-$('occbtn').onclick=()=>{occmode=!occmode;sel=-1;syncOcc();showSel();draw();};
-function emit(){
-  const curve={};
-  if(!paths.every(P=>P.bn!=null)) curve.bars=barsTotal;
-  const drawn=paths.filter(P=>P.pts.length>=2);
-  const outline=P=>P.occ.map(p=>[+p.x.toFixed(4),+p.y.toFixed(4)]);
-  const same=drawn.length&&drawn.every(P=>JSON.stringify(outline(P))===JSON.stringify(outline(drawn[0])));
-  if(same&&drawn[0].occ.length>1) curve.occlude=outline(drawn[0]);
-  curve.path=paths.filter(P=>P.pts.length>=2).map(P=>{
-    const o={height:+(P.h/100).toFixed(2),width:+(P.w/1000).toFixed(3),
-      points:P.pts.map(p=>{const v=[+p.x.toFixed(4),+p.y.toFixed(4),+p.s.toFixed(2)];
-                           if(p.a!=null)v.push(+p.a.toFixed(0));return v;})};
-    if(P.bn!=null)o.bars=P.bn;
-    if(P.up)o.upright=true;
-    if(P.fl)o.flip=true;
-    if(P.clip===false)o.clip=false;else if(!same&&P.occ.length>1)o.occlude=outline(P);
-    return o;
-  });
-  W.mode=$('figure').value;
-  W.curve=curve.path.length?curve:null;
-  W.circle=readCircle();
-  W.bars=readBars();
-  prune(W);
-  $('out').value=JSON.stringify(W,null,1);
-}
-$('save').onclick=()=>{
-  if($('figure').value==='curve'&&!paths.some(P=>P.pts.length>=2)){alert('curve mode needs a path with at least two points');return;}
-  const btn=$('save'); btn.textContent='saving...';
-  fetch('/save',{method:'POST',body:$('out').value})
-    .then(r=>r.text().then(t=>({ok:r.ok,t})))
-    .then(({ok,t})=>{
-      // Never report success on a failure
-      btn.textContent = ok&&t==='saved' ? 'saved - cavawall restarted' : 'FAILED: '+t;
-      if(ok) setTimeout(()=>btn.textContent='save to config',2500);
-    })
-    .catch(e=>{btn.textContent='FAILED: '+e.message;});
-};
 </script>
