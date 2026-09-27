@@ -72,15 +72,20 @@ See [`config.toml`](config.toml) for the annotated defaults
 | `general.channels` | **fork addition**: `mono` or `stereo` |
 | `general.mono_option` | **fork addition**: `average`, `left` or `right` |
 | `general.audio_source` | **fork addition**: cava input source; omit for cava's default |
+| `general.sleep_timer` | **fork addition**: seconds of silence before cava sleeps; waking costs ~0.45s |
 | `bars.amount` | number of bars |
 | `bars.gap` | gap width as a fraction of bar width |
 | `bars.max_height` | **fork addition**: bar height cap, fraction of screen |
 | `bars.opacity` | **fork addition**: alpha multiplier, every mode |
 | `bars.matte` | **fork addition**: flatten the gradient toward its own mean |
+| `bars.left`, `bars.span`, `bars.baseline`, `bars.grow` | **fork addition**: place the row anywhere; `grow = "down"` hangs it from its baseline |
+| `bars.radius` | **fork addition**: round each bar's tip, fraction of its width (bars and curve) |
+| `bars.reveal` | **fork addition**: x-ray - bars show a hidden image instead of the gradient, 0 to 1 |
 | `colors.*` | gradient stops, bottom to top; order matters, names do not |
 | `smoothing.*` | passed straight through to cava |
-| `circle.*` | **fork addition**: circle mode geometry |
+| `circle.*` | **fork addition**: circle mode geometry; `position = [x, y]` places it by hand |
 | `curves.*` | **fork addition**: curve mode paths, keyed by wallpaper |
+| `wallpapers/<key>.toml` | **fork addition**: any of the above for one wallpaper, written by cavawall-tune |
 
 two environment variables: `CAVAWALL_DEBUG=1`
 reports placement and configure activity on stderr, and `CAVAWALL_OUTPUT=<name>`
@@ -172,17 +177,55 @@ one curve can hold several disconnected paths, each with its own reach, width,
 lean and bar count. Bars split between them by arc length unless a path names
 its own number
 
-An `occlude` silhouette discards anything in its area
-## The curve editor
+Occluders are named shapes bars hide behind: a **skyline** closes down to the
+bottom edge, hiding everything beneath a ridge; a **closed** shape hides
+whatever is inside its outline, holes included. Each path names the occluders
+that cut it in `cut_by`, and one that names none is cut by all of them.
+Several cut by their union. However many paths and occluders there are, a
+frame is one draw call: the shapes are rasterised once, when the surface is
+placed, into a bitmask the bars test
+
+```toml
+[[curve.occluder]]
+name = "ridge"
+points = [[0.1, 0.45], [0.5, 0.30], [0.9, 0.42]]
+
+[[curve.occluder]]
+name = "tree"
+shape = "closed"
+points = [[0.62, 0.20], [0.70, 0.18], [0.72, 0.40], [0.60, 0.41]]
+
+[[curve.path]]
+points = [[0.1, 0.46], [0.9, 0.43]]
+cut_by = ["ridge"]
+```
+
+### x-ray
+
+`bars.reveal` makes the bars windows onto an image instead of the gradient:
+the wallpaper itself through a filter (inverted, desaturated, hue-shifted,
+blurred), or a stylised twin saved beside it as `<name>_reveal.<ext>`.
+cavawall-tune bakes the result into `wallpapers/<key>.reveal.qoi`, which
+cavawall decodes once at startup; a frame costs one texture read per bar
+pixel. Without `reveal` the feature is compiled out of the shaders
+
+## The editor
 
 ```bash
 cavawall-tune
 ```
 
 Serves an editor on localhost and prints the URL. It loads the **current**
-wallpaper, so what you draw on is what you will see it on, and it writes the
-`[curves.<hash>]` block itself: everything else in your config is left byte
-for byte as it was
+wallpaper and previews every figure live, in the gradient the bars will
+actually be drawn in, over the part of the image your monitor shows. It
+writes `wallpapers/<key>.toml` and reloads the running instance in place
+
+- **bars**: drag the band to move it, its sides to resize, its top to set
+  the height
+- **circle**: drag it anywhere, drag the rim to resize, or pin it to an
+  anchor
+- **curve**: paths and occluders in a layers panel, and a grid of which
+  occluder cuts which path
 
 - **paint** to trace a ridge freehand, or click to place control points
 - **snap active list to the edge** finds the edge that is actually in the
