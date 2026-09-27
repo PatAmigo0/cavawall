@@ -30,25 +30,58 @@ uniform sampler2D Reveal;
 uniform vec4 RevealMap;
 uniform float RevealMix;
 #endif
+#ifdef GRADIENT_ROW
+in float vAlong;
+#endif
+#ifdef BLOCKS
+// Segments a full bar is split into
+uniform float Blocks;
+#endif
+#ifdef REVEAL_PULSE
+flat in float vPeak;
+#endif
 out vec4 fragColor;
 void main() {
     // First, before any gradient work is spent on a fragment that is hidden
     if ((texelFetch(Occluders, ivec2(gl_FragCoord.xy), 0).r & vMask) != 0u) {
         discard;
     }
+#ifdef MIRROR
+    float t = clamp(abs(vRadial), 0.0, 1.0);
+#else
     float t = clamp(vRadial, 0.0, 1.0);
+#endif
+#ifdef BLOCKS
+    // A quarter of every segment is the gap below the next one
+    if (fract(t * Blocks) > 0.75) {
+        discard;
+    }
+#endif
+#ifdef GRADIENT_ROW
+    float findex = vAlong * float(gradient_colors_size - 1);
+#else
     float findex = t * float(gradient_colors_size - 1);
+#endif
     // Safe with no lower bound only because gradient_buffer uploads a lone
     // configured stop twice
     int index = min(int(findex), gradient_colors_size - 2);
     vec4 c = mix(gradient_colors[index], gradient_colors[index + 1], findex - float(index));
     c.a *= mix(InnerAlpha, OuterAlpha, t);
 #ifdef REVEAL
-    c.rgb = mix(c.rgb, texture(Reveal, gl_FragCoord.xy * RevealMap.xy + RevealMap.zw).rgb, RevealMix);
+#ifdef REVEAL_PULSE
+    float reveal = RevealMix * smoothstep(0.1, 0.8, vPeak);
+#else
+    float reveal = RevealMix;
+#endif
+    c.rgb = mix(c.rgb, texture(Reveal, gl_FragCoord.xy * RevealMap.xy + RevealMap.zw).rgb, reveal);
 #endif
 #ifdef ROUND
     float r = min(Radius * vSize.x, vSize.y);
+#ifdef MIRROR
+    vec2 q = vec2(abs(vLocal.x) - (0.5 * vSize.x - r), abs(vLocal.y) - (vSize.y - r));
+#else
     vec2 q = vec2(abs(vLocal.x) - (0.5 * vSize.x - r), vLocal.y - (vSize.y - r));
+#endif
     if (q.x > 0.0 && q.y > 0.0) {
         // One pixel of antialiasing across the arc
         c.a *= clamp(r - length(q) + 0.5, 0.0, 1.0);

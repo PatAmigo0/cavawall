@@ -63,9 +63,14 @@ gap = 0.1
 # span = 1.0
 # baseline = 1.0
 # grow = "up"
+# Styles, each compiled in only when set:
+# mirror = true        # both ways from the line (bars and curve)
+# blocks = 12          # LED-style segments at full height
+# gradient = "row"     # colours along the row instead of up each bar
 # X-ray: bars show wallpapers/<key>.reveal.qoi instead of the gradient, 0 to
 # 1. cavawall-tune bakes that image; without it this does nothing.
 # reveal = 0.0
+# reveal_pulse = true  # quiet bars keep the gradient, loud ones show the picture
 # Where cavawall-tune keeps the pictures you pick for the x-ray
 # reveal_dir = "~/Pictures/cavawall-xray"
 

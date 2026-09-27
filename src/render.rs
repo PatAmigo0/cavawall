@@ -51,6 +51,8 @@ pub(crate) struct BarPlacement {
     /// How tall a full-volume bar is
     pub reach: f32,
     pub down: bool,
+    /// Bars reach both ways from the baseline
+    pub mirror: bool,
 }
 
 impl BarPlacement {
@@ -68,6 +70,7 @@ impl BarPlacement {
             baseline: b.baseline.unwrap_or(1.0).clamp(0.0, 1.0),
             reach: b.max_height.unwrap_or(1.0).clamp(0.01, 1.0),
             down: b.grow == Some(Grow::Down),
+            mirror: b.mirror.unwrap_or(false),
         }
     }
 }
@@ -88,11 +91,18 @@ pub(crate) fn bar_band(p: &BarPlacement, w: u32, h: u32) -> Band {
     let (wf, hf) = (w as f32, h as f32);
     let width = ((p.span * wf).round() as u32).clamp(1, w.max(1));
     let left = ((p.left * wf).round() as u32).min(w.saturating_sub(width));
-    let height = ((p.reach * hf).ceil() as u32).clamp(1, h.max(1));
+    let reach = if p.mirror { 2.0 * p.reach } else { p.reach };
+    let height = ((reach * hf).ceil() as u32).clamp(1, h.max(1));
     let base = (p.baseline * hf).round();
-    let top = if p.down { base } else { base - height as f32 };
+    let top = if p.mirror {
+        base - (height / 2) as f32
+    } else if p.down {
+        base
+    } else {
+        base - height as f32
+    };
     let top = (top.max(0.0) as u32).min(h.saturating_sub(height));
-    let bottom_row = !p.down && left == 0 && width == w && top + height == h;
+    let bottom_row = !p.down && !p.mirror && left == 0 && width == w && top + height == h;
     Band { left, top, width, height, bottom_row }
 }
 
@@ -113,6 +123,8 @@ pub(crate) struct DamageMap {
     height: i32,
     /// Bars hang from the top edge, so a height counts down from there
     down: bool,
+    /// Bars reach both ways from the middle: a moved bucket is its whole column
+    mirror: bool,
 }
 
 impl DamageMap {
@@ -122,6 +134,7 @@ impl DamageMap {
         bar_stride: f32,
         (width, height): (u32, u32),
         down: bool,
+        mirror: bool,
     ) -> Self {
         const _: () = assert!(DAMAGE_BUCKETS <= u8::MAX as usize, "bucket must fit a u8");
         let bars = bar_count as usize;
@@ -139,7 +152,7 @@ impl DamageMap {
             bucket_x[b].0 = bucket_x[b].0.min(x0.clamp(0, iw));
             bucket_x[b].1 = bucket_x[b].1.max(x1.clamp(0, iw));
         }
-        Self { bucket_of, bucket_x, half_h: height as f32 * 0.5, height: height as i32, down }
+        Self { bucket_of, bucket_x, half_h: height as f32 * 0.5, height: height as i32, down, mirror }
     }
 }
 
@@ -191,7 +204,13 @@ pub(crate) fn damage_rects(frame: &[u8], prev: &[u8], map: &DamageMap, out: &mut
         let (x0, x1) = map.bucket_x[b];
         let y0 = (((l + 1.0) * map.half_h).floor() as i32 - 1).clamp(0, map.height);
         let y1 = (((h + 1.0) * map.half_h).ceil() as i32 + 1).clamp(0, map.height);
-        let (y0, y1) = if map.down { (map.height - y1, map.height - y0) } else { (y0, y1) };
+        let (y0, y1) = if map.mirror {
+            (0, map.height)
+        } else if map.down {
+            (map.height - y1, map.height - y0)
+        } else {
+            (y0, y1)
+        };
         if x1 > x0 && y1 > y0 {
             out[n..n + 4].copy_from_slice(&[x0, y0, x1 - x0, y1 - y0]);
             n += 4;

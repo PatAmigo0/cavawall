@@ -16,6 +16,14 @@ uniform float RadialSpan;
 // 0 at the inner edge, 1 at the rim a full-volume bar reaches. The fragment
 // stage indexes the gradient by this instead of gl_FragCoord.y
 out float vRadial;
+#ifdef GRADIENT_ROW
+// 0 at twelve o'clock, 1 all the way round
+uniform float Count;
+out float vAlong;
+#endif
+#ifdef REVEAL_PULSE
+flat out float vPeak;
+#endif
 void main() {
     float theta = AngleStep * float(gl_InstanceID) + (corner.x * 2.0 - 1.0) * AngularHalf;
     vRadial = corner.y * height;
@@ -23,4 +31,10 @@ void main() {
     // sin/cos swapped against the usual convention so bar 0 points up: the
     // spectrum then reads clockwise from twelve o'clock
     gl_Position = vec4(r * sin(theta), r * cos(theta), 0.0, 1.0);
+#ifdef GRADIENT_ROW
+    vAlong = (float(gl_InstanceID) + corner.x) / Count;
+#endif
+#ifdef REVEAL_PULSE
+    vPeak = height;
+#endif
 }

@@ -1041,7 +1041,7 @@ impl AppState {
             return None;
         }
         let (ow, oh) = (self.width as f32, self.height as f32);
-        let (x0, y0, x1, y1) = curve::bounds(&self.curve_bars, ow / oh.max(1.0));
+        let (x0, y0, x1, y1) = curve::bounds(&self.curve_bars, ow / oh.max(1.0), self.bars_at.mirror);
         // NDC -> pixels, y flipped: NDC counts up, a margin counts down
         let pad = 2.0;
         let left = (((x0 + 1.0) * 0.5 * ow) - pad).floor().clamp(0.0, ow);

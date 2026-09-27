@@ -172,6 +172,7 @@ impl LayerShellHandler for AppState {
             self.bar_stride,
             (self.width, self.height),
             self.bars_at.down,
+            self.bars_at.mirror,
         );
         // SAFETY: a context is current; every name here was created at startup
         unsafe {

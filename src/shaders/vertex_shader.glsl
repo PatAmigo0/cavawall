@@ -15,6 +15,14 @@ uniform float Grow;
 // The gradient is indexed by this, so it is fixed to the surface whichever
 // way the row grows: a quiet bar shows only the first stops
 out float vLevel;
+#ifdef GRADIENT_ROW
+// 0 at the first bar's left edge, 1 at the last bar's right
+uniform float Count;
+out float vAlong;
+#endif
+#ifdef REVEAL_PULSE
+flat out float vPeak;
+#endif
 #ifdef ROUND
 // The surface in pixels, so the rounding can be done in pixels
 uniform vec2 SurfacePx;
@@ -23,10 +31,29 @@ flat out vec2 vSize;
 #endif
 void main() {
     float x = Stride * float(gl_InstanceID) - 1.0 + corner.x * BarWidth;
+#ifdef MIRROR
+    // The surface is centred on the line and a full bar reaches its edge.
+    // Signed, so it interpolates across the line; the fragment stage takes abs
+    float side = corner.y * 2.0 - 1.0;
+    vLevel = side * height;
+    gl_Position = vec4(x, vLevel, 0.0, 1.0);
+#else
+    float side = corner.y;
     vLevel = corner.y * height;
     gl_Position = vec4(x, Grow * (vLevel * 2.0 - 1.0), 0.0, 1.0);
+#endif
+#ifdef GRADIENT_ROW
+    vAlong = (float(gl_InstanceID) + corner.x) / Count;
+#endif
+#ifdef REVEAL_PULSE
+    vPeak = height;
+#endif
 #ifdef ROUND
+#ifdef MIRROR
+    vSize = vec2(BarWidth * 0.5 * SurfacePx.x, height * SurfacePx.y * 0.5);
+#else
     vSize = vec2(BarWidth * 0.5 * SurfacePx.x, height * SurfacePx.y);
-    vLocal = vec2((corner.x - 0.5) * vSize.x, corner.y * vSize.y);
+#endif
+    vLocal = vec2((corner.x - 0.5) * vSize.x, side * vSize.y);
 #endif
 }
