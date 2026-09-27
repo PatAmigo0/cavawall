@@ -1,7 +1,7 @@
 //! Query and control a running cavawall over its control socket.
 
 use cavawall::control::{request, Request, Response};
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use clap_complete::Shell;
 use std::os::unix::process::CommandExt;
 use std::process::{Command as Proc, Stdio};
@@ -33,8 +33,28 @@ enum Command {
     Restart,
     /// SIGKILL the instance named by the lock, for one that stopped answering
     Kill,
+    /// Open the editor for the current wallpaper
+    Tune,
     /// Print a shell completion script
     Completions { shell: Shell },
+}
+
+/// The name this was run as: `cavawall <command>` hands over to this binary
+/// with CAVAWALL_AS set, so help and completions speak of `cavawall`
+fn own_name() -> &'static str {
+    match std::env::var("CAVAWALL_AS").as_deref() {
+        Ok("cavawall") => "cavawall",
+        _ => "cavawallctl",
+    }
+}
+
+/// A binary installed beside this one, else whatever PATH finds
+fn sibling(name: &str) -> std::path::PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(|d| d.join(name)))
+        .filter(|p| p.exists())
+        .unwrap_or_else(|| name.into())
 }
 
 /// The lock names the running instance even when its socket is wedged, which
@@ -67,11 +87,19 @@ fn spawn_launcher() -> std::io::Result<()> {
 
 /// Errors to stderr, data to stdout, non-zero when the answer is no
 fn main() {
-    let cli = Cli::parse();
+    let name = own_name();
+    let command = || Cli::command().name(name).bin_name(name);
+    let cli = Cli::from_arg_matches(&command().get_matches()).unwrap_or_else(|e| e.exit());
     match &cli.command {
         Command::Completions { shell } => {
-            clap_complete::generate(*shell, &mut Cli::command(), "cavawallctl", &mut std::io::stdout());
+            clap_complete::generate(*shell, &mut command(), name, &mut std::io::stdout());
             return;
+        }
+        Command::Tune => {
+            let tune = sibling("cavawall-tune");
+            let err = Proc::new(&tune).exec();
+            eprintln!("{name}: cannot run {}: {err}", tune.display());
+            exit(127);
         }
         Command::Kill => {
             match locked_pid() {
@@ -147,7 +175,9 @@ fn main() {
         Command::Move { output } => Request::Move { output: output.clone() },
         Command::Stop => Request::Stop,
         Command::Reload => Request::Reload,
-        Command::Start | Command::Restart | Command::Kill | Command::Completions { .. } => unreachable!("handled above"),
+        Command::Start | Command::Restart | Command::Kill | Command::Tune | Command::Completions { .. } => {
+            unreachable!("handled above")
+        }
     };
 
     let response = match request(&req) {
