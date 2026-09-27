@@ -716,6 +716,7 @@ impl AppState {
                     "pinned_output": self.pinned_output,
                     "placed_on": self.placed_on,
                     "covered": self.covered,
+                    "outputs": self.output_state.outputs().filter_map(|o| self.output_state.info(&o)?.name).collect::<Vec<_>>(),
                     "on_fullscreen": self.on_fullscreen,
                     "output_size": self.placed_size,
                     "bars": self.bar_count,
