@@ -111,10 +111,7 @@ It runs all day, so it is built to cost nothing when it can:
   committed; with `sleep_timer` cava stops analysing too.
 - **Event-driven**, one thread, no polling: cava's pipe, the control socket,
   config changes and Wayland all wake the same loop.
-
-Measured on an i5-12450H laptop with an RTX 4050, 32 bars at 45 fps: **1.6% of one core**
-drawing, **0.4%** in silence, one thread.
-
+  
 ## Installation
 
 Needs a Wayland compositor with `wlr-layer-shell` (Hyprland, Sway, river,
