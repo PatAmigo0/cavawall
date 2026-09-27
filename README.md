@@ -168,8 +168,9 @@ per-wallpaper settings to `wallpapers/<key>.toml` beside it. The annotated
 | `scheme.colors`, `scheme.bars` | follow the shell's palette and bar count |
 | `smoothing.*` | passed to cava |
 
-`CAVAWALL_OUTPUT=<name>` overrides the monitor without touching the file, and
-`CAVAWALL_DEBUG=1` reports placement and the exact config handed to cava.
+`CAVAWALL_OUTPUT=<name>` overrides the monitor without touching the file,
+`CAVAWALL_DEBUG=1` reports placement and the exact config handed to cava, and
+`CAVAWALL_LOG_DIR` moves the log.
 
 A named monitor that is not connected maps nothing, rather than falling back
 to one you did not ask for.

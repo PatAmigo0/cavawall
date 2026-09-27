@@ -24,7 +24,12 @@ static FD: AtomicI32 = AtomicI32::new(-1);
 /// panic with SIGABRT, whose bare "aborted" must not replace the message
 static PANICKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// `CAVAWALL_LOG_DIR` first: tests need a private log while still reading
+/// the shell's state from `XDG_STATE_HOME`, so that one cannot be moved
 pub fn dir() -> PathBuf {
+    if let Some(d) = std::env::var_os("CAVAWALL_LOG_DIR") {
+        return PathBuf::from(d);
+    }
     std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
