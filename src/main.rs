@@ -646,6 +646,12 @@ impl AppState {
     /// It has to drain regardless - the source is level-triggered
     pub fn poll_external(&mut self) {
         let changed = self.watch.as_mut().map(scheme::Watch::take).unwrap_or_default();
+        self.act_on(changed);
+    }
+
+    /// What poll_external does with a set of changes; `cavawall refresh`
+    /// comes here directly
+    fn act_on(&mut self, changed: scheme::Changed) {
         // Ordered so the common case (nothing changed) never reaches
         // debug_enabled(). The watch is otherwise unobservable from outside
         if (changed.scheme || changed.shell || changed.wallpaper) && debug_enabled() {
@@ -738,6 +744,10 @@ impl AppState {
                 }
                 control::write_response(stream, &Response::ok(None));
                 self.reexec();
+            }
+            Request::Refresh => {
+                control::write_response(stream, &Response::ok(None));
+                self.act_on(scheme::Changed { scheme: true, shell: false, wallpaper: true });
             }
             Request::Stop => {
                 control::write_response(stream, &Response::ok(None));

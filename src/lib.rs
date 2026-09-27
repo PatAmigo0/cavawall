@@ -12,3 +12,4 @@ pub mod notify;
 pub mod math;
 pub mod qoi;
 pub mod scheme;
+pub mod wallpaper;

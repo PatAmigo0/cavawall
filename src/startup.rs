@@ -176,6 +176,10 @@ pub(crate) fn run() {
     let config: Config = toml::from_str(&config_str)
         .unwrap_or_else(|e| fatal!("{}: {e}", config_filename.display()));
     cavawall::notify::configure(config.notify.as_ref());
+    // Where the palette and the wallpaper come from, before either is read
+    let scheme = config.scheme.as_ref();
+    scheme::configure_colours(scheme.and_then(|s| s.source.as_deref()), scheme.and_then(|s| s.path.as_deref()));
+    cavawall::wallpaper::configure(config.wallpaper.as_ref());
     if let Some(crash) = cavawall::log::previous_crash() {
         say!("the previous instance crashed: {crash}");
         cavawall::notify::send(NotifyEvent::Crash, "the previous run crashed. `cavawall log last-exit` says how");

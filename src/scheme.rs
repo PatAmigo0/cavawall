@@ -11,10 +11,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-pub const SCHEME_FILE: &str = "scheme.json";
 pub const SHELL_FILE: &str = "shell.json";
-/// The shell records the current wallpaper here, one path per line
-pub const WALLPAPER_FILE: &str = "path.txt";
 
 fn home() -> PathBuf {
     PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/root".into()))
@@ -32,19 +29,30 @@ fn config_dir() -> PathBuf {
         .unwrap_or_else(|| home().join(".config"))
 }
 
-/// Directory holding scheme.json. The directory, not the file: a writer that
-/// replaces the inode leaves a watch on the file silently dead
-///
-/// Resolved once - reading the environment takes a process-wide lock
-pub fn scheme_dir() -> &'static Path {
-    static DIR: OnceLock<PathBuf> = OnceLock::new();
-    DIR.get_or_init(|| state_dir().join("caelestia"))
+/// The live palette's file: Caelestia's scheme.json unless `[scheme]` names
+/// another source. Watched through its directory, not the file itself: a
+/// writer that replaces the inode leaves a watch on the file silently dead
+static PALETTE: OnceLock<PathBuf> = OnceLock::new();
+
+/// Adopt `[scheme] source` and `path`. Once, before anything reads colours
+pub fn configure_colours(source: Option<&str>, path: Option<&str>) {
+    let file = match (source.unwrap_or("caelestia"), path) {
+        (_, Some(p)) => crate::wallpaper::expand(p),
+        ("pywal", None) => std::env::var_os("XDG_CACHE_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home().join(".cache"))
+            .join("wal/colors.json"),
+        ("caelestia", None) => state_dir().join("caelestia/scheme.json"),
+        (other, None) => {
+            eprintln!("cavawall: [scheme] source {other:?} needs a path; using Caelestia's palette");
+            state_dir().join("caelestia/scheme.json")
+        }
+    };
+    let _ = PALETTE.set(file);
 }
 
-/// Directory holding the current wallpaper's path
-pub fn wallpaper_dir() -> &'static Path {
-    static DIR: OnceLock<PathBuf> = OnceLock::new();
-    DIR.get_or_init(|| state_dir().join("caelestia/wallpaper"))
+fn palette() -> &'static Path {
+    PALETTE.get_or_init(|| state_dir().join("caelestia/scheme.json"))
 }
 
 /// Directory holding shell.json, the shell's own settings file
@@ -53,27 +61,33 @@ pub fn shell_dir() -> &'static Path {
     DIR.get_or_init(|| config_dir().join("caelestia"))
 }
 
-/// Role name -> bare `rrggbb`, as the scheme file writes it (no leading `#`)
+/// Role name -> bare `rrggbb`, from any palette JSON: every colour-valued
+/// string is a role named by its own key, however deep it sits - Caelestia's
+/// `colours.primary`, pywal's `colors.color4` and `special.background`, or a
+/// matugen template's layout. The first of two same-named keys wins
 #[must_use]
 pub fn colours() -> Option<HashMap<String, String>> {
-    let raw = std::fs::read_to_string(scheme_dir().join(SCHEME_FILE)).ok()?;
-    let parsed: serde_json::Value = serde_json::from_str(&raw).ok()?;
-    let serde_json::Value::Object(mut root) = parsed else {
-        return None;
-    };
-    let serde_json::Value::Object(obj) = root.remove("colours")? else {
-        return None;
-    };
-    // Moved out of the parsed document rather than cloned. Non-string values
-    // are skipped, not rejected
-    Some(
-        obj.into_iter()
-            .filter_map(|(k, v)| match v {
-                serde_json::Value::String(hex) => Some((k, hex)),
-                _ => None,
-            })
-            .collect(),
-    )
+    parse_palette(&std::fs::read_to_string(palette()).ok()?)
+}
+
+/// `colours` over a document already read
+#[must_use]
+pub fn parse_palette(raw: &str) -> Option<HashMap<String, String>> {
+    fn walk(v: serde_json::Value, key: Option<String>, out: &mut HashMap<String, String>) {
+        match v {
+            serde_json::Value::Object(map) => map.into_iter().for_each(|(k, v)| walk(v, Some(k), out)),
+            serde_json::Value::String(s) => {
+                let hex = s.trim_start_matches('#');
+                if let Some(k) = key.filter(|_| hex.len() == 6 && hex.bytes().all(|b| b.is_ascii_hexdigit())) {
+                    out.entry(k).or_insert_with(|| hex.to_owned());
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = HashMap::new();
+    walk(serde_json::from_str(raw).ok()?, None, &mut out);
+    (!out.is_empty()).then_some(out)
 }
 
 /// `services.visualiserBars` from the shell's shell.json
@@ -119,6 +133,9 @@ pub struct Watch {
     scheme_wd: i32,
     shell_wd: i32,
     wallpaper_wd: i32,
+    /// The one file in the wallpaper directory that matters; None when any
+    /// change there does (swww's cache)
+    wallpaper_name: Option<String>,
     /// Owned, not a local in `take`: that runs once per frame and a
     /// zero-initialised 4 KiB local is a 4 KiB memset each time
     buf: Box<EventBuf>,
@@ -165,16 +182,22 @@ impl Watch {
             scheme_wd: -1,
             shell_wd: -1,
             wallpaper_wd: -1,
+            wallpaper_name: None,
             buf: Box::new(EventBuf([0; 4096])),
         };
         if scheme {
-            w.scheme_wd = w.add(scheme_dir());
+            if let Some(dir) = palette().parent() {
+                w.scheme_wd = w.add(dir);
+            }
         }
         if shell {
             w.shell_wd = w.add(shell_dir());
         }
         if wallpaper {
-            w.wallpaper_wd = w.add(wallpaper_dir());
+            if let Some((dir, name)) = crate::wallpaper::watch_target() {
+                w.wallpaper_wd = w.add(&dir);
+                w.wallpaper_name = name;
+            }
         }
         if w.scheme_wd < 0 && w.shell_wd < 0 && w.wallpaper_wd < 0 {
             return None; // Drop closes the fd
@@ -215,6 +238,8 @@ impl Watch {
         const HDR: usize = std::mem::size_of::<libc::inotify_event>();
         let (scheme_wd, shell_wd, wallpaper_wd) =
             (self.scheme_wd, self.shell_wd, self.wallpaper_wd);
+        let palette_name = palette().file_name().map(std::ffi::OsStr::as_bytes).unwrap_or_default();
+        let wallpaper_name = self.wallpaper_name.as_deref().map(str::as_bytes);
         let buf = &mut self.buf.0;
         let mut hit = Changed::default();
         loop {
@@ -240,13 +265,13 @@ impl Watch {
                     // against the descriptor as well, so a shell.json dropped
                     // into the scheme directory cannot pass for the real one
                     let name = buf[start..end].split(|b| *b == 0).next().unwrap_or(&[]);
-                    if ev.wd == scheme_wd && name == SCHEME_FILE.as_bytes() {
+                    if ev.wd == scheme_wd && name == palette_name {
                         hit.scheme = true;
                     }
                     if ev.wd == shell_wd && name == SHELL_FILE.as_bytes() {
                         hit.shell = true;
                     }
-                    if ev.wd == wallpaper_wd && name == WALLPAPER_FILE.as_bytes() {
+                    if ev.wd == wallpaper_wd && wallpaper_name.is_none_or(|w| name == w) {
                         hit.wallpaper = true;
                     }
                 }
@@ -259,5 +284,32 @@ impl Watch {
 impl Drop for Watch {
     fn drop(&mut self) {
         unsafe { libc::close(self.fd) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_palette;
+
+    #[test]
+    fn caelestia_roles_come_from_colours() {
+        let p = parse_palette(r##"{"name":"x","mode":"dark","colours":{"primary":"ffb4a8","mauve":"#cba6f7"}}"##).expect("parses");
+        assert_eq!(p["primary"], "ffb4a8");
+        assert_eq!(p["mauve"], "cba6f7");
+        assert!(!p.contains_key("mode") && !p.contains_key("name"), "non-colours are skipped");
+    }
+
+    #[test]
+    fn pywal_colours_and_specials_are_roles() {
+        let p = parse_palette(r##"{"wallpaper":"/a.jpg","special":{"background":"#0f1115","foreground":"#e6e1cf"},"colors":{"color0":"#0f1115","color4":"#5a8cd6"}}"##).expect("parses");
+        assert_eq!(p["color4"], "5a8cd6");
+        assert_eq!(p["background"], "0f1115");
+        assert!(!p.contains_key("wallpaper"));
+    }
+
+    #[test]
+    fn nothing_colour_valued_is_no_palette() {
+        assert!(parse_palette(r#"{"a":"b"}"#).is_none());
+        assert!(parse_palette("not json").is_none());
     }
 }

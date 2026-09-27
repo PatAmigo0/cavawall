@@ -654,13 +654,7 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 /// The wallpaper the shell currently has set, if it says
 #[must_use]
 pub fn current_wallpaper() -> Option<std::path::PathBuf> {
-    let state = std::env::var_os("XDG_STATE_HOME").map_or_else(
-        || std::path::PathBuf::from(std::env::var_os("HOME")?).join(".local/state").into(),
-        |s| Some(std::path::PathBuf::from(s)),
-    )?;
-    let txt = std::fs::read_to_string(state.join("caelestia/wallpaper/path.txt")).ok()?;
-    let trimmed = txt.trim();
-    (!trimmed.is_empty()).then(|| std::path::PathBuf::from(trimmed))
+    crate::wallpaper::current()
 }
 
 #[cfg(test)]

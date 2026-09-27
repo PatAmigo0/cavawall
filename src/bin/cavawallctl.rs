@@ -27,6 +27,8 @@ enum Command {
     Stop,
     /// Re-read config; the instance runs again in place, keeping its pid
     Reload,
+    /// Look again at the wallpaper and palette, for sources cavawall cannot watch
+    Refresh,
     /// Start one if none is running
     Start,
     /// Stop whatever is running and start again, picking up a new binary
@@ -211,6 +213,7 @@ fn main() {
         Command::Move { output } => Request::Move { output: output.clone() },
         Command::Stop => Request::Stop,
         Command::Reload => Request::Reload,
+        Command::Refresh => Request::Refresh,
         Command::Start
         | Command::Restart
         | Command::Kill
