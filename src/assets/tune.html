@@ -52,9 +52,9 @@ header{display:flex;align-items:center;gap:14px;padding:8px 14px;border-bottom:1
 .dot.on{background:var(--good);box-shadow:0 0 0 3px #86d9a422}
 .dot.off{background:var(--bad)}
 
-/* stage */
-main{display:grid;grid-template-columns:1fr 340px;min-height:0}
-.stage{position:relative;min-width:0;min-height:0;overflow:hidden;background:
+/* stage: the wallpaper fills the window, and every panel floats over it */
+main{position:relative;min-height:0;min-width:0}
+.stage{position:absolute;inset:0;overflow:hidden;background:
   radial-gradient(circle at 50% 50%,#17171e,var(--ink0) 70%)}
 .view{position:absolute;inset:0;display:grid;place-items:center;transform-origin:0 0}
 .view canvas{grid-area:1/1;max-width:100%;max-height:100%;display:block}
@@ -66,10 +66,31 @@ body[data-figure=bars] #ui,body[data-figure=circle] #ui{cursor:default}
 .tool[aria-pressed=true]{background:var(--ink3);box-shadow:inset 0 -2px 0 var(--accent)}
 body:not([data-figure=curve]) .curve-only{display:none!important}
 .zoom{font:11px var(--mono);color:var(--muted);min-width:40px;text-align:center}
-.hint{position:absolute;left:12px;bottom:10px;font-size:12px;color:var(--muted);background:#15151bcc;border-radius:6px;padding:3px 8px;pointer-events:none}
+.hint{position:absolute;left:12px;bottom:10px;z-index:1;font-size:12px;color:var(--muted);background:#15151bcc;border-radius:6px;padding:3px 8px;pointer-events:none}
 
-/* inspector */
-.inspector{border-left:1px solid var(--line);background:var(--ink1);overflow-y:auto;overscroll-behavior:contain}
+/* floating glass: the dock, the layers card and the popovers */
+.glass{background:#15151bec;backdrop-filter:blur(10px);border:1px solid var(--line);border-radius:12px;box-shadow:0 12px 36px #0007}
+.dock{position:absolute;top:12px;right:12px;max-height:calc(100% - 24px);width:332px;display:flex;flex-direction:column;overflow:hidden;z-index:3;transition:transform .2s}
+.dock .tabs{display:flex;align-items:center;gap:2px;padding:6px 6px 0;border-bottom:1px solid var(--line)}
+.dock .tabs [role=tab]{background:none;border:0;border-bottom:2px solid transparent;padding:6px 12px 8px;cursor:pointer;color:var(--muted);font:600 12px/1 var(--display);letter-spacing:.12em;text-transform:uppercase}
+.dock .tabs [role=tab][aria-selected=true]{color:var(--text);border-bottom-color:var(--accent)}
+.dock .tabs .grow{flex:1}
+.pane{overflow-y:auto;overscroll-behavior:contain;flex:1}
+body.folded .dock{transform:translateX(calc(100% - 40px))}
+body.folded .dock .pane{display:none}
+.card{position:absolute;left:12px;top:62px;width:268px;max-height:calc(100% - 112px);overflow-y:auto;z-index:2}
+.card > .sec:last-child{border-bottom:0}
+.pop{position:absolute;z-index:4;width:250px;padding:0}
+.pop .sec{border-bottom:0}
+#viewPop,#keysPop{top:58px;left:12px}
+#keysPop{width:330px}
+.cost{display:inline-block;font:500 10px/1 var(--mono);color:var(--warn);border:1px solid #ffb34755;border-radius:4px;padding:2px 5px;margin-left:6px;vertical-align:1px}
+.stop{display:grid;grid-template-columns:28px 1fr 64px 18px;gap:6px;align-items:center;min-height:30px}
+.stop input[type=color]{width:28px;height:22px;border:1px solid var(--line);border-radius:5px;padding:0;background:none;cursor:pointer}
+.stop input[type=color]:disabled{cursor:default}
+.stop select{min-width:0}
+.stop button{background:none;border:0;color:var(--faint);cursor:pointer;padding:0}
+.stop button:hover{color:var(--bad)}
 .sec{border-bottom:1px solid var(--line);padding:12px 14px 14px}
 .sec h2{margin:0 0 10px;font:600 12px/1 var(--display);letter-spacing:.14em;text-transform:uppercase;color:var(--muted);display:flex;align-items:center;gap:8px}
 .sec h2 .aside{margin-left:auto;font:400 11px var(--body);letter-spacing:0;text-transform:none;color:var(--faint)}
@@ -130,10 +151,8 @@ footer #status{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   border-radius:9px;padding:8px 14px;box-shadow:0 10px 30px #0008;transition:transform .18s,opacity .18s;pointer-events:none}
 .toast.show{transform:translate(-50%,0);opacity:1}
 .toast.bad{border-color:var(--bad)}
-@media (max-width:900px){main{grid-template-columns:1fr}.inspector{position:fixed;right:0;top:48px;bottom:30px;width:min(340px,92vw);transform:translateX(100%);transition:transform .2s}
-  body.panel .inspector{transform:none}.panel-toggle{display:inline-grid!important}.wp #wpname{max-width:34vw}}
-.panel-toggle{display:none}
-@media (prefers-reduced-motion:reduce){.toast{transition:none}}
+@media (max-width:900px){.dock{width:min(332px,calc(100vw - 24px))}.card{width:min(268px,calc(100vw - 24px))}.wp #wpname{max-width:34vw}}
+@media (prefers-reduced-motion:reduce){.toast,.dock{transition:none}}
 </style>
 <body data-figure=bars>
 <header>
@@ -144,7 +163,6 @@ footer #status{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   </div>
   <div class=grow></div>
   <div class=live><span class=dot id=liveDot></span><span id=liveText>checking cavawall…</span></div>
-  <button class="btn icon panel-toggle" id=panelToggle aria-label="Settings">☰</button>
   <button class="btn primary" id=save disabled>Save &amp; apply<kbd>Ctrl S</kbd></button>
 </header>
 <main>
@@ -161,10 +179,23 @@ footer #status{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
       <button class="btn icon" id=fit title="Fit to window (0)">⤢</button>
       <span class=zoom id=zoomv>100%</span>
       <button class="btn icon" id=play title="Animate the preview (Space)" aria-pressed=true>❚❚</button>
+      <span class=sep></span>
+      <button class="btn icon" id=viewBtn title="View" aria-expanded=false>◐</button>
+      <button class="btn icon" id=keysBtn title="Keys (?)" aria-expanded=false>?</button>
     </div>
+    <div class="card glass curve-only" id=layersCard></div>
+    <div class="pop glass" id=pointPop hidden></div>
+    <div class="pop glass" id=viewPop hidden></div>
+    <div class="pop glass" id=keysPop hidden></div>
     <div class=hint id=hint></div>
+    <aside class="dock glass" id=dock>
+      <div class=tabs role=tablist aria-label=Settings>
+        <button class="btn ghost icon" id=dockFold title="Fold the panel" aria-label="Fold the panel">⟩</button>
+        <button role=tab data-tab=shape aria-selected=true>Shape</button><button role=tab data-tab=look aria-selected=false>Look</button><button role=tab data-tab=sound aria-selected=false>Sound</button>
+      </div>
+      <div class=pane id=paneShape></div><div class=pane id=paneLook hidden></div><div class=pane id=paneSound hidden></div>
+    </aside>
   </section>
-  <aside class=inspector id=inspector></aside>
 </main>
 <footer><span id=status>Loading the wallpaper…</span><span class=grow></span><span id=dirty>saved</span></footer>
 <div class=toast id=toast role=status></div>
@@ -185,7 +216,7 @@ const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
 
 // The renderer's own defaults, so an unset field previews as it will draw
 const RENDER = {path_height: 0.18, path_width: 0.006, circle_diameter: 520, inner_radius: 0.35,
-  inner_alpha: 1, outer_alpha: 1, max_height: 1, opacity: 1, matte: 0, radius: 0, reveal: 0,
+  inner_alpha: 1, outer_alpha: 1, max_height: 1, opacity: 1, matte: 0, radius: 0, reveal: 0, blocks: 0,
   left: 0, span: 1, baseline: 1};
 // Paths and occluders are told apart by colour in the editor and the grid
 const PATH_COLOURS = ['#ff5c5c', '#ffb14a', '#f7e36b', '#7fe0a0', '#5cc8ff', '#b28dff', '#ff7ad9', '#a0e0e0'];
@@ -224,6 +255,9 @@ function load(W, ctx) {
   if (Array.isArray(st.output_size)) S.out = {w: st.output_size[0], h: st.output_size[1]};
   else S.out = {w: screen.width || 1920, h: screen.height || 1080};
   S.fig = W.mode || ctx.defaults?.mode || 'bars';
+  const cfg = ctx.config || {};
+  S.g = {general: {...(cfg.general || {})}, smoothing: {...(cfg.smoothing || {})}, colors: {...(cfg.colors || {})}, scheme: {...(cfg.scheme || {})}};
+  S.g0 = JSON.stringify(S.g);
   S.bars = {...(W.bars || {})};
   S.circle = {...(W.circle || {})};
   S.reveal.source = S.bars.reveal_source || (ctx.reveal_source ? 'auto' : 'wallpaper');
@@ -342,14 +376,14 @@ function placement() {
   const left = clamp(val('bars', 'left'), 0, 0.99);
   return {left, span: clamp(val('bars', 'span'), 0.01, Math.max(0.01, 1 - left)),
     baseline: clamp(val('bars', 'baseline'), 0, 1), reach: clamp(val('bars', 'max_height'), 0.01, 1),
-    down: val('bars', 'grow') === 'down'};
+    down: val('bars', 'grow') === 'down', mirror: !!val('bars', 'mirror')};
 }
 function band() {
   const p = placement(), {w, h} = S.out;
   const width = clamp(Math.round(p.span * w), 1, w), left = Math.min(Math.round(p.left * w), w - width);
-  const height = clamp(Math.ceil(p.reach * h), 1, h), b = Math.round(p.baseline * h);
-  const top = clamp(p.down ? b : b - height, 0, h - height);
-  return {left, top, width, height, down: p.down};
+  const height = clamp(Math.ceil((p.mirror ? 2 : 1) * p.reach * h), 1, h), b = Math.round(p.baseline * h);
+  const top = clamp(p.mirror ? b - Math.floor(height / 2) : p.down ? b : b - height, 0, h - height);
+  return {left, top, width, height, down: p.down, mirror: p.mirror};
 }
 // The circle's square surface, exactly as main.rs places it
 function circleBox() {
@@ -478,34 +512,72 @@ function roundedBar(ctx, x, y, w, h, up, r) {
   else { ctx.moveTo(x, y); ctx.lineTo(x, y + h - rr); ctx.arcTo(x, y + h, x + rr, y + h, rr); ctx.lineTo(x + w - rr, y + h); ctx.arcTo(x + w, y + h, x + w, y + h - rr, rr); ctx.lineTo(x + w, y); }
   ctx.closePath();
 }
+// The shader's smoothstep, for the x-ray pulse
+function smooth(a, b, x) { const u = clamp((x - a) / (b - a), 0, 1); return u * u * (3 - 2 * u); }
+// Stripes a bar's blocks leave empty, as the shader's discard does: the top
+// quarter of every segment, measured from the base in units of full reach
+function blockGaps(ctx, x, w, base, reach, up, blocks) {
+  const seg = reach / blocks;
+  for (let k = 0; k < blocks; k++) ctx.rect(x, up ? base - (k + 1) * seg : base + (k + 0.75) * seg, w, seg * 0.25);
+}
 function drawPreview(t) {
   fxx.clearRect(0, 0, fx.width, fx.height);
   if (!img.naturalWidth) return;
   const [n] = effectiveBars(), gap = val('bars', 'gap'), radius = val('bars', 'radius');
+  const blocks = Math.round(val('bars', 'blocks')), row = val('bars', 'gradient') === 'row';
+  const mirror = !!val('bars', 'mirror') && S.fig !== 'circle';
+  const mix = val('bars', 'reveal'), pulse = mix > 0 && S.reveal.canvas && !!val('bars', 'reveal_pulse');
+  // The x-ray pulse: every bar's shape again, at the alpha its loudness gives
+  const mask = pulse ? scratch('mask') : null;
+  const maskAlpha = i => `rgba(0,0,0,${smooth(0.1, 0.8, level(i, t))})`;
   fxx.save();
   if (S.fig === 'bars') {
     const b = band(), [x0, y0] = o2c(b.left, b.top), k = scale();
     const W = b.width * k, H = b.height * k, bw = W / (n + (n - 1) * gap), stride = bw * (1 + gap);
-    const baseY = b.down ? y0 : y0 + H;
-    fxx.fillStyle = gradient(fxx, 0, baseY, 0, b.down ? baseY + H : baseY - H);
-    fxx.beginPath();
-    for (let i = 0; i < n; i++) roundedBar(fxx, x0 + i * stride, baseY, bw, H * level(i, t), !b.down, radius * bw);
-    fxx.fill();
+    const reach = mirror ? H / 2 : H, baseY = mirror ? y0 + H / 2 : b.down ? y0 : y0 + H;
+    const sides = mirror ? [true, false] : [!b.down];
+    for (const up of sides) {
+      fxx.fillStyle = row ? gradient(fxx, x0, 0, x0 + W, 0) : gradient(fxx, 0, baseY, 0, up ? baseY - reach : baseY + reach);
+      fxx.beginPath();
+      for (let i = 0; i < n; i++) roundedBar(fxx, x0 + i * stride, baseY, bw, reach * level(i, t), up, radius * bw);
+      fxx.fill();
+      if (mask) for (let i = 0; i < n; i++) { mask.fillStyle = maskAlpha(i); mask.beginPath(); roundedBar(mask, x0 + i * stride, baseY, bw, reach * level(i, t), up, radius * bw); mask.fill(); }
+    }
+    if (blocks > 0) {
+      fxx.globalCompositeOperation = 'destination-out'; fxx.beginPath();
+      for (const up of sides) blockGaps(fxx, x0, W, baseY, reach, up, blocks);
+      fxx.fill(); fxx.globalCompositeOperation = 'source-over';
+    }
   } else if (S.fig === 'circle') {
     const c = circleBox(), [x0, y0] = o2c(c.left, c.top), R = c.d / 2 * scale(), cx = x0 + R, cy = y0 + R;
     const ir = clamp(val('circle', 'inner_radius'), 0, 0.95), step = 2 * Math.PI / n, half = step / (1 + gap) / 2;
     const ia = val('circle', 'inner_alpha'), oa = val('circle', 'outer_alpha');
-    const g = fxx.createRadialGradient(cx, cy, 0, cx, cy, R);
-    for (let k = 0; k <= 8; k++) { const t2 = k / 8, r = ir + (1 - ir) * t2; g.addColorStop(r, stopAt(t2, ia + (oa - ia) * t2)); }
-    fxx.fillStyle = g; fxx.beginPath();
-    for (let i = 0; i < n; i++) {
+    let g;
+    if (row) {
+      // Round from twelve o'clock, clockwise, as the bars run
+      g = fxx.createConicGradient(-Math.PI / 2 - half, cx, cy);
+      for (let k = 0; k <= 8; k++) g.addColorStop(k / 8, stopAt(k / 8, (ia + oa) / 2));
+    } else {
+      g = fxx.createRadialGradient(cx, cy, 0, cx, cy, R);
+      for (let k = 0; k <= 8; k++) { const t2 = k / 8, r = ir + (1 - ir) * t2; g.addColorStop(r, stopAt(t2, ia + (oa - ia) * t2)); }
+    }
+    const wedge = (ctx, i) => {
       // Bar 0 points up and the spectrum runs clockwise, as the shader has it
       const th = step * i, r0 = ir * R, r1 = r0 + (1 - ir) * R * level(i, t);
       const pt = (r, a) => [cx + r * Math.sin(a), cy - r * Math.cos(a)];
       const q = [pt(r0, th - half), pt(r1, th - half), pt(r1, th + half), pt(r0, th + half)];
-      fxx.moveTo(...q[0]); q.slice(1).forEach(p => fxx.lineTo(...p)); fxx.closePath();
-    }
+      ctx.moveTo(...q[0]); q.slice(1).forEach(p => ctx.lineTo(...p)); ctx.closePath();
+    };
+    fxx.fillStyle = g; fxx.beginPath();
+    for (let i = 0; i < n; i++) wedge(fxx, i);
     fxx.fill();
+    if (mask) for (let i = 0; i < n; i++) { mask.fillStyle = maskAlpha(i); mask.beginPath(); wedge(mask, i); mask.fill(); }
+    if (blocks > 0) {
+      const r0 = ir * R, seg = (1 - ir) * R / blocks;
+      fxx.globalCompositeOperation = 'destination-out'; fxx.beginPath();
+      for (let k = 0; k < blocks; k++) { fxx.moveTo(cx + r0 + (k + 1) * seg, cy); fxx.arc(cx, cy, r0 + (k + 1) * seg, 0, 2 * Math.PI); fxx.moveTo(cx + r0 + (k + 0.75) * seg, cy); fxx.arc(cx, cy, r0 + (k + 0.75) * seg, 0, 2 * Math.PI, true); }
+      fxx.fill(); fxx.globalCompositeOperation = 'source-over';
+    }
   } else {
     const bars = curveBars(), ia = val('circle', 'inner_alpha'), oa = val('circle', 'outer_alpha');
     // One pass per distinct set of occluders: draw that set's bars, then
@@ -516,9 +588,20 @@ function drawPreview(t) {
       const layer = key ? scratch() : fxx;
       for (const [b, i] of list) {
         const len = b.reach * level(i, t), tx = -b.ny, ty = b.nx;
-        layer.fillStyle = gradient(layer, b.x, b.y, b.x + b.nx * b.reach, b.y + b.ny * b.reach, ia, oa);
         layer.save(); layer.translate(b.x, b.y); layer.transform(tx, ty, b.nx, b.ny, 0, 0);
-        layer.beginPath(); roundedBar(layer, -b.width / 2, 0, b.width, len, false, radius * b.width); layer.fill(); layer.restore();
+        // In the bar's own frame: base at 0, its normal along +y
+        for (const back of mirror ? [false, true] : [false]) {
+          if (row) { const c = stopAt(i / Math.max(1, n - 1)); layer.fillStyle = c; }
+          else layer.fillStyle = gradient(layer, 0, 0, 0, back ? -b.reach : b.reach, ia, oa);
+          layer.beginPath(); roundedBar(layer, -b.width / 2, 0, b.width, len, back, radius * b.width); layer.fill();
+          if (mask) { mask.save(); mask.setTransform(layer.getTransform()); mask.fillStyle = maskAlpha(i); mask.beginPath(); roundedBar(mask, -b.width / 2, 0, b.width, len, back, radius * b.width); mask.fill(); mask.restore(); }
+          if (blocks > 0) {
+            layer.globalCompositeOperation = 'destination-out'; layer.beginPath();
+            blockGaps(layer, -b.width / 2 - 1, b.width + 2, 0, b.reach, back, blocks);
+            layer.fill(); layer.globalCompositeOperation = 'source-over';
+          }
+        }
+        layer.restore();
       }
       if (key) {
         layer.globalCompositeOperation = 'destination-out'; layer.fillStyle = '#000';
@@ -529,19 +612,24 @@ function drawPreview(t) {
     }
   }
   // The x-ray: the reveal image painted over the bars only, by its mix
-  const mix = val('bars', 'reveal');
   if (mix > 0 && S.reveal.canvas) {
+    let src = S.reveal.canvas;
+    if (mask) {
+      mask.globalCompositeOperation = 'source-in'; mask.drawImage(S.reveal.canvas, 0, 0, fx.width, fx.height);
+      mask.globalCompositeOperation = 'source-over'; src = mask.canvas;
+    }
     fxx.globalCompositeOperation = 'source-atop'; fxx.globalAlpha = mix;
-    fxx.drawImage(S.reveal.canvas, 0, 0, fx.width, fx.height);
+    fxx.drawImage(src, 0, 0, fx.width, fx.height);
   }
   fxx.restore();
 }
-let scratchCanvas = null;
-function scratch() {
-  if (!scratchCanvas || scratchCanvas.width !== fx.width || scratchCanvas.height !== fx.height) {
-    scratchCanvas = document.createElement('canvas'); scratchCanvas.width = fx.width; scratchCanvas.height = fx.height;
+const scratchCanvases = {};
+function scratch(name = 'layer') {
+  let c = scratchCanvases[name];
+  if (!c || c.width !== fx.width || c.height !== fx.height) {
+    c = scratchCanvases[name] = document.createElement('canvas'); c.width = fx.width; c.height = fx.height;
   }
-  const c = scratchCanvas.getContext('2d'); c.clearRect(0, 0, fx.width, fx.height); return c;
+  const x = c.getContext('2d'); x.setTransform(1, 0, 0, 1, 0, 0); x.clearRect(0, 0, fx.width, fx.height); return x;
 }
 
 // The preview runs at 30fps, and only while the page is visible
@@ -566,10 +654,10 @@ function drawUI() {
     const b = band(), [x0, y0] = o2c(b.left, b.top), [x1, y1] = o2c(b.left + b.width, b.top + b.height);
     ux.setLineDash([lw * 3, lw * 2]); ux.strokeStyle = 'rgba(255,255,255,.55)'; ux.strokeRect(x0, y0, x1 - x0, y1 - y0); ux.setLineDash([]);
     // Handles: the sides resize, the reach edge sets the height
-    for (const [x, y] of [[x0, (y0 + y1) / 2], [x1, (y0 + y1) / 2], [(x0 + x1) / 2, b.down ? y1 : y0]]) handle(x, y, dot * 1.2, '#fff');
+    for (const [x, y] of [[x0, (y0 + y1) / 2], [x1, (y0 + y1) / 2], [(x0 + x1) / 2, b.down && !b.mirror ? y1 : y0]]) handle(x, y, dot * 1.2, '#fff');
     // The baseline, where the bars stand
     ux.strokeStyle = 'var(--accent)'; ux.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--accent');
-    ux.beginPath(); const by = b.down ? y0 : y1; ux.moveTo(x0, by); ux.lineTo(x1, by); ux.stroke();
+    ux.beginPath(); const by = b.mirror ? (y0 + y1) / 2 : b.down ? y0 : y1; ux.moveTo(x0, by); ux.lineTo(x1, by); ux.stroke();
   } else if (S.fig === 'circle') {
     const c = circleBox(), [x0, y0] = o2c(c.left, c.top), R = c.d / 2 * scale();
     ux.setLineDash([lw * 3, lw * 2]); ux.strokeStyle = 'rgba(255,255,255,.5)';
@@ -596,6 +684,7 @@ function drawUI() {
       ux.globalAlpha = 1;
     });
   }
+  placePointPop();
   status();
 }
 function handle(x, y, r, fill) { ux.beginPath(); ux.arc(x, y, r, 0, 7); ux.fillStyle = fill; ux.fill(); ux.lineWidth = Math.max(1, r / 3); ux.strokeStyle = '#0d0d11'; ux.stroke(); }
@@ -631,7 +720,7 @@ ui.addEventListener('pointerdown', e => {
   if (S.fig === 'bars') {
     const b = band(), [x0, y0] = o2c(b.left, b.top), [x1, y1] = o2c(b.left + b.width, b.top + b.height);
     const px = p.x * ui.width, py = p.y * ui.height, g = grabPx();
-    const edge = Math.abs(px - x0) < g ? 'l' : Math.abs(px - x1) < g ? 'r' : Math.abs(py - (b.down ? y1 : y0)) < g && px > x0 && px < x1 ? 'reach' : (px > x0 && px < x1 && py > y0 && py < y1) ? 'move' : null;
+    const edge = Math.abs(px - x0) < g ? 'l' : Math.abs(px - x1) < g ? 'r' : Math.abs(py - (b.down && !b.mirror ? y1 : y0)) < g && px > x0 && px < x1 ? 'reach' : (px > x0 && px < x1 && py > y0 && py < y1) ? 'move' : null;
     if (edge) { snapshot(); drag = {kind: 'band', edge, start: c2o(px, py), band: b}; }
     return;
   }
@@ -660,7 +749,8 @@ ui.addEventListener('pointermove', e => {
     const snap = v => Math.abs(v) < 0.006 ? 0 : Math.abs(v - 1) < 0.006 ? 1 : v;
     if (drag.edge === 'move') {
       S.bars.left = r4(snap(clamp((b.left + dx) / w, 0, 1 - b.width / w)));
-      S.bars.baseline = r4(snap(clamp((b.down ? b.top + dy : b.top + b.height + dy) / h, 0, 1)));
+      const line = b.mirror ? b.top + b.height / 2 : b.down ? b.top : b.top + b.height;
+      S.bars.baseline = r4(snap(clamp((line + dy) / h, 0, 1)));
       if (S.bars.span == null) S.bars.span = r4(b.width / w);
     } else if (drag.edge === 'l') {
       const right = b.left + b.width, nl = clamp(snap(ox / w) * w, 0, right - 8);
@@ -669,7 +759,8 @@ ui.addEventListener('pointermove', e => {
       S.bars.span = r4(clamp(snap(ox / w) * w - b.left, 8, w - b.left) / w);
       if (S.bars.left == null) S.bars.left = r4(b.left / w);
     } else {
-      const baseY = b.down ? b.top : b.top + b.height, reach = b.down ? oy - baseY : baseY - oy;
+      const baseY = b.mirror ? b.top + b.height / 2 : b.down ? b.top : b.top + b.height;
+      const reach = b.down && !b.mirror ? oy - baseY : baseY - oy;
       S.bars.max_height = r4(clamp(reach / h, 0.02, 1));
       if (S.bars.baseline == null) S.bars.baseline = r4(baseY / h);
     }
@@ -717,7 +808,7 @@ function hover(e) {
 }
 
 // ---------------------------------------------------------------- history
-function state() { return JSON.stringify({fig: S.fig, bars: S.bars, circle: S.circle, curve: S.curve, paths: S.paths, occ: S.occ, cur: S.cur, curOcc: S.curOcc, rf: S.reveal.filter, rs: S.reveal.source}); }
+function state() { return JSON.stringify({fig: S.fig, bars: S.bars, circle: S.circle, curve: S.curve, paths: S.paths, occ: S.occ, cur: S.cur, curOcc: S.curOcc, rf: S.reveal.filter, rs: S.reveal.source, g: S.g}); }
 let pending = null;
 function snapshot() { pending = pending ?? state(); }
 function commit() {
@@ -730,11 +821,159 @@ function restore(s) {
   const o = JSON.parse(s);
   Object.assign(S, {fig: o.fig, bars: o.bars, circle: o.circle, curve: o.curve, paths: o.paths, occ: o.occ, cur: o.cur, curOcc: o.curOcc});
   if (JSON.stringify(o.rf) !== JSON.stringify(S.reveal.filter) || o.rs !== S.reveal.source) { S.reveal.filter = o.rf; S.reveal.source = o.rs; S.reveal.changed = true; revealSourceChanged(); }
+  if (JSON.stringify(o.g) !== JSON.stringify(S.g)) { S.g = o.g; recomputeStops(); renderStops(); }
   S.sel = -1; setFigure(S.fig, true); syncFields(); renderLayers(); refreshPoint(); drawBase(); drawUI(); if (!S.view.play) drawPreview(0);
 }
 function undo() { if (!hist.length) return; future.push(state()); restore(hist.pop()); status(); }
 function redo() { if (!future.length) return; hist.push(state()); restore(future.pop()); status(); }
 $('undo').onclick = undo; $('redo').onclick = redo;
+
+// ---------------------------------------------------------------- config.toml
+// The page's working copy of the tables every wallpaper shares, and the keys
+// that changed since the file was loaded, as /global wants them
+function gVal(table, key, dflt) { const v = S.g[table]?.[key]; return v ?? dflt; }
+function gSet(table, key, v) { S.g[table] = S.g[table] || {}; if (v == null) delete S.g[table][key]; else S.g[table][key] = v; }
+function globalDiff() {
+  const was = JSON.parse(S.g0 || '{}'), out = [];
+  for (const t of ['general', 'smoothing', 'colors', 'scheme']) {
+    const a = was[t] || {}, b = S.g[t] || {};
+    for (const k of new Set([...Object.keys(a), ...Object.keys(b)]))
+      if (JSON.stringify(a[k]) !== JSON.stringify(b[k])) out.push([t, k, b[k] ?? null]);
+  }
+  return out;
+}
+// A slider row over config.toml, the twin of row() for the wallpaper's file
+function gRow(host, def) {
+  const el = document.createElement('div'); el.className = 'row';
+  el.innerHTML = `<label title="${def.hint || def.label}">${def.label}</label><input type=range min=${def.min} max=${def.max} step=${def.step} aria-label="${def.label}"><output></output>${def.required ? '<span></span>' : `<button class=reset title="Back to cava's default" aria-label="Reset ${def.label}">↺</button>`}`;
+  const input = el.querySelector('input'), out = el.querySelector('output');
+  const sync = () => {
+    const own = S.g[def.t]?.[def.k], v = own ?? def.dflt;
+    el.classList.toggle('inherited', own == null);
+    input.value = v; input.style.setProperty('--p', ((v - def.min) / (def.max - def.min) * 100) + '%');
+    out.textContent = (def.int ? Math.round(v) : (+v).toFixed(def.step < 0.1 ? 2 : 1)) + (def.unit || '');
+  };
+  input.addEventListener('pointerdown', snapshot); input.addEventListener('keydown', snapshot);
+  input.addEventListener('input', () => { gSet(def.t, def.k, def.int ? Math.round(+input.value) : +input.value); sync(); status(); });
+  input.addEventListener('change', commit);
+  el.querySelector('.reset')?.addEventListener('click', () => { snapshot(); gSet(def.t, def.k, null); sync(); commit(); });
+  host.appendChild(el); ROWS.push(sync); sync();
+}
+function gChip(host, label, table, key, dflt, title, after) {
+  return chip(host, label, () => !!gVal(table, key, dflt), on => { gSet(table, key, on === !!dflt ? null : on); after?.(); }, title);
+}
+function gSelect(host, label, table, key, options, dflt, after) {
+  const el = document.createElement('div'); el.className = 'row';
+  el.innerHTML = `<label>${label}</label><select style="grid-column:2/4">${options.map(([v, l]) => `<option value="${escapeHtml(v)}">${escapeHtml(l)}</option>`).join('')}</select>`;
+  const sel = el.querySelector('select');
+  const sync = () => { sel.value = gVal(table, key, dflt); };
+  sel.onchange = () => { snapshot(); gSet(table, key, sel.value === dflt ? null : sel.value); after?.(); commit(); };
+  host.appendChild(el); ROWS.push(sync); sync(); return sel;
+}
+
+// Stops in the order the renderer reads them: by the number in their key
+function stopKeys() {
+  const n = k => +(k.match(/(\d+)\D*$/) || [0, 1e9])[1];
+  return Object.keys(S.g.colors || {}).sort((a, b) => n(a) - n(b) || a.localeCompare(b));
+}
+function stopOf(k) { const v = S.g.colors[k]; return typeof v === 'string' ? {hex: v} : {...v}; }
+function hexRgb(h) { const m = /^#?([0-9a-f]{6})/i.exec(h || ''); if (!m) return [255, 255, 255]; const n = parseInt(m[1], 16); return [n >> 16, (n >> 8) & 255, n & 255]; }
+// The palette as the renderer resolves it: a live role when following the
+// shell and the shell has it, else the stop's own hex
+function recomputeStops() {
+  const live = gVal('scheme', 'colors', false) && S.ctx.scheme;
+  const g = stopKeys().map(k => { const c = stopOf(k), role = live && c.role && S.ctx.scheme[c.role]; return [...hexRgb(role || c.hex), c.alpha ?? 1]; });
+  if (g.length) setAccent(g);
+  if (!S.view.play) drawPreview(0);
+}
+function buildColours() {
+  const s = section('Colours', '', 'every wallpaper', $('paneLook'));
+  if (S.ctx.scheme) gChip(s, 'Follow the shell\'s palette', 'scheme', 'colors', false, 'Stops with a role take the live colour of that role', () => { renderStops(); recomputeStops(); });
+  const list = document.createElement('div'); list.id = 'stopList'; s.appendChild(list);
+  const add = document.createElement('div'); add.className = 'btns';
+  add.innerHTML = '<button class="btn small" id=addStop>+ Stop</button>';
+  s.appendChild(add);
+  $('addStop').onclick = () => {
+    snapshot(); const keys = stopKeys(), last = keys.length ? stopOf(keys[keys.length - 1]) : {hex: '#ffffff'};
+    gSet('colors', `c${keys.length + 1}`, {hex: last.hex, alpha: last.alpha ?? 1});
+    renderStops(); recomputeStops(); commit();
+  };
+  renderStops();
+}
+function renderStops() {
+  const list = $('stopList'); if (!list) return;
+  const live = gVal('scheme', 'colors', false) && S.ctx.scheme, roles = live ? Object.keys(S.ctx.scheme).sort() : [];
+  const keys = stopKeys();
+  list.innerHTML = keys.map((k, i) => {
+    const c = stopOf(k), liveHex = live && c.role && S.ctx.scheme[c.role];
+    const shown = liveHex || c.hex;
+    const role = live ? `<select data-role=${i} title="Live colour"><option value="">fixed</option>${roles.map(r => `<option${r === c.role ? ' selected' : ''}>${escapeHtml(r)}</option>`).join('')}</select>` : `<span class=meta title="${escapeHtml(k)}">${i === 0 ? 'base' : i === keys.length - 1 ? 'tip' : ''}</span>`;
+    return `<div class=stop><input type=color value="${'#' + hexRgb(shown).map(v => v.toString(16).padStart(2, '0')).join('')}" data-hex=${i} aria-label="Stop ${i + 1}"${liveHex ? ` disabled title="${escapeHtml(c.role)}, live from the shell. Set it to fixed to pick a colour"` : ''}>${role}<input type=range min=0 max=1 step=0.05 value=${c.alpha ?? 1} data-alpha=${i} title="Alpha" aria-label="Stop ${i + 1} alpha"><button data-del=${i} title="Remove" aria-label="Remove stop ${i + 1}" ${keys.length < 2 ? 'disabled' : ''}>×</button></div>`;
+  }).join('');
+  const edit = (i, f) => { const k = keys[i], c = stopOf(k); f(c); gSet('colors', k, c); recomputeStops(); status(); };
+  list.querySelectorAll('[data-hex]').forEach(e => { e.onfocus = snapshot; e.oninput = () => edit(+e.dataset.hex, c => c.hex = e.value); e.onchange = commit; });
+  list.querySelectorAll('[data-alpha]').forEach(e => { e.onpointerdown = snapshot; e.oninput = () => edit(+e.dataset.alpha, c => c.alpha = +e.value); e.onchange = commit; });
+  list.querySelectorAll('[data-role]').forEach(e => { e.onchange = () => { snapshot(); edit(+e.dataset.role, c => { if (e.value) c.role = e.value; else delete c.role; }); renderStops(); commit(); }; });
+  list.querySelectorAll('[data-del]').forEach(e => e.onclick = () => {
+    snapshot(); const i = +e.dataset.del;
+    // Later stops move down a key, so the file stays c1..cN
+    for (let j = i; j < keys.length - 1; j++) gSet('colors', keys[j], S.g.colors[keys[j + 1]]);
+    gSet('colors', keys[keys.length - 1], null);
+    renderStops(); recomputeStops(); commit();
+  });
+}
+function buildSound() {
+  const host = $('paneSound');
+  let s = section('Input', '', 'every wallpaper', host);
+  const src = gSelect(s, 'Source', 'general', 'audio_source', [['', 'System default']], '');
+  fetch('/sources').then(r => r.json()).then(list => {
+    const cur = gVal('general', 'audio_source', '');
+    for (const n of new Set([...list, ...(cur ? [cur] : [])])) src.add(new Option(n.replace(/\.monitor$/, ' · output'), n));
+    src.value = cur;
+  }).catch(() => {});
+  gRow(s, {t: 'general', k: 'sensitivity', label: 'Sensitivity', min: 10, max: 1000, step: 10, int: true, dflt: 100, unit: '%'});
+  gChip(s, 'Auto sensitivity', 'general', 'autosens', true, 'cava adjusts the level to the music');
+  gSelect(s, 'Channels', 'general', 'channels', [['stereo', 'Stereo'], ['mono', 'Mono']], 'stereo', () => syncFields());
+  const mono = gSelect(s, 'Mono mix', 'general', 'mono_option', [['average', 'Average'], ['left', 'Left'], ['right', 'Right']], 'average');
+  ROWS.push(() => { mono.closest('.row').style.display = gVal('general', 'channels', 'stereo') === 'mono' ? '' : 'none'; });
+
+  s = section('Timing', '', '', host);
+  gRow(s, {t: 'general', k: 'framerate', label: 'Frame rate', min: 20, max: 165, step: 1, int: true, dflt: 60, unit: '', required: true});
+  gRow(s, {t: 'general', k: 'sleep_timer', label: 'Sleep after', min: 0, max: 30, step: 1, int: true, dflt: 0, unit: 's', hint: 'seconds of silence before cava sleeps; waking takes about half a second'});
+
+  s = section('Smoothing', '', '', host);
+  gRow(s, {t: 'smoothing', k: 'monstercat', label: 'Monstercat', min: 0, max: 3, step: 0.1, dflt: 0, hint: 'bars lean on their neighbours'});
+  gRow(s, {t: 'smoothing', k: 'noise_reduction', label: 'Noise cut', min: 0, max: 100, step: 1, int: true, dflt: 77, hint: 'higher is smoother and slower'});
+  chip(s, 'Waves', () => !!gVal('smoothing', 'waves', 0), on => gSet('smoothing', 'waves', on ? 1 : null), 'Monstercat as waves');
+  s.insertAdjacentHTML('beforeend', '<p class=note>Sound settings restart cava when saved.</p>');
+}
+
+// ---------------------------------------------------------------- panels
+function showTab(t) {
+  document.querySelectorAll('.dock [role=tab]').forEach(b => b.setAttribute('aria-selected', b.dataset.tab === t));
+  for (const [id, name] of [['paneShape', 'shape'], ['paneLook', 'look'], ['paneSound', 'sound']]) $(id).hidden = name !== t;
+  try { localStorage.setItem('tab', t); } catch {}
+}
+document.querySelectorAll('.dock [role=tab]').forEach(b => b.onclick = () => { document.body.classList.remove('folded'); showTab(b.dataset.tab); });
+try { const t = localStorage.getItem('tab'); if (t) showTab(t); } catch {}
+$('dockFold').onclick = () => { const f = document.body.classList.toggle('folded'); $('dockFold').textContent = f ? '⟨' : '⟩'; };
+function togglePop(id, btn) { const p = $(id), open = p.hidden; for (const o of ['viewPop', 'keysPop']) { $(o).hidden = true; } p.hidden = !open; for (const b of ['viewBtn', 'keysBtn']) $(b).setAttribute('aria-expanded', b === btn && open); }
+$('viewBtn').onclick = () => togglePop('viewPop', 'viewBtn');
+$('keysBtn').onclick = () => togglePop('keysPop', 'keysBtn');
+// The point editor sits beside the point it edits
+function placePointPop() {
+  const pop = $('pointPop'), q = S.fig === 'curve' ? selPoint() : null;
+  if (!q) { pop.hidden = true; return; }
+  pop.hidden = false;
+  const r = ui.getBoundingClientRect(), st = $('stage').getBoundingClientRect(), dock = $('dock').getBoundingClientRect();
+  const w = pop.offsetWidth, h = pop.offsetHeight;
+  let x = r.left - st.left + q.x * r.width + 18, y = r.top - st.top + q.y * r.height + 18;
+  const right = dock.left - st.left - 12;
+  if (x + w > right) x = r.left - st.left + q.x * r.width - w - 18;
+  pop.style.left = clamp(x, 12, Math.max(12, right - w)) + 'px';
+  pop.style.top = clamp(y, 12, st.height - h - 12) + 'px';
+}
+addEventListener('resize', placePointPop);
 
 // ---------------------------------------------------------------- inspector
 // Every numeric field is one row: label, slider, value, and a reset that
@@ -761,10 +1000,13 @@ const FIELDS = {
     {k: 'margin_x', label: 'Margin x', min: 0, max: 800, step: 1, int: true, group: 'circle', unit: 'px'},
     {k: 'margin_y', label: 'Margin y', min: 0, max: 800, step: 1, int: true, group: 'circle', unit: 'px'},
   ],
+  style: [
+    {k: 'radius', label: 'Round tips', min: 0, max: 0.5, step: 0.01, hint: 'bars and curve'},
+    {k: 'blocks', label: 'Blocks', min: 0, max: 32, step: 1, int: true, hint: 'segments a full bar splits into; 0 is solid'},
+  ],
   finish: [
     {k: 'opacity', label: 'Opacity', min: 0, max: 1, step: 0.01},
     {k: 'matte', label: 'Matte', min: 0, max: 1, step: 0.01},
-    {k: 'radius', label: 'Round tips', min: 0, max: 0.5, step: 0.01, hint: 'bars and curve'},
   ],
 };
 const ROWS = [];
@@ -793,15 +1035,26 @@ function changed(def) {
 }
 function syncFields() { ROWS.forEach(f => f()); refreshCount(); refreshAnchors(); refreshGrow(); }
 
-function section(title, cls, aside) {
+function section(title, cls, aside, host) {
   const s = document.createElement('section');
   s.className = 'sec ' + (cls || '');
   s.innerHTML = `<h2>${title}${aside ? `<span class=aside>${aside}</span>` : ''}</h2>`;
-  $('inspector').appendChild(s); return s;
+  (host || $('paneShape')).appendChild(s); return s;
+}
+// A toggle chip for a wallpaper field: get() reads the effective value,
+// set(on) writes it
+function chip(host, label, get, set, title) {
+  const b = document.createElement('button'); b.className = 'chip'; b.textContent = label; if (title) b.title = title;
+  const sync = () => b.setAttribute('aria-pressed', !!get());
+  b.onclick = () => { snapshot(); set(!get()); sync(); styleNote(); drawUI(); if (!S.view.play) drawPreview(0); commit(); };
+  let row = host.querySelector(':scope > .chips:last-child');
+  if (!row) { row = document.createElement('div'); row.className = 'chips'; row.style.margin = '6px 0 2px'; host.appendChild(row); }
+  row.appendChild(b); ROWS.push(sync); sync(); return b;
 }
 let countEl;
 function buildInspector() {
-  $('inspector').innerHTML = ''; ROWS.length = 0;
+  for (const id of ['paneShape', 'paneLook', 'paneSound', 'layersCard', 'pointPop', 'viewPop', 'keysPop']) $(id).innerHTML = '';
+  ROWS.length = 0;
   // Figure: the count first, with where it comes from
   let s = section('Bars', '');
   countEl = document.createElement('div'); countEl.className = 'readout'; s.appendChild(countEl);
@@ -816,6 +1069,7 @@ function buildInspector() {
   countCurve.querySelector('#curveTotalReset').onclick = () => { snapshot(); delete S.curve.bars; refreshCount(); commit(); drawUI(); };
   const note = document.createElement('p'); note.className = 'note'; note.id = 'countNote'; s.appendChild(note);
   FIELDS.bars.forEach(d => { const w = document.createElement('div'); w.className = 'fig-bars'; s.appendChild(w); row(d, w); });
+  if (S.ctx.scheme) gChip(s, 'Follow the shell\'s bar count', 'scheme', 'bars', false, 'Every wallpaper that sets no count of its own', () => { S.ctx.defaults = {...(S.ctx.defaults || {}), follow_shell_bars: !!gVal('scheme', 'bars', false)}; refreshCount(); drawUI(); });
 
   // Placement: drag on the image, or set exactly here
   s = section('Placement', 'fig-bars', 'drag the band to move it');
@@ -834,8 +1088,8 @@ function buildInspector() {
   place.querySelectorAll('[data-anchor]').forEach(b => b.onclick = () => { snapshot(); S.circle.anchor = b.dataset.anchor; delete S.circle.position; syncFields(); drawUI(); commit(); });
   FIELDS.margins.forEach(d => { const w = document.createElement('div'); w.className = 'margin-row'; s.appendChild(w); row(d, w); });
 
-  // Curve: layers and the link grid
-  s = section('Layers', 'fig-curve', 'paths above, occluders below');
+  // Curve: layers float on the left, over the image they describe
+  s = section('Layers', '', 'paths above, occluders below', $('layersCard'));
   s.innerHTML += `<div class=layers id=pathList></div><div class=btns><button class="btn small" id=addPath>+ Path</button><button class="btn small ghost" id=pathUp title="Move up: lower frequencies">↑</button><button class="btn small ghost" id=pathDown title="Move down: higher frequencies">↓</button><button class="btn small ghost" id=delPath>Delete</button></div>
     <div class=layers id=occList style="margin-top:12px"></div><div class=btns><button class="btn small" id=addSky>+ Skyline</button><button class="btn small" id=addShape>+ Shape</button><button class="btn small ghost" id=delOcc>Delete</button></div>
     <table class=grid-links id=links></table><p class=note>A cell cuts that path by that occluder. Striped cells follow the default: a path that picks none is cut by all.</p>`;
@@ -851,7 +1105,17 @@ function buildInspector() {
     commit(); renderLayers(); drawUI(); tools();
   };
 
-  s = section('Path', 'fig-curve', '');
+  s = section('Line tools', '', 'the selected layer', $('layersCard'));
+  s.innerHTML += `<div class=btns><button class="btn small" id=thin title="Drop points that barely bend the line">Thin points</button><button class="btn small" id=snap title="Pull the line onto the strongest edge near it">Snap to edge</button><button class="btn small ghost" id=clearList>Clear</button></div>
+    <div class=row style="margin-top:6px"><label>Thin ε</label><input type=range min=1 max=30 step=1 value=6 id=thinEps><output id=thinEpsV>6</output><span></span></div>
+    <div class=row><label>Snap reach</label><input type=range min=3 max=40 step=1 value=12 id=snapR><output id=snapRV>12</output><span></span></div>
+    <div class=row><label>Smoothness</label><input type=range min=1 max=24 step=1 value=6 id=snapLam><output id=snapLamV>6</output><span></span></div>`;
+  for (const id of ['thinEps', 'snapR', 'snapLam']) $(id).oninput = e => { $(id + 'V').textContent = e.target.value; };
+  $('thin').onclick = () => { const L = activeList(); if (!L) return; snapshot(); const t = rdp(L, +$('thinEps').value); L.splice(0, L.length, ...t); S.sel = -1; commit(); drawUI(); };
+  $('snap').onclick = snapActive;
+  $('clearList').onclick = () => { const L = activeList(); if (!L) return; snapshot(); L.length = 0; S.sel = -1; commit(); drawUI(); };
+
+  s = section('Path', 'fig-curve', 'the selected one');
   s.id = 'pathSec';
   const pathRows = [
     {k: 'height', label: 'Reach', min: 0.01, max: 0.6, step: 0.005, def: () => S.curve.height ?? RENDER.path_height},
@@ -885,11 +1149,10 @@ function buildInspector() {
   s.appendChild(fitRow);
   $('fitSel').onchange = e => { snapshot(); S.curve.fit = e.target.value; commit(); drawBase(); drawUI(); };
 
-  s = section('Point', 'fig-curve', 'alt-drag sets the angle');
+  s = section('Point', '', 'alt-drag sets the angle', $('pointPop'));
   s.id = 'pointSec';
   s.innerHTML += `<div class=row><label>Scale</label><input type=range min=0.1 max=1.5 step=0.05 id=pScale><output id=pScaleV></output><span></span></div>
-    <div class=row><label>Angle</label><input type=range min=-180 max=180 step=1 id=pAngle><output id=pAngleV></output><button class=reset id=pAngleReset title="Follow the path">↺</button></div>
-    <p class=note id=pointNote>Click a point to edit it. Shift-click always adds; right-click deletes.</p>`;
+    <div class=row><label>Angle</label><input type=range min=-180 max=180 step=1 id=pAngle><output id=pAngleV></output><button class=reset id=pAngleReset title="Follow the path">↺</button></div>`;
   $('pScale').addEventListener('pointerdown', snapshot);
   $('pScale').oninput = e => { const q = selPoint(); if (!q) return; q.s = +e.target.value; refreshPoint(); drawUI(); };
   $('pScale').onchange = commit;
@@ -898,26 +1161,25 @@ function buildInspector() {
   $('pAngle').onchange = commit;
   $('pAngleReset').onclick = () => { const q = selPoint(); if (!q) return; snapshot(); q.a = null; refreshPoint(); commit(); drawUI(); };
 
-  s = section('Edit', 'fig-curve', 'the active list');
-  s.innerHTML += `<div class=btns><button class="btn small" id=thin title="Drop points that barely bend the line">Thin points</button><button class="btn small" id=snap title="Pull the line onto the strongest edge near it">Snap to edge</button><button class="btn small ghost" id=clearList>Clear</button></div>
-    <div class=row style="margin-top:6px"><label>Thin ε</label><input type=range min=1 max=30 step=1 value=6 id=thinEps><output id=thinEpsV>6</output><span></span></div>
-    <div class=row><label>Snap reach</label><input type=range min=3 max=40 step=1 value=12 id=snapR><output id=snapRV>12</output><span></span></div>
-    <div class=row><label>Smoothness</label><input type=range min=1 max=24 step=1 value=6 id=snapLam><output id=snapLamV>6</output><span></span></div>`;
-  for (const id of ['thinEps', 'snapR', 'snapLam']) $(id).oninput = e => { $(id + 'V').textContent = e.target.value; };
-  $('thin').onclick = () => { const L = activeList(); if (!L) return; snapshot(); const t = rdp(L, +$('thinEps').value); L.splice(0, L.length, ...t); S.sel = -1; commit(); drawUI(); };
-  $('snap').onclick = snapActive;
-  $('clearList').onclick = () => { const L = activeList(); if (!L) return; snapshot(); L.length = 0; S.sel = -1; commit(); drawUI(); };
+  // Look: style, finish, x-ray, colours
+  s = section('Style', '', '', $('paneLook'));
+  FIELDS.style.forEach(d => { const w = document.createElement('div'); if (d.k === 'radius') w.className = 'no-circle'; s.appendChild(w); row(d, w); });
+  const mirrorChip = chip(s, 'Mirror', () => !!val('bars', 'mirror'), on => { if (on) S.bars.mirror = true; else delete S.bars.mirror; }, 'Bars reach both ways from their line');
+  mirrorChip.classList.add('no-circle');
+  chip(s, 'Colours along the row', () => val('bars', 'gradient') === 'row', on => { if (on) S.bars.gradient = 'row'; else delete S.bars.gradient; }, 'Instead of up each bar');
+  const cost = document.createElement('p'); cost.className = 'note'; cost.id = 'styleCost'; s.appendChild(cost);
 
-  s = section('Finish', '');
+  s = section('Finish', '', '', $('paneLook'));
   FIELDS.finish.forEach(d => row(d, s));
 
   // The x-ray
-  s = section('X-ray', '', 'bars show an image');
+  s = section('X-ray', '', 'bars show a picture', $('paneLook'));
   row({k: 'reveal', label: 'Reveal', min: 0, max: 1, step: 0.01, hint: 'how much of the image replaces the gradient'}, s);
   const src = document.createElement('div'); src.className = 'row';
   src.innerHTML = `<label>Image</label><select id=revealSrc style="grid-column:2/4"></select><input type=file id=revealPick accept="image/png,image/jpeg,image/webp,image/gif,image/avif" hidden>`;
   s.appendChild(src);
   fillRevealSources();
+  chip(s, 'Follow the beat', () => !!val('bars', 'reveal_pulse'), on => { if (on) S.bars.reveal_pulse = true; else delete S.bars.reveal_pulse; }, 'Quiet bars keep the gradient, loud ones show the picture');
   $('revealSrc').onchange = e => {
     if (e.target.value === 'pick') { e.target.value = S.reveal.source; $('revealPick').click(); return; }
     snapshot(); S.reveal.source = e.target.value; S.reveal.changed = true; revealSourceChanged(); commit();
@@ -937,7 +1199,10 @@ function buildInspector() {
     s.appendChild(el); ROWS.push(sync); sync();
   }
 
-  s = section('View', '');
+  buildColours();
+  buildSound();
+
+  s = section('View', '', '', $('viewPop'));
   s.innerHTML += `<div class=chips><button class=chip id=vFrame>Screen frame</button><button class=chip id=vHandles>Handles</button></div>
     <div class=row style="margin-top:6px"><label>Dim image</label><input type=range min=0 max=0.9 step=0.05 id=vDim><output id=vDimV></output><span></span></div>
     <div class=row><label>Line width</label><input type=range min=1 max=12 step=1 id=vLw><output id=vLwV></output><span></span></div>
@@ -948,10 +1213,17 @@ function buildInspector() {
   $('vFrame').onclick = () => { S.view.frame = !S.view.frame; refreshViewChips(); drawBase(); };
   $('vHandles').onclick = () => { S.view.handles = !S.view.handles; refreshViewChips(); drawUI(); };
 
-  s = section('Keys', '');
+  s = section('Keys', '', '', $('keysPop'));
   s.innerHTML += `<p class=note style="line-height:1.9"><b>V</b> add/move · <b>P</b> paint · <b>O</b> occluder · <b>[ ]</b> path · <b>Delete</b> point · <b>Esc</b> deselect<br><b>Ctrl Z</b> undo · <b>Ctrl Shift Z</b> redo · <b>Ctrl S</b> save · <b>0</b> fit · <b>Space</b> pause · wheel zoom · middle-drag pan</p>`;
 
-  renderLayers(); refreshPoint(); syncFields(); refreshViewChips(); refreshPathChips();
+  renderLayers(); refreshPoint(); syncFields(); refreshViewChips(); refreshPathChips(); styleNote();
+}
+// The one style that costs anything noticeable says so, only while it is on
+function styleNote() {
+  const n = $('styleCost'); if (!n) return;
+  const on = val('bars', 'mirror') && S.fig !== 'circle';
+  n.innerHTML = on ? 'Mirror<span class=cost>2× pixels</span> draws each bar twice as tall.' : '';
+  n.style.display = on ? '' : 'none';
 }
 function escapeHtml(s) { return s.replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c])); }
 
@@ -979,7 +1251,7 @@ function selPoint() { const L = activeList(); return !S.occEdit && L && S.sel >=
 function refreshPoint() {
   const q = selPoint(), sec = $('pointSec'); if (!sec) return;
   for (const id of ['pScale', 'pAngle']) $(id).disabled = !q;
-  $('pointNote').style.display = q ? 'none' : '';
+  placePointPop();
   if (q) { $('pScale').value = q.s; $('pScaleV').textContent = (+q.s).toFixed(2); $('pAngle').value = q.a ?? 0; $('pAngleV').textContent = q.a == null ? 'path' : q.a + '°'; }
 }
 function renderLayers() {
@@ -1053,6 +1325,8 @@ function setFigure(f, quiet) {
   document.querySelectorAll('.fig-bars').forEach(e => e.style.display = f === 'bars' ? '' : 'none');
   document.querySelectorAll('.fig-circle').forEach(e => e.style.display = f === 'circle' ? '' : 'none');
   document.querySelectorAll('.fig-curve').forEach(e => e.style.display = f === 'curve' ? '' : 'none');
+  document.querySelectorAll('.no-circle').forEach(e => e.style.display = f === 'circle' ? 'none' : '');
+  styleNote();
   refreshCount(); syncFields(); drawBase(); drawUI(); if (!S.view.play) drawPreview(0);
   if (!quiet) commit();
 }
@@ -1218,6 +1492,14 @@ async function save() {
   if (S.fig === 'curve' && !S.paths.some(p => p.pts.length >= 2)) { toast('A curve needs a path of at least two points', true); return; }
   const btn = $('save'); btn.disabled = true; btn.firstChild.textContent = 'Saving…';
   try {
+    // config.toml first; cavawall reloads once, at the end
+    const diff = globalDiff(), wall = wallpaperDirty();
+    if (diff.length) {
+      const r = await fetch('/global', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({set: diff, reload: !wall})}).then(r => r.json());
+      if (!r.ok) throw new Error(r.error || 'config.toml was refused');
+      S.g0 = JSON.stringify(S.g);
+      if (!wall) { toast(`Saved · cavawall ${r.applied}`); setTimeout(refreshLive, 900); return; }
+    }
     // The reveal image first, so cavawall finds it when it reloads
     if (val('bars', 'reveal') > 0 && S.reveal.canvas && (S.reveal.changed || !S.ctx.reveal_baked)) {
       const r = await fetch('/reveal', {method: 'POST', body: encodeQoi(S.reveal.canvas)}).then(r => r.json());
@@ -1233,13 +1515,14 @@ async function save() {
     toast(`Saved · cavawall ${r.applied}`);
     setTimeout(refreshLive, 900);
   } catch (e) { toast('Save failed: ' + e.message, true); }
-  btn.firstChild.textContent = 'Save & apply'; status();
+  finally { btn.firstChild.textContent = 'Save & apply'; status(); }
 }
 $('save').onclick = save;
 addEventListener('beforeunload', e => { if (isDirty()) { e.preventDefault(); e.returnValue = ''; } });
 
 // ---------------------------------------------------------------- status
-function isDirty() { return saved && (JSON.stringify(payload()) !== saved || S.reveal.changed && val('bars', 'reveal') > 0); }
+function wallpaperDirty() { return JSON.stringify(payload()) !== saved || S.reveal.changed && val('bars', 'reveal') > 0; }
+function isDirty() { return saved && (wallpaperDirty() || globalDiff().length > 0); }
 function status() {
   const dirty = isDirty();
   $('save').disabled = !dirty; $('dirty').textContent = dirty ? '● unsaved changes' : 'saved'; $('dirty').classList.toggle('on', !!dirty);
@@ -1262,7 +1545,6 @@ function refreshLive() { fetch('/context').then(r => r.json()).then(c => { S.ctx
 setInterval(refreshLive, 10000);
 let toastT = 0;
 function toast(msg, bad) { const t = $('toast'); t.textContent = msg; t.className = 'toast show' + (bad ? ' bad' : ''); clearTimeout(toastT); toastT = setTimeout(() => t.className = 'toast', bad ? 5000 : 2600); }
-$('panelToggle').onclick = () => document.body.classList.toggle('panel');
 
 // ---------------------------------------------------------------- keys
 addEventListener('keydown', e => {
@@ -1280,7 +1562,8 @@ addEventListener('keydown', e => {
     case '[': if (S.fig === 'curve') { S.cur = (S.cur + S.paths.length - 1) % S.paths.length; S.occEdit = false; S.sel = -1; renderLayers(); syncFields(); refreshPathChips(); drawUI(); } break;
     case ']': if (S.fig === 'curve') { S.cur = (S.cur + 1) % S.paths.length; S.occEdit = false; S.sel = -1; renderLayers(); syncFields(); refreshPathChips(); drawUI(); } break;
     case 'Delete': case 'Backspace': { const L = activeList(); if (S.fig === 'curve' && L && S.sel >= 0) { snapshot(); L.splice(S.sel, 1); S.sel = -1; commit(); refreshPoint(); drawUI(); } break; }
-    case 'Escape': S.sel = -1; refreshPoint(); drawUI(); break;
+    case 'Escape': S.sel = -1; $('viewPop').hidden = $('keysPop').hidden = true; refreshPoint(); drawUI(); break;
+    case '?': togglePop('keysPop', 'keysBtn'); break;
     case '0': fitView(); break;
     case ' ': e.preventDefault(); $('play').click(); break;
     default: return;
