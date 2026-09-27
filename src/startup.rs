@@ -163,12 +163,16 @@ pub(crate) fn run() {
         libc::signal(libc::SIGINT, on_terminate as *const () as libc::sighandler_t);
     }
 
-    let config_str = fs::read_to_string(&config_filename)
-        .unwrap_or_else(|e| panic!("unable to read {}: {e}", config_filename.display()));
-    let config: Config = match toml::from_str(&config_str) {
-        Ok(config) => config,
-        Err(error) => panic!("Error parsing config: {}", error.message()),
-    };
+    // A typo in a hand-edited file is the likeliest failure here: said with
+    // the file, line and column toml reports, then exit 1, never a panic
+    let config_str = fs::read_to_string(&config_filename).unwrap_or_else(|e| {
+        eprintln!("cavawall: cannot read {}: {e}", config_filename.display());
+        exit(1);
+    });
+    let config: Config = toml::from_str(&config_str).unwrap_or_else(|e| {
+        eprintln!("cavawall: {}: {e}", config_filename.display());
+        exit(1);
+    });
     // The bar count is startup-only: it is written into the spawned cava's
     // config and sizes the instance buffers, so a change re-execs
     let follow_bars = config.scheme.as_ref().and_then(|s| s.bars).unwrap_or(false);
