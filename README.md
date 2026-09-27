@@ -167,6 +167,7 @@ per-wallpaper settings to `wallpapers/<key>.toml` beside it. The annotated
 | `colors.*` | gradient stops, base to tip |
 | `scheme.colors`, `scheme.bars` | follow the shell's palette and bar count |
 | `smoothing.*` | passed to cava |
+| `notify.*` | desktop notifications for errors, crashes, starts and stops, and how they are sent |
 
 `CAVAWALL_OUTPUT=<name>` overrides the monitor without touching the file,
 `CAVAWALL_DEBUG=1` reports placement and the exact config handed to cava, and

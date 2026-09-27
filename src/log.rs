@@ -88,6 +88,7 @@ pub fn init() {
         let msg = format!("panic{place}: {what}");
         say(&msg);
         exited(&msg);
+        crate::notify::send(crate::app_config::NotifyEvent::Crash, &format!("crashed: {what}. `cavawall log` has the details"));
         PANICKED.store(true, Ordering::Relaxed);
     }));
     for sig in [libc::SIGSEGV, libc::SIGBUS, libc::SIGILL, libc::SIGFPE, libc::SIGABRT] {
@@ -113,10 +114,24 @@ pub fn exited(reason: &str) {
     let _ = fs::write(last_exit_path(), line);
 }
 
+/// How the previous instance ended, if that was a crash: a crash cannot
+/// report itself, so the next start does
+pub fn previous_crash() -> Option<String> {
+    let text = fs::read_to_string(last_exit_path()).ok()?;
+    let line = text.trim();
+    if line.ends_with("(reported)") || !(line.contains("crashed:") || line.contains("panic")) {
+        return None;
+    }
+    // Once: a reload or the next start must not report it again
+    let _ = fs::write(last_exit_path(), format!("{line} (reported)\n"));
+    Some(line.to_owned())
+}
+
 /// Say it, record it as the reason, exit 1
 pub fn fatal(msg: &str) -> ! {
     say(msg);
     exited(msg);
+    crate::notify::send(crate::app_config::NotifyEvent::Error, msg);
     std::process::exit(1);
 }
 

@@ -193,3 +193,13 @@ gradient_color_8 = '#f38ba8'
 # the raw visualization is very noisy, this factor adjusts the integral and gravity filters to keep the signal smooth
 # 1 will be very slow and smooth, 0 will be fast but noisy.
 # noise_reduction = 0.77
+
+# Desktop notifications. Absent: errors and crashes, sent through your
+# notification daemon (notify-send), or Hyprland's own when there is none.
+# A crash cannot report itself, so the next start does.
+# [notify]
+# enabled = true
+# via = "auto"                     # auto | dbus | hyprland | command
+# command = ["my-notifier", "--app", "cavawall"]   # via = "command"; the message is appended
+# events = ["error", "crash"]      # also "start", "stop"
+

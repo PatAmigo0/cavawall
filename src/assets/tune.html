@@ -256,7 +256,7 @@ function load(W, ctx) {
   else S.out = {w: screen.width || 1920, h: screen.height || 1080};
   S.fig = W.mode || ctx.defaults?.mode || 'bars';
   const cfg = ctx.config || {};
-  S.g = {general: {...(cfg.general || {})}, smoothing: {...(cfg.smoothing || {})}, colors: {...(cfg.colors || {})}, scheme: {...(cfg.scheme || {})}};
+  S.g = {general: {...(cfg.general || {})}, smoothing: {...(cfg.smoothing || {})}, colors: {...(cfg.colors || {})}, scheme: {...(cfg.scheme || {})}, notify: {...(cfg.notify || {})}};
   S.g0 = JSON.stringify(S.g);
   S.bars = {...(W.bars || {})};
   S.circle = {...(W.circle || {})};
@@ -835,7 +835,7 @@ function gVal(table, key, dflt) { const v = S.g[table]?.[key]; return v ?? dflt;
 function gSet(table, key, v) { S.g[table] = S.g[table] || {}; if (v == null) delete S.g[table][key]; else S.g[table][key] = v; }
 function globalDiff() {
   const was = JSON.parse(S.g0 || '{}'), out = [];
-  for (const t of ['general', 'smoothing', 'colors', 'scheme']) {
+  for (const t of ['general', 'smoothing', 'colors', 'scheme', 'notify']) {
     const a = was[t] || {}, b = S.g[t] || {};
     for (const k of new Set([...Object.keys(a), ...Object.keys(b)]))
       if (JSON.stringify(a[k]) !== JSON.stringify(b[k])) out.push([t, k, b[k] ?? null]);
@@ -946,6 +946,19 @@ function buildSound() {
   gRow(s, {t: 'smoothing', k: 'noise_reduction', label: 'Noise cut', min: 0, max: 100, step: 1, int: true, dflt: 77, hint: 'higher is smoother and slower'});
   chip(s, 'Waves', () => !!gVal('smoothing', 'waves', 0), on => gSet('smoothing', 'waves', on ? 1 : null), 'Monstercat as waves');
   s.insertAdjacentHTML('beforeend', '<p class=note>Saving restarts cava with these settings.</p>');
+
+  // Notifications: whether, how, and for which events
+  s = section('Notifications', '', 'every wallpaper', host);
+  gChip(s, 'Notify me', 'notify', 'enabled', true, 'Errors and crashes raise a desktop notification');
+  gSelect(s, 'Send with', 'notify', 'via', [['auto', 'Automatic'], ['dbus', 'Notification daemon'], ['hyprland', 'Hyprland'], ['command', 'My command']], 'auto');
+  const EVENTS = [['error', 'Errors'], ['crash', 'Crashes'], ['start', 'Starts'], ['stop', 'Stops']];
+  const events = () => gVal('notify', 'events', ['error', 'crash']);
+  for (const [ev, label] of EVENTS) chip(s, label, () => events().includes(ev), on => {
+    const next = EVENTS.map(e => e[0]).filter(e => e === ev ? on : events().includes(e));
+    const dflt = next.length === 2 && next.includes('error') && next.includes('crash');
+    gSet('notify', 'events', dflt ? null : next);
+  });
+  s.insertAdjacentHTML('beforeend', '<p class=note>Automatic uses your notification daemon (Caelestia, mako, dunst, swaync) and falls back to Hyprland.</p>');
 }
 
 // ---------------------------------------------------------------- panels

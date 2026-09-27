@@ -175,6 +175,16 @@ pub(crate) fn run() {
         .unwrap_or_else(|e| fatal!("cannot read {}: {e}", config_filename.display()));
     let config: Config = toml::from_str(&config_str)
         .unwrap_or_else(|e| fatal!("{}: {e}", config_filename.display()));
+    cavawall::notify::configure(config.notify.as_ref());
+    if let Some(crash) = cavawall::log::previous_crash() {
+        say!("the previous instance crashed: {crash}");
+        cavawall::notify::send(NotifyEvent::Crash, "the previous run crashed. `cavawall log last-exit` says how");
+    }
+    if env::var_os("CAVAWALL_REEXEC").is_some() {
+        env::remove_var("CAVAWALL_REEXEC");
+    } else {
+        cavawall::notify::send(NotifyEvent::Start, "started");
+    }
     // Colours are checked here, once, so a typo is a message naming the key
     // rather than a panic wherever the value is first used
     let bad_colour = |hex: &str| app_config::try_color_from_hex(hex, 1.0).is_none();

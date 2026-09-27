@@ -15,6 +15,44 @@ pub struct Config {
     /// hash; no entry for the current wallpaper means fall back to bars rather
     /// than draw a path authored for a different image
     pub curves: Option<HashMap<String, CurveConfig>>,
+    /// Desktop notifications for errors, crashes and, if asked, starts and
+    /// stops. Absent means errors and crashes, sent the automatic way
+    pub notify: Option<NotifyConfig>,
+}
+
+/// `[notify]`: whether, how and for what cavawall raises notifications
+#[derive(Serialize, Deserialize, Debug, Default, Clone)]
+pub struct NotifyConfig {
+    pub enabled: Option<bool>,
+    pub via: Option<NotifyVia>,
+    /// For `via = "command"`: the program and its leading arguments; the
+    /// message is appended as the last one
+    pub command: Option<Vec<String>>,
+    pub events: Option<Vec<NotifyEvent>>,
+}
+
+/// How a notification is delivered
+#[derive(Serialize, Deserialize, Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum NotifyVia {
+    /// notify-send when it is installed, else Hyprland's own
+    #[default]
+    Auto,
+    /// The desktop notification daemon, through notify-send: Caelestia,
+    /// mako, dunst, swaync and the rest
+    Dbus,
+    /// hyprctl notify
+    Hyprland,
+    Command,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum NotifyEvent {
+    Start,
+    Stop,
+    Error,
+    Crash,
 }
 
 /// Coordinates are authored to four places; f32 widened to f64 is not.
