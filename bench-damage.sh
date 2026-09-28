@@ -4,9 +4,6 @@
 # One binary, one variable: CAVAWALL_NO_DAMAGE=1 restores full-surface damage.
 # Comparing two builds would measure the builds as well as the change.
 #
-# fullscreen-watch is stopped first. It restarts cavawall on `workspace` and
-# `focusedmon` events, so switching to a clean workspace mid-run would kill the
-# instance being measured and silently replace it with another.
 set -u
 BIN="$HOME/.local/bin/cavawall"
 SECS=${SECS:-30}
@@ -15,11 +12,7 @@ H=$(pgrep -x Hyprland | head -1) || { echo "no Hyprland"; exit 1; }
 HZ=$(getconf CLK_TCK)
 ticks() { awk '{print $14+$15}' /proc/$H/stat; }
 
-echo ":: stopping fullscreen-watch and any running cavawall"
-# -f with the full path, not -x: /proc comm is capped at 15 characters, so
-# "fullscreen-watch" never matches -x and the watcher would keep running. The
-# bracket keeps the pattern from matching this script's own command line
-pkill -f "^$HOME/.local/bin/fullscreen-watc[h]\$" 2>/dev/null
+echo ":: stopping the running cavawall"
 pkill -x cavawall 2>/dev/null
 sleep 1
 
@@ -44,6 +37,5 @@ done
 rm -f "$log"
 
 echo ":: restoring"
-setsid --fork "$HOME/.local/bin/fullscreen-watch" >/dev/null 2>&1
-setsid --fork "$HOME/.local/bin/cavawall-launch"  >/dev/null 2>&1
-echo ":: done - fullscreen-watch and cavawall restarted"
+setsid --fork "$HOME/.local/bin/cavawall-launch" >/dev/null 2>&1
+echo ":: done - cavawall restarted"

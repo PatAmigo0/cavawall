@@ -1,9 +1,8 @@
 //! Edit the current wallpaper's settings and write them to its own file.
 //!
 //! A separate binary on purpose. cavawall's argv must stay exactly `[binary]` -
-//! the launcher, cavawall-theme and fullscreen-watch all identify the process
-//! by an exact match, so a `--edit-curve` flag would have broken all three at
-//! once. This ships and installs alongside it and touches none of that
+//! the launcher and cavawall-theme identify the process by an exact match, so
+//! a `--edit-curve` flag would have broken both. This ships and installs alongside it and touches none of that
 //!
 //! The UI is a page served to the browser rather than a window: clicking points
 //! on an image is what a browser is already good at, and cavawall has no input
@@ -490,7 +489,7 @@ fn audio_sources() -> Vec<String> {
 /// Store this wallpaper's settings, replacing its file, then apply them
 ///
 /// A running instance re-execs in place, which keeps its pid and its
-/// environment - fullscreen-watch's output pin included. Only when none is
+/// environment - a `cavawall move` pin included. Only when none is
 /// running is one started, through the launcher, detached
 fn save(key: &str, json: &[u8]) -> Result<(PathBuf, String), String> {
     let incoming: WallpaperConfig = serde_json::from_slice(json).map_err(|e| e.to_string())?;
