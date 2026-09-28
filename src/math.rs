@@ -20,3 +20,10 @@ pub fn fma(a: f32, b: f32, c: f32) -> f32 {
         a * b + c
     }
 }
+
+/// `a` to `b` by `t`, fused: `(b - a) * t + a` rounds once
+#[inline(always)]
+#[must_use]
+pub fn lerp(a: f32, b: f32, t: f32) -> f32 {
+    fma(b - a, t, a)
+}
