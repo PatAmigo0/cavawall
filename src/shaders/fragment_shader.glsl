@@ -83,7 +83,11 @@ void main() {
         c.a *= clamp(r - length(q) + 0.5, 0.0, 1.0);
     }
 #endif
+#ifdef MATTE
     c.rgb = mix(c.rgb, MatteColor, Matte);
+#endif
+#ifdef OPACITY
     c.a *= Opacity;
+#endif
     fragColor = c;
 }

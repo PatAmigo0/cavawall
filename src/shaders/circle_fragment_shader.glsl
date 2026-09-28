@@ -56,7 +56,9 @@ void main() {
     int index = min(int(findex), last_pair);
     vec4 c = mix(gradient_colors[index], gradient_colors[index + 1], findex - float(index));
     // Radial alpha ramp, applied on top of whatever alpha the stop carries
+#ifdef RAMP
     c.a *= mix(InnerAlpha, OuterAlpha, t);
+#endif
 #ifdef REVEAL
 #ifdef REVEAL_PULSE
     float reveal = RevealMix * smoothstep(0.1, 0.8, vPeak);
@@ -65,7 +67,11 @@ void main() {
 #endif
     c.rgb = mix(c.rgb, texture(Reveal, fma(gl_FragCoord.xy, RevealMap.xy, RevealMap.zw)).rgb, reveal);
 #endif
+#ifdef MATTE
     c.rgb = mix(c.rgb, MatteColor, Matte);
+#endif
+#ifdef OPACITY
     c.a *= Opacity;
+#endif
     fragColor = c;
 }
