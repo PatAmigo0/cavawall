@@ -25,13 +25,13 @@ uniform vec2 PathOffset;
 // Output width over height. The normal is unit length in PIXELS, which NDC
 // stretches by this in x, so both vectors are mapped back before scaling:
 // otherwise a leaning bar tilts further than its normal and shears
-uniform float Aspect;
+uniform vec2 Aspect;
 // 0 at the base, 1 at the tip; the gradient and the alpha ramp run along it
 out float vRadial;
 flat out uint vMask;
 #ifdef GRADIENT_ROW
 // 0 at the first bar, 1 at the last
-uniform float Count;
+uniform float InvCount;
 out float vAlong;
 #endif
 #ifdef REVEAL_PULSE
@@ -60,8 +60,8 @@ void main() {
     float side = corner.y;
 #endif
     vRadial = side * height;
-    vec2 across = vec2(t.x, t.y * Aspect) * g.x;
-    vec2 along = vec2(n.x / Aspect, n.y) * g.y;
+    vec2 across = vec2(t.x, t.y * Aspect.x) * g.x;
+    vec2 along = vec2(n.x * Aspect.y, n.y) * g.y;
     vec2 p = fma(along, vec2(vRadial), fma(across, vec2(corner.x - 0.5), s.xy));
     gl_Position = vec4(fma(p, PathScale, PathOffset), 0.0, 1.0);
 #ifdef ROUND
@@ -69,7 +69,7 @@ void main() {
     vLocal = vec2((corner.x - 0.5) * vSize.x, side * vSize.y);
 #endif
 #ifdef GRADIENT_ROW
-    vAlong = (float(gl_InstanceID) + corner.x) / Count;
+    vAlong = (float(gl_InstanceID) + corner.x) * InvCount;
 #endif
 #ifdef REVEAL_PULSE
     vPeak = height;

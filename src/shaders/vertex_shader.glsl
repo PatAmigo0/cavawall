@@ -17,7 +17,7 @@ uniform float Grow;
 out float vLevel;
 #ifdef GRADIENT_ROW
 // 0 at the first bar's left edge, 1 at the last bar's right
-uniform float Count;
+uniform float InvCount;
 out float vAlong;
 #endif
 #ifdef REVEAL_PULSE
@@ -43,7 +43,7 @@ void main() {
     gl_Position = vec4(x, Grow * fma(vLevel, 2.0, -1.0), 0.0, 1.0);
 #endif
 #ifdef GRADIENT_ROW
-    vAlong = (float(gl_InstanceID) + corner.x) / Count;
+    vAlong = (float(gl_InstanceID) + corner.x) * InvCount;
 #endif
 #ifdef REVEAL_PULSE
     vPeak = height;

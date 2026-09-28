@@ -18,7 +18,7 @@ uniform float RadialSpan;
 out float vRadial;
 #ifdef GRADIENT_ROW
 // 0 at twelve o'clock, 1 all the way round
-uniform float Count;
+uniform float InvCount;
 out float vAlong;
 #endif
 #ifdef REVEAL_PULSE
@@ -32,7 +32,7 @@ void main() {
     // spectrum then reads clockwise from twelve o'clock
     gl_Position = vec4(r * sin(theta), r * cos(theta), 0.0, 1.0);
 #ifdef GRADIENT_ROW
-    vAlong = (float(gl_InstanceID) + corner.x) / Count;
+    vAlong = (float(gl_InstanceID) + corner.x) * InvCount;
 #endif
 #ifdef REVEAL_PULSE
     vPeak = height;

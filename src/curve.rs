@@ -258,6 +258,13 @@ impl Occluder {
 #[must_use]
 pub fn occluder_triangles(occluders: &[Occluder], fit: Fit) -> Vec<MaskVertex> {
     let mut out = Vec::new();
+    occluder_triangles_into(&mut out, occluders, fit);
+    out
+}
+
+/// `occluder_triangles` into a buffer kept between placements
+pub fn occluder_triangles_into(out: &mut Vec<MaskVertex>, occluders: &[Occluder], fit: Fit) {
+    out.clear();
     for (i, o) in occluders.iter().enumerate().take(16) {
         let poly = o.polygon(fit);
         let bit = 1u32 << i;
@@ -266,7 +273,6 @@ pub fn occluder_triangles(occluders: &[Occluder], fit: Fit) -> Vec<MaskVertex> {
             out.extend([poly[0], w[0], w[1]].map(|pos| MaskVertex { pos, bit }));
         }
     }
-    out
 }
 
 /// One vertex of an occluder triangle, laid out as the mask pass reads it:
@@ -287,9 +293,19 @@ pub struct MaskVertex {
 /// bucket the highest floor wins, since each hides everything under its own
 #[must_use]
 pub fn occluder_floor(occluders: &[Occluder], common: u16, fit: Fit) -> Vec<f32> {
-    let mut floor = vec![0.0f32; HORIZON_BUCKETS];
+    let (mut floor, mut own) = (Vec::new(), Vec::new());
+    occluder_floor_into(&mut floor, &mut own, occluders, common, fit);
+    floor
+}
+
+/// `occluder_floor` into buffers kept between placements: `floor` gets the
+/// answer, `own` is scratch for one outline at a time
+pub fn occluder_floor_into(floor: &mut Vec<f32>, own: &mut Vec<f32>, occluders: &[Occluder], common: u16, fit: Fit) {
+    floor.clear();
+    floor.resize(HORIZON_BUCKETS, 0.0);
+    own.clear();
+    own.resize(HORIZON_BUCKETS, f32::NAN);
     let last = (HORIZON_BUCKETS - 1) as f32;
-    let mut own = vec![f32::NAN; HORIZON_BUCKETS];
     for (i, o) in occluders.iter().enumerate().take(16) {
         if o.closed || common & (1 << i) == 0 {
             continue;
@@ -311,13 +327,12 @@ pub fn occluder_floor(occluders: &[Occluder], common: u16, fit: Fit) -> Vec<f32>
                 *slot = if slot.is_nan() { low } else { slot.min(low) };
             }
         }
-        for (f, o) in floor.iter_mut().zip(&own) {
+        for (f, o) in floor.iter_mut().zip(own.iter()) {
             if !o.is_nan() {
                 *f = f.max(*o);
             }
         }
     }
-    floor
 }
 
 /// Split `count` bars between paths: whatever `fixed` asks for, and the rest
@@ -396,9 +411,18 @@ pub fn allocate(lengths: &[f32], fixed: &[Option<u32>], count: u32) -> Vec<u32> 
 /// curve costs only its own bars. Each bar carries its path's occluder mask
 #[must_use]
 pub fn build(paths: &[PathSpec], count: u32, aspect: f32, fit: Fit) -> Vec<Bar> {
+    let mut out = Vec::new();
+    build_into(&mut out, paths, count, aspect, fit);
+    out
+}
+
+/// `build` into a buffer kept between placements: a move to another output
+/// refills the same allocation instead of growing a new one
+pub fn build_into(out: &mut Vec<Bar>, paths: &[PathSpec], count: u32, aspect: f32, fit: Fit) {
+    out.clear();
     let usable: Vec<&PathSpec> = paths.iter().filter(|p| p.controls.len() >= 2).collect();
     if usable.is_empty() {
-        return Vec::new();
+        return;
     }
     // Densified once and kept: measuring a path and sampling it are the same
     // walk, and build runs on every placement
@@ -421,7 +445,7 @@ pub fn build(paths: &[PathSpec], count: u32, aspect: f32, fit: Fit) -> Vec<Bar> 
         &usable.iter().map(|p| p.bars).collect::<Vec<_>>(),
         count,
     );
-    let mut out = Vec::with_capacity(count as usize);
+    out.reserve(count as usize);
     for ((spec, a), n) in usable.iter().zip(&arcs).zip(counts) {
         let bars = sample_arc(a, n as usize, spec.flip, spec.upright, aspect);
         out.extend(bars.into_iter().map(|(s, scale)| Bar {
@@ -432,7 +456,6 @@ pub fn build(paths: &[PathSpec], count: u32, aspect: f32, fit: Fit) -> Vec<Bar> 
             mask: spec.mask,
         }));
     }
-    out
 }
 
 /// A full-volume bar's four corners in the output's NDC, placed exactly as the
