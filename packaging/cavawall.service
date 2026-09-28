@@ -1,0 +1,24 @@
+[Unit]
+Description=cavawall - audio visualiser on the wallpaper
+Documentation=https://github.com/PatAmigo0/cavawall
+# Needs the compositor, and goes with the session at logout
+PartOf=graphical-session.target
+After=graphical-session.target
+# A config that fails every start gives up here instead of looping
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+# `cavawall service install` rewrites this line to the binary it runs from
+ExecStart=/usr/bin/cavawall
+Restart=on-failure
+RestartSec=2
+# `cavawall kill` means stay down; a crash or panic still comes back
+RestartPreventExitStatus=SIGKILL
+# SIGTERM to cavawall alone: it paints a clear frame and reaps its own cava,
+# and only what outlives the timeout is killed
+KillMode=mixed
+TimeoutStopSec=5
+
+[Install]
+WantedBy=graphical-session.target

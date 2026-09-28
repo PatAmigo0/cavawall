@@ -160,6 +160,31 @@ terminal attached.
 Stop it with `cavawall stop` or SIGTERM, never SIGKILL: the exit path clears
 the surface, and a hard kill can leave the last frame on the wallpaper.
 
+### Starting with the session
+
+Where the session is systemd's - uwsm, or a display manager that starts
+`graphical-session.target` - make it a user service:
+
+```bash
+cavawall service install   # write the unit for this binary, enable, start
+cavawall service remove    # disable it and delete the unit
+```
+
+systemd then starts it with the session, restarts it after a crash (giving up
+after five failed starts in a minute), stops it cleanly at logout, and keeps
+its output in `journalctl --user -u cavawall`. `cavawall start` and `restart`
+go through the service once it is installed. The AUR package ships the same
+unit in `/usr/lib/systemd/user/`, so there `systemctl --user enable --now
+cavawall` is enough.
+
+Anywhere else, start it from the compositor:
+
+```
+exec-once = cavawall                 # Hyprland
+exec cavawall                        # Sway
+spawn-at-startup "cavawall"          # niri
+```
+
 On Hyprland, skip the layer's map animation, or a restarted shell can strand
 it mid-fade:
 

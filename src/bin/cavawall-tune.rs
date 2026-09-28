@@ -500,7 +500,7 @@ fn audio_sources() -> Vec<String> {
 ///
 /// A running instance re-execs in place, which keeps its pid and its
 /// environment - a `cavawall move` pin included. Only when none is
-/// running is one started, through the launcher, detached
+/// running is one started, through `cavawall start`, detached
 fn save(key: &str, json: &[u8]) -> Result<(PathBuf, String), String> {
     let incoming: WallpaperConfig = serde_json::from_slice(json).map_err(|e| e.to_string())?;
     let dir = config_dir();
@@ -511,7 +511,8 @@ fn save(key: &str, json: &[u8]) -> Result<(PathBuf, String), String> {
         Err(e) => {
             // Silent rather than absent: replace it, since it cannot reload
             let wedged = matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut);
-            match detached(&mut Command::new(launcher())) {
+            let how = if wedged { "restart" } else { "start" };
+            match detached(Command::new(cavawall::helper("cavawallctl")).arg(how)) {
                 Ok(_) if wedged => "restarted".to_owned(),
                 Ok(_) => "started".to_owned(),
                 Err(e) => format!("not started: {e}"),
@@ -521,10 +522,3 @@ fn save(key: &str, json: &[u8]) -> Result<(PathBuf, String), String> {
     Ok((WallpaperConfig::path(&dir, key), applied))
 }
 
-/// The launcher next to this binary's usual home, else whatever PATH finds
-fn launcher() -> PathBuf {
-    let local = std::env::var_os("HOME")
-        .map(|h| PathBuf::from(h).join(".local/bin/cavawall-launch"))
-        .filter(|p| p.exists());
-    local.unwrap_or_else(|| PathBuf::from("cavawall-launch"))
-}
