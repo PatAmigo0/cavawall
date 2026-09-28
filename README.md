@@ -123,12 +123,15 @@ cd cavawall
 ./install.sh
 ```
 
-`install.sh` builds, installs to `~/.local/bin` and copies the annotated
+`install.sh` builds, installs `cavawall` to `~/.local/bin` with its helpers in
+`~/.local/lib/cavawall`, and copies the annotated
 [`config.toml`](config.toml) to `~/.config/cavawall/` unless you already have
 one. By hand:
 
 ```bash
 cargo install --path . --root ~/.local
+mkdir -p ~/.local/lib/cavawall
+mv ~/.local/bin/{cavawallctl,cavawall-tune} ~/.local/lib/cavawall/
 mkdir -p ~/.config/cavawall && cp config.toml ~/.config/cavawall/
 ```
 

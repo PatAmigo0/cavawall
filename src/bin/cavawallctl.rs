@@ -107,15 +107,6 @@ fn own_name() -> &'static str {
     }
 }
 
-/// A binary installed beside this one, else whatever PATH finds
-fn sibling(name: &str) -> std::path::PathBuf {
-    std::env::current_exe()
-        .ok()
-        .and_then(|e| e.parent().map(|d| d.join(name)))
-        .filter(|p| p.exists())
-        .unwrap_or_else(|| name.into())
-}
-
 /// The lock names the running instance even when its socket is wedged, which
 /// is the only case this is for. The exe is checked before signalling, so a
 /// recycled pid belonging to something else is left alone.
@@ -173,7 +164,7 @@ fn main() {
             return;
         }
         Command::Tune => {
-            let tune = sibling("cavawall-tune");
+            let tune = cavawall::helper("cavawall-tune");
             let err = Proc::new(&tune).exec();
             eprintln!("{name}: cannot run {}: {err}", tune.display());
             exit(127);

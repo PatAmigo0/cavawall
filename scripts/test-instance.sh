@@ -8,7 +8,7 @@
 # cava, so nothing has to play sound. The command runs with these set:
 #
 #   PID     the test instance
-#   CTL     cavawallctl aimed at it: $CTL status, $CTL reload
+#   CTL     cavawall aimed at it: $CTL status, $CTL reload
 #   SILENT  touch it to silence the fake cava, rm it to make noise again
 #
 # With no command it runs until ctrl-c. The EXIT trap stops the instance and
@@ -25,7 +25,7 @@ RT=$(mktemp -d "${XDG_RUNTIME_DIR:-/tmp}/cavawall-test.XXXXXX")
 chmod 700 "$RT"
 mkdir "$RT/bin" && ln -s "$here/fake-cava" "$RT/bin/cava"
 export SILENT=$RT/silent
-export CTL="env XDG_RUNTIME_DIR=$RT cavawallctl"
+export CTL="env XDG_RUNTIME_DIR=$RT $bin"
 display=${WAYLAND_DISPLAY:-wayland-1}
 case $display in /*) ;; *) display=${XDG_RUNTIME_DIR:-/run/user/$UID}/$display ;; esac
 
@@ -33,7 +33,7 @@ cleanup() {
     # The command's own children too: a trap that stops the instance but
     # leaves the command running has cleaned up nothing
     if [ -n "${CMD:-}" ]; then pkill -TERM -P "$CMD" 2>/dev/null; kill -TERM "$CMD" 2>/dev/null; fi
-    [ -n "${PID:-}" ] && XDG_RUNTIME_DIR=$RT timeout 3 cavawallctl stop >/dev/null 2>&1
+    [ -n "${PID:-}" ] && XDG_RUNTIME_DIR=$RT timeout 3 "$bin" stop >/dev/null 2>&1
     sleep 0.3
     for p in $(pgrep -f "^$bin --config $cfg$"); do kill -TERM "$p" 2>/dev/null; done
     sleep 0.3

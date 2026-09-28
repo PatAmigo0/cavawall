@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Build and install cavawall, cavawall-tune and cavawallctl to ~/.local/bin,
+# Build and install cavawall to ~/.local/bin and its helpers to
+# ~/.local/lib/cavawall, off PATH,
 # and give a first run a config to start from
 set -euo pipefail
 
@@ -16,6 +17,11 @@ if [ -n "${CAVAWALL_PORTABLE:-}" ]; then
 else
   cargo install --path . --force --root "$INSTALL_DIR"
 fi
+# `cavawall <command>` finds them here, so only cavawall completes on PATH
+mkdir -p "$INSTALL_DIR/lib/cavawall"
+for b in cavawallctl cavawall-tune; do
+  mv -f "$INSTALL_DIR/bin/$b" "$INSTALL_DIR/lib/cavawall/$b"
+done
 
 # Only when there is none: an existing config is someone's settings, and may
 # be a symlink into a dotfiles repo that cp would write straight through

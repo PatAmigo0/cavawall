@@ -12,11 +12,7 @@ pub fn dispatch() {
         None => {}
         Some(flag) if flag == "--config" => {}
         Some(first) => {
-            let ctl = std::env::current_exe()
-                .ok()
-                .and_then(|e| e.parent().map(|d| d.join("cavawallctl")))
-                .filter(|p| p.exists())
-                .unwrap_or_else(|| "cavawallctl".into());
+            let ctl = cavawall::helper("cavawallctl");
             let err = std::process::Command::new(&ctl)
                 .arg(first)
                 .args(args)
