@@ -976,6 +976,8 @@ function buildSound() {
   const cur = gVal('general', 'preferred_output', '');
   gSelect(s, 'Monitor', 'general', 'preferred_output',
     [['', 'Automatic (external first)'], ...[...new Set([...outs, ...(cur ? [cur] : [])])].map(o => [o, o])], '');
+  gSelect(s, 'GPU driver', 'general', 'gl_driver',
+    [['', 'Find it (loads every driver)'], ['nvidia', 'NVIDIA only'], ['mesa', 'Mesa only (Intel, AMD)']], '');
   gSelect(s, 'Fullscreen', 'general', 'on_fullscreen',
     [['ignore', 'Keep drawing'], ['move', 'Move to a free monitor'], ['pause', 'Pause']], 'ignore');
   s.insertAdjacentHTML('beforeend', '<p class=note>Moving or pausing hides the bars and suspends cava while a fullscreen window covers the monitor.</p>');

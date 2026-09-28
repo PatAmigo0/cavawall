@@ -533,6 +533,11 @@ pub struct GeneralConfig {
     /// free one (pausing when none is left), `pause` in place, or `ignore`,
     /// the default. On Hyprland; off costs nothing, not even a socket
     pub on_fullscreen: Option<FullscreenPolicy>,
+    /// `nvidia` or `mesa`: load only that EGL driver. Unset, the loader loads
+    /// every installed one to find which fits - Mesa's pulls in LLVM, 7 MB of
+    /// memory an NVIDIA machine never uses. Set it to the GPU the compositor
+    /// renders on
+    pub gl_driver: Option<String>,
     /// "mono" or "stereo", passed through to cava's [output] section
     ///
     /// cava defaults to stereo, and in stereo mode it does not give each bar a

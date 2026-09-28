@@ -60,7 +60,7 @@ void main() {
 #else
     float reveal = RevealMix;
 #endif
-    c.rgb = mix(c.rgb, texture(Reveal, gl_FragCoord.xy * RevealMap.xy + RevealMap.zw).rgb, reveal);
+    c.rgb = mix(c.rgb, texture(Reveal, fma(gl_FragCoord.xy, RevealMap.xy, RevealMap.zw)).rgb, reveal);
 #endif
     c.rgb = mix(c.rgb, MatteColor, Matte);
     c.a *= Opacity;

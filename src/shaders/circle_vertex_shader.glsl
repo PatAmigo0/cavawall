@@ -25,9 +25,9 @@ out float vAlong;
 flat out float vPeak;
 #endif
 void main() {
-    float theta = AngleStep * float(gl_InstanceID) + (corner.x * 2.0 - 1.0) * AngularHalf;
+    float theta = fma(AngleStep, float(gl_InstanceID), fma(corner.x, 2.0, -1.0) * AngularHalf);
     vRadial = corner.y * height;
-    float r = InnerRadius + vRadial * RadialSpan;
+    float r = fma(vRadial, RadialSpan, InnerRadius);
     // sin/cos swapped against the usual convention so bar 0 points up: the
     // spectrum then reads clockwise from twelve o'clock
     gl_Position = vec4(r * sin(theta), r * cos(theta), 0.0, 1.0);

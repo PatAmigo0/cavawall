@@ -55,15 +55,15 @@ void main() {
 #ifdef MIRROR
     // Both ways from the path. Signed, so it interpolates across the path;
     // the fragment stage takes abs
-    float side = corner.y * 2.0 - 1.0;
+    float side = fma(corner.y, 2.0, -1.0);
 #else
     float side = corner.y;
 #endif
     vRadial = side * height;
     vec2 across = vec2(t.x, t.y * Aspect) * g.x;
     vec2 along = vec2(n.x / Aspect, n.y) * g.y;
-    vec2 p = s.xy + across * (corner.x - 0.5) + along * vRadial;
-    gl_Position = vec4(p * PathScale + PathOffset, 0.0, 1.0);
+    vec2 p = fma(along, vec2(vRadial), fma(across, vec2(corner.x - 0.5), s.xy));
+    gl_Position = vec4(fma(p, PathScale, PathOffset), 0.0, 1.0);
 #ifdef ROUND
     vSize = vec2(g.x * 0.5 * OutputPx.x, height * g.y * 0.5 * OutputPx.y);
     vLocal = vec2((corner.x - 0.5) * vSize.x, side * vSize.y);

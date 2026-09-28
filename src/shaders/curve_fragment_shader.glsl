@@ -73,14 +73,14 @@ void main() {
 #else
     float reveal = RevealMix;
 #endif
-    c.rgb = mix(c.rgb, texture(Reveal, gl_FragCoord.xy * RevealMap.xy + RevealMap.zw).rgb, reveal);
+    c.rgb = mix(c.rgb, texture(Reveal, fma(gl_FragCoord.xy, RevealMap.xy, RevealMap.zw)).rgb, reveal);
 #endif
 #ifdef ROUND
     float r = min(Radius * vSize.x, vSize.y);
 #ifdef MIRROR
-    vec2 q = vec2(abs(vLocal.x) - (0.5 * vSize.x - r), abs(vLocal.y) - (vSize.y - r));
+    vec2 q = vec2(abs(vLocal.x) - fma(0.5, vSize.x, -r), abs(vLocal.y) - (vSize.y - r));
 #else
-    vec2 q = vec2(abs(vLocal.x) - (0.5 * vSize.x - r), vLocal.y - (vSize.y - r));
+    vec2 q = vec2(abs(vLocal.x) - fma(0.5, vSize.x, -r), vLocal.y - (vSize.y - r));
 #endif
     if (q.x > 0.0 && q.y > 0.0) {
         // One pixel of antialiasing across the arc
