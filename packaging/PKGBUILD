@@ -52,6 +52,7 @@ package() {
   install -Dm755 target/release/cavawall "$pkgdir/usr/bin/cavawall"
   install -Dm755 target/release/cavawall-tune "$pkgdir/usr/lib/cavawall/cavawall-tune"
   install -Dm755 target/release/cavawallctl "$pkgdir/usr/lib/cavawall/cavawallctl"
+  install -Dm644 packaging/cavawall.service "$pkgdir/usr/lib/systemd/user/cavawall.service"
   # Generated rather than checked in, so they cannot drift from the parser
   export CAVAWALL_AS=cavawall
   install -Dm644 <(target/release/cavawallctl completions fish) \

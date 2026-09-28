@@ -42,8 +42,21 @@ enum Command {
         #[command(subcommand)]
         what: Option<LogWhat>,
     },
+    /// Start at login as a systemd user service
+    Service {
+        #[command(subcommand)]
+        action: ServiceAction,
+    },
     /// Print a shell completion script
     Completions { shell: Shell },
+}
+
+#[derive(Subcommand)]
+enum ServiceAction {
+    /// Write the unit for this binary, enable it and hand the instance over
+    Install,
+    /// Disable the unit and delete the one install wrote
+    Remove,
 }
 
 #[derive(Subcommand)]
@@ -118,14 +131,45 @@ fn locked_pid() -> Option<i32> {
     exe.file_name()?.to_str()?.starts_with("cavawall").then_some(pid)
 }
 
-/// Detached, so it outlives the shell that asked for it.
-fn spawn_launcher() -> std::io::Result<()> {
-    let launcher = std::env::var_os("HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_default()
-        .join(".local/bin/cavawall-launch");
-    let mut cmd = Proc::new(if launcher.exists() { launcher.into() } else { std::ffi::OsString::from("cavawall-launch") });
+const UNIT: &str = "cavawall.service";
+
+fn systemctl(args: &[&str]) -> std::io::Result<bool> {
+    Proc::new("systemctl")
+        .arg("--user")
+        .args(args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+}
+
+/// A session that activates graphical-session.target - uwsm, a display
+/// manager's systemd session - is the only kind that has the Wayland
+/// environment in systemd's; anything else starts cavawall directly
+fn session_is_systemd() -> bool {
+    systemctl(&["is-active", "graphical-session.target"]).unwrap_or(false)
+}
+
+/// Installed as a user or system unit in a session that can run it, so
+/// systemd should own the process
+fn has_unit() -> bool {
+    session_is_systemd() && systemctl(&["cat", UNIT]).unwrap_or(false)
+}
+
+/// Through the service when there is one, so systemd tracks and restarts it;
+/// otherwise the daemon itself, detached so it outlives the shell
+fn launch() -> std::io::Result<()> {
+    if has_unit() {
+        return if systemctl(&["restart", UNIT])? {
+            Ok(())
+        } else {
+            Err(std::io::Error::other(format!("systemctl --user restart {UNIT} failed")))
+        };
+    }
+    let bin = cavawall::daemon().ok_or_else(|| std::io::Error::other("no cavawall binary found"))?;
+    let mut cmd = Proc::new(bin);
     cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    // SAFETY: setsid is async-signal-safe and touches only the child
     unsafe {
         cmd.pre_exec(|| {
             libc::setsid();
@@ -133,6 +177,77 @@ fn spawn_launcher() -> std::io::Result<()> {
         });
     }
     cmd.spawn().map(|_| ())
+}
+
+/// Asks the running instance to exit and waits up to 5s for it to go
+fn stop_running() -> bool {
+    request(&Request::Stop).is_err()
+        || (0..50).any(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            request(&Request::Status).is_err()
+        })
+}
+
+fn user_unit_path() -> std::path::PathBuf {
+    std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config")))
+        .unwrap_or_default()
+        .join("systemd/user")
+        .join(UNIT)
+}
+
+/// The packaged unit already names /usr/bin/cavawall; anything else gets a
+/// user copy naming the binary this helper belongs to
+fn service(action: &ServiceAction, name: &str) -> Result<&'static str, String> {
+    let path = user_unit_path();
+    // A link means something else manages the unit - a dotfiles repo, say
+    if path.is_symlink() {
+        return Err(format!("{} is a symlink, managed elsewhere; remove it first", path.display()));
+    }
+    match action {
+        ServiceAction::Install => {
+            if !session_is_systemd() {
+                return Err("this session does not activate graphical-session.target, so a user \
+                            service would never start; use the compositor's autostart instead \
+                            (Hyprland: exec-once = cavawall)"
+                    .to_owned());
+            }
+            let bin = cavawall::daemon().ok_or("no cavawall binary found")?;
+            let packaged = std::path::Path::new("/usr/lib/systemd/user").join(UNIT);
+            if !(bin == std::path::Path::new("/usr/bin/cavawall") && packaged.exists()) {
+                let unit = include_str!("../../packaging/cavawall.service")
+                    .replace("ExecStart=/usr/bin/cavawall", &format!("ExecStart={}", bin.display()));
+                std::fs::create_dir_all(path.parent().unwrap_or(&path))
+                    .and_then(|()| std::fs::write(&path, unit))
+                    .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+                systemctl(&["daemon-reload"]).map_err(|e| e.to_string())?;
+            }
+            if !systemctl(&["enable", UNIT]).map_err(|e| e.to_string())? {
+                return Err(format!("systemctl --user enable {UNIT} failed"));
+            }
+            // An instance started some other way would make the service's
+            // own stand down as a duplicate
+            if !stop_running() {
+                return Err(format!("the running instance did not stop; try `{name} kill`"));
+            }
+            if !systemctl(&["start", UNIT]).map_err(|e| e.to_string())? {
+                return Err(format!("installed, but it did not start: see `{name} log show`"));
+            }
+            Ok("installed and started; it now starts with the session")
+        }
+        ServiceAction::Remove => {
+            systemctl(&["disable", "--now", UNIT]).map_err(|e| e.to_string())?;
+            match std::fs::remove_file(&path) {
+                Ok(()) => {
+                    systemctl(&["daemon-reload"]).map_err(|e| e.to_string())?;
+                    Ok("removed")
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok("disabled"),
+                Err(e) => Err(format!("cannot remove {}: {e}", path.display())),
+            }
+        }
+    }
 }
 
 /// Errors to stderr, data to stdout, non-zero when the answer is no
@@ -178,12 +293,26 @@ fn main() {
                             println!("killed {pid}");
                         }
                     } else {
-                        eprintln!("cavawallctl: cannot kill {pid}: {}", std::io::Error::last_os_error());
+                        eprintln!("{name}: cannot kill {pid}: {}", std::io::Error::last_os_error());
                         exit(1);
                     }
                 }
                 None => {
-                    eprintln!("cavawallctl: no locked instance to kill");
+                    eprintln!("{name}: no locked instance to kill");
+                    exit(1);
+                }
+            }
+            return;
+        }
+        Command::Service { action } => {
+            match service(action, name) {
+                Ok(msg) => {
+                    if !cli.json {
+                        println!("{msg}");
+                    }
+                }
+                Err(e) => {
+                    eprintln!("{name}: {e}");
                     exit(1);
                 }
             }
@@ -192,24 +321,18 @@ fn main() {
         Command::Restart => {
             // Reload re-execs the same image, so a rebuilt binary needs the
             // process replaced rather than refreshed
-            if request(&Request::Stop).is_ok() {
-                let gone = (0..50).any(|_| {
-                    std::thread::sleep(std::time::Duration::from_millis(100));
-                    request(&Request::Status).is_err()
-                });
-                if !gone {
-                    eprintln!("cavawallctl: the running instance did not stop");
-                    exit(1);
-                }
+            if !stop_running() {
+                eprintln!("{name}: the running instance did not stop");
+                exit(1);
             }
-            match spawn_launcher() {
+            match launch() {
                 Ok(()) => {
                     if !cli.json {
                         println!("restarted");
                     }
                 }
                 Err(e) => {
-                    eprintln!("cavawallctl: cannot start: {e}");
+                    eprintln!("{name}: cannot start: {e}");
                     exit(1);
                 }
             }
@@ -222,14 +345,14 @@ fn main() {
                 }
                 return;
             }
-            match spawn_launcher() {
+            match launch() {
                 Ok(()) => {
                     if !cli.json {
                         println!("started");
                     }
                 }
                 Err(e) => {
-                    eprintln!("cavawallctl: cannot start: {e}");
+                    eprintln!("{name}: cannot start: {e}");
                     exit(1);
                 }
             }
@@ -249,6 +372,7 @@ fn main() {
         | Command::Kill
         | Command::Tune
         | Command::Log { .. }
+        | Command::Service { .. }
         | Command::Completions { .. } => {
             unreachable!("handled above")
         }
@@ -260,7 +384,7 @@ fn main() {
             if cli.json {
                 println!(r#"{{"ok":false,"error":"not running"}}"#);
             } else {
-                eprintln!("cavawallctl: not running ({e})");
+                eprintln!("{name}: not running ({e})");
             }
             exit(1);
         }
@@ -273,7 +397,7 @@ fn report(cli: &Cli, response: &Response) {
     if cli.json {
         println!("{}", serde_json::to_string(response).unwrap_or_default());
     } else if let Some(error) = &response.error {
-        eprintln!("cavawallctl: {error}");
+        eprintln!("{}: {error}", own_name());
     } else if let Some(data) = &response.data {
         for (k, v) in data.as_object().into_iter().flatten() {
             println!("{k:<15} {}", v.as_str().map_or_else(|| v.to_string(), str::to_owned));

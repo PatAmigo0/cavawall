@@ -65,8 +65,11 @@ matches the shell running it and kills your own command.
 
 ## Running it
 
-`~/.local/bin/cavawall-launch` is the only thing that should ever start the
-session's instance. It holds an flock and kills stale instances first.
+The session's instance runs as `cavawall.service` (`packaging/`, written per
+binary by `cavawall service install`) where the session activates
+`graphical-session.target`; `cavawall start`/`restart` go through it then, and
+start the binary directly anywhere else. The dotfiles' `cavawall-launch` is a
+thin wrapper over the same.
 
 **argv must stay exactly `[binary]`.** The launcher and `cavawall-theme.fish`
 identify this process by an exact argv match. New knobs go

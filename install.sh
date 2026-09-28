@@ -38,3 +38,4 @@ if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
 fi
 
 echo -e "\nDone! Run with: cavawall"
+echo "Start it with the session: cavawall service install (or your compositor's autostart)"

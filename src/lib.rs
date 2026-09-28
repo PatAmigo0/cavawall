@@ -25,3 +25,18 @@ pub fn helper(name: &str) -> std::path::PathBuf {
         .find(|p| p.exists())
         .unwrap_or_else(|| name.into())
 }
+
+/// The daemon, seen from a helper: bin/ beside the lib/cavawall it lives in,
+/// then beside it (target/release), then PATH. The directory is resolved but
+/// not the name, so the path stays the one scripts match on
+pub fn daemon() -> Option<std::path::PathBuf> {
+    let dir = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(std::path::Path::to_path_buf));
+    let near = dir.into_iter().flat_map(|d| [d.join("../../bin/cavawall"), d.join("cavawall")]);
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let on_path: Vec<_> = std::env::split_paths(&path).map(|d| d.join("cavawall")).collect();
+    near.chain(on_path)
+        .find(|p| p.is_file())
+        .and_then(|p| Some(p.parent()?.canonicalize().ok()?.join("cavawall")))
+}

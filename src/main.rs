@@ -780,12 +780,11 @@ impl AppState {
     /// reachable from here, so a fresh process is the only honest way to apply
     /// a new count - which is why colours update live and this does not
     ///
-    /// exec, rather than spawning cavawall-launch as everything else does. exec
-    /// keeps the PID, so every guard built on "is one running" stays true right
-    /// through the swap: the launcher's flock and 5s kill-wait. There is never a moment with zero or
-    /// two instances, so the stacking race that lock exists for cannot start
-    /// here. The environment carries over too, so a CAVAWALL_OUTPUT pin set by
-    /// `cavawall move` survives the restart
+    /// exec, rather than a stop and start. exec keeps the PID, so the service
+    /// sees its main process carry on and every guard built on "is one
+    /// running" stays true right through the swap - there is never a moment
+    /// with zero or two instances. The environment carries over too, so a
+    /// CAVAWALL_OUTPUT pin set by `cavawall move` survives the restart
     fn reexec(&mut self) {
         // On exec our Wayland connection closes exactly as it would on a kill
         self.clear_surface();
@@ -810,8 +809,8 @@ impl AppState {
             }
         }
 
-        // argv[0] before current_exe(): cavawall-launch execs us by absolute
-        // path, and after a `cargo install` over a running instance
+        // argv[0] before current_exe(): the service and `cavawall start` exec
+        // us by absolute path, and after a `cargo install` over a running instance
         // /proc/self/exe reads back as "<path> (deleted)", which will not exec.
         // Both are checked for existence so neither can hand over a dead path
         let program: Option<PathBuf> = env::args_os()
