@@ -50,15 +50,16 @@ check() {
 package() {
   cd "$pkgname"
   install -Dm755 target/release/cavawall "$pkgdir/usr/bin/cavawall"
-  install -Dm755 target/release/cavawall-tune "$pkgdir/usr/bin/cavawall-tune"
-  install -Dm755 target/release/cavawallctl "$pkgdir/usr/bin/cavawallctl"
-  # Generated rather than checked in, so they cannot drift from the parser.
+  install -Dm755 target/release/cavawall-tune "$pkgdir/usr/lib/cavawall/cavawall-tune"
+  install -Dm755 target/release/cavawallctl "$pkgdir/usr/lib/cavawall/cavawallctl"
+  # Generated rather than checked in, so they cannot drift from the parser
+  export CAVAWALL_AS=cavawall
   install -Dm644 <(target/release/cavawallctl completions fish) \
-    "$pkgdir/usr/share/fish/vendor_completions.d/cavawallctl.fish"
+    "$pkgdir/usr/share/fish/vendor_completions.d/cavawall.fish"
   install -Dm644 <(target/release/cavawallctl completions bash) \
-    "$pkgdir/usr/share/bash-completion/completions/cavawallctl"
+    "$pkgdir/usr/share/bash-completion/completions/cavawall"
   install -Dm644 <(target/release/cavawallctl completions zsh) \
-    "$pkgdir/usr/share/zsh/site-functions/_cavawallctl"
+    "$pkgdir/usr/share/zsh/site-functions/_cavawall"
   # Not into /etc: cavawall reads ~/.config/cavawall/config.toml and this is
   # the annotated example to copy from, not a system default it would load.
   install -Dm644 config.toml "$pkgdir/usr/share/cavawall/config.toml"

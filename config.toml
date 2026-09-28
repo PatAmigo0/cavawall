@@ -77,10 +77,10 @@ gap = 0.1
 # blocks = 12          # LED-style segments at full height
 # gradient = "row"     # colours along the row instead of up each bar
 # X-ray: bars show wallpapers/<key>.reveal.qoi instead of the gradient, 0 to
-# 1. cavawall-tune bakes that image; without it this does nothing.
+# 1. `cavawall tune` bakes that image; without it this does nothing.
 # reveal = 0.0
 # reveal_pulse = true  # quiet bars keep the gradient, loud ones show the picture
-# Where cavawall-tune keeps the pictures you pick for the x-ray
+# Where `cavawall tune` keeps the pictures you pick for the x-ray
 # reveal_dir = "~/Pictures/cavawall-xray"
 
 # Only read when mode = "circle". Every key is optional.
@@ -110,7 +110,7 @@ gap = 0.1
 # re-download must not silently point it at the wrong picture. A wallpaper
 # with no block here falls back to bars.
 #
-# Author these with `cavawall-tune` rather than by hand - it opens an editor
+# Author these with `cavawall tune` rather than by hand - it opens an editor
 # on the current wallpaper and writes the block itself.
 #
 # [curves.07cfa6d114ed3a98]

@@ -47,7 +47,7 @@ It gives the instance its own runtime dir - its own lock and control socket,
 so the session's cavawall is never touched - and `scripts/fake-cava` in place
 of cava, so nothing has to play sound and frames are loud and moving on
 demand (`touch $SILENT` makes them silent, to test parking). The command runs
-with `PID`, `CTL` (cavawallctl aimed at the test socket) and `SILENT` set.
+with `PID`, `CTL` (cavawall aimed at the test socket) and `SILENT` set.
 
 The EXIT/INT/TERM trap stops the instance, its cava and the command, and
 removes the runtime dir, however the command ends. **This matters because a
@@ -74,9 +74,11 @@ in `config.toml` or an env var (`CAVAWALL_OUTPUT`, `CAVAWALL_DEBUG`), never a
 CLI flag. `--config` exists for tests only. Any other first word is a command:
 `cli_help::dispatch` execs cavawallctl with it (and `CAVAWALL_AS=cavawall`, so
 help and completions say `cavawall`), which is why `cavawall tune` and
-`cavawall status` never reach the daemon.
+`cavawall status` never reach the daemon. The helpers install to
+`lib/cavawall/` beside `bin/`, off PATH; `cavawall::helper` finds them there,
+then beside the binary (`target/release`), then on PATH.
 
-**Stop with SIGTERM or `cavawallctl stop`, never SIGKILL.** The exit path
+**Stop with SIGTERM or `cavawall stop`, never SIGKILL.** The exit path
 paints one transparent frame and round-trips; a hard kill leaves the last bars
 burnt onto the wallpaper. cava is tied to us with `PR_SET_PDEATHSIG` and is
 killed on every exit path.
