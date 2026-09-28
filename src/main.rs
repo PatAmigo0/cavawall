@@ -1154,9 +1154,15 @@ impl AppState {
     }
 
     /// Hyprland said something that may cover or uncover a monitor
-    pub fn on_hypr(&mut self, events: &mut std::os::unix::net::UnixStream) {
-        if !hypr::relevant(events, &mut self.hypr_partial) {
-            return;
+    /// Returns false once the socket has closed, and the source must go
+    pub fn on_hypr(&mut self, events: &mut std::os::unix::net::UnixStream) -> bool {
+        match hypr::relevant(events, &mut self.hypr_partial) {
+            None => {
+                say!("Hyprland closed its event socket; fullscreen windows are no longer followed until a restart");
+                return false;
+            }
+            Some(false) => return true,
+            Some(true) => {}
         }
         // Unreadable is not "nothing covered": keep the last answer
         if let Some(now) = hypr::covered() {
@@ -1166,6 +1172,7 @@ impl AppState {
                 self.retarget(&qh);
             }
         }
+        true
     }
 
     /// Build a fresh layer surface on `output` and start drawing to it

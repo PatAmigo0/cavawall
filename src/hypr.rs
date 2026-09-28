@@ -46,16 +46,20 @@ pub fn events() -> Option<UnixStream> {
     Some(s)
 }
 
-/// Drain what the event socket holds; true when anything in it can change
-/// coverage. Lines are only ever matched, never trusted
-pub fn relevant(events: &mut UnixStream, partial: &mut Vec<u8>) -> bool {
+/// Drain what the event socket holds: Some(true) when anything in it can
+/// change coverage, None once Hyprland has closed it. A closed socket stays
+/// readable forever, so the caller must drop it rather than wait for more.
+/// Lines are only ever matched, never trusted
+pub fn relevant(events: &mut UnixStream, partial: &mut Vec<u8>) -> Option<bool> {
     let mut buf = [0u8; 4096];
     let mut hit = false;
     loop {
         match events.read(&mut buf) {
-            Ok(0) => break,
+            Ok(0) => return None,
             Ok(n) => partial.extend_from_slice(&buf[..n]),
-            Err(_) => break,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(_) => return None,
         }
     }
     while let Some(nl) = partial.iter().position(|&b| b == b'\n') {
@@ -64,7 +68,7 @@ pub fn relevant(events: &mut UnixStream, partial: &mut Vec<u8>) -> bool {
         hit |= WATCHED.iter().any(|w| w.as_bytes() == name);
         partial.drain(..=nl);
     }
-    hit
+    Some(hit)
 }
 
 /// Monitor names showing a fullscreen window right now. None when Hyprland
@@ -98,4 +102,25 @@ pub fn covered() -> Option<BTreeSet<String>> {
         }
     }
     Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::relevant;
+    use std::io::Write;
+    use std::os::unix::net::UnixStream;
+
+    #[test]
+    fn matches_only_watched_events_and_reports_a_closed_socket() {
+        let (mut tx, mut rx) = UnixStream::pair().expect("pair");
+        rx.set_nonblocking(true).expect("nonblocking");
+        let mut partial = Vec::new();
+        tx.write_all(b"activewindow>>kitty,title\nwindowtitle>>0x1\n").expect("write");
+        assert_eq!(relevant(&mut rx, &mut partial), Some(false), "title noise is not coverage");
+        tx.write_all(b"fullscreen>>1\nworkspa").expect("write");
+        assert_eq!(relevant(&mut rx, &mut partial), Some(true));
+        assert_eq!(partial, b"workspa", "a split line waits for its end");
+        drop(tx);
+        assert_eq!(relevant(&mut rx, &mut partial), None, "EOF is closed, not quiet");
+    }
 }

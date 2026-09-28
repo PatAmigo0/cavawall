@@ -1062,8 +1062,7 @@ pub(crate) fn run() {
         loop_handle
             .insert_source(Generic::new(events, Interest::READ, CalloopMode::Level), |_, events, state: &mut AppState| {
                 // SAFETY: the stream is only read, and only here
-                state.on_hypr(unsafe { events.get_mut() });
-                Ok(PostAction::Continue)
+                Ok(if state.on_hypr(unsafe { events.get_mut() }) { PostAction::Continue } else { PostAction::Remove })
             })
             .unwrap();
     }
