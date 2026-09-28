@@ -131,7 +131,10 @@ dispatch.
   buffer in the EGL config at all.
 - **Optional features are compile-time variants.** `radius` and `reveal` are
   `#define`d into the shaders at startup only when used, so a config without
-  them runs exactly the shaders it always did.
+  them runs exactly the shaders it always did. The finishes are the same:
+  `MATTE`, `OPACITY`, the circle and curve `RAMP` and the curve's `OCCLUDE`
+  test exist only when they would change a pixel. Every define combination
+  must compile and link - check all of them after touching a shader.
 
 ## Things that look wrong but are not
 

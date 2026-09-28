@@ -46,9 +46,11 @@ flat in float vPeak;
 out vec4 fragColor;
 void main() {
     // First, before any gradient work is spent on a fragment that is hidden
+#ifdef OCCLUDE
     if ((texelFetch(Occluders, ivec2(gl_FragCoord.xy), 0).r & vMask) != 0u) {
         discard;
     }
+#endif
 #ifdef MIRROR
     float t = clamp(abs(vRadial), 0.0, 1.0);
 #else
@@ -69,7 +71,9 @@ void main() {
     // configured stop twice
     int index = min(int(findex), last_pair);
     vec4 c = mix(gradient_colors[index], gradient_colors[index + 1], findex - float(index));
+#ifdef RAMP
     c.a *= mix(InnerAlpha, OuterAlpha, t);
+#endif
 #ifdef REVEAL
 #ifdef REVEAL_PULSE
     float reveal = RevealMix * smoothstep(0.1, 0.8, vPeak);
@@ -90,7 +94,11 @@ void main() {
         c.a *= clamp(r - length(q) + 0.5, 0.0, 1.0);
     }
 #endif
+#ifdef MATTE
     c.rgb = mix(c.rgb, MatteColor, Matte);
+#endif
+#ifdef OPACITY
     c.a *= Opacity;
+#endif
     fragColor = c;
 }

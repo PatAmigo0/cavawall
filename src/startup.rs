@@ -582,6 +582,13 @@ pub(crate) fn run() {
     let blocks = bars_config.blocks.unwrap_or(0).min(256);
     let along_row = bars_config.gradient == Some(GradientAxis::Row);
     let pulse = bars_config.reveal_pulse.unwrap_or(false) && reveal_image.is_some();
+    // Finishes that would do nothing per pixel at their defaults are left
+    // out: a matte of 0, an opacity of 1, an alpha ramp from 1 to 1, and an
+    // occluder test on a curve with no occluders
+    let matte = bars_config.matte.unwrap_or(0.0).clamp(0.0, 1.0) > 0.0;
+    let opacity = bars_config.opacity.unwrap_or(1.0).clamp(0.0, 1.0) < 1.0;
+    let ramp = mode != Mode::Bars && !(circle.inner_alpha >= 1.0 && circle.outer_alpha >= 1.0);
+    let occlude = mode == Mode::Curve && active_curve.is_some_and(|c| !c.occlusion().shapes.is_empty());
     let mut defines = String::new();
     for (on, name) in [
         (round, "ROUND"),
@@ -590,6 +597,10 @@ pub(crate) fn run() {
         (blocks > 0, "BLOCKS"),
         (along_row, "GRADIENT_ROW"),
         (pulse, "REVEAL_PULSE"),
+        (matte, "MATTE"),
+        (opacity, "OPACITY"),
+        (ramp, "RAMP"),
+        (occlude, "OCCLUDE"),
     ] {
         if on {
             defines.push_str("#define ");
