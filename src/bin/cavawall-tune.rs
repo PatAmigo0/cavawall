@@ -456,6 +456,16 @@ fn edit_global(body: &[u8]) -> Result<String, String> {
             }
         }
     }
+    // A table the page emptied goes too, unless something is written in it
+    for (table, _, value) in &edit.set {
+        let empty = value.is_null()
+            && doc.get(table).and_then(|t| t.as_table()).is_some_and(|t| {
+                t.is_empty() && t.decor().prefix().and_then(|p| p.as_str()).is_none_or(|p| !p.contains('#'))
+            });
+        if empty {
+            doc.remove(table);
+        }
+    }
     let new = doc.to_string();
     toml::from_str::<Config>(&new).map_err(|e| format!("the result would not load: {e}"))?;
     let dir = real.parent().ok_or("config.toml has no directory")?;
