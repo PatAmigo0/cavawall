@@ -244,6 +244,11 @@ pub(crate) fn run() {
         .and_then(|w| w.mode)
         .or(config.general.mode)
         .unwrap_or_default();
+    // cava's rate, so startup-only like the bar count; cava refuses 0
+    let (framerate, framerate_from) = match per_wallpaper.as_ref().and_then(|w| w.framerate) {
+        Some(n) => (n.clamp(1, 360), "wallpaper"),
+        None => (config.general.framerate, "config"),
+    };
     let bars_config = per_wallpaper
         .as_ref()
         .and_then(|w| w.bars.as_ref())
@@ -326,7 +331,7 @@ pub(crate) fn run() {
     });
     let cava_config = CavaConfig {
         general: CavaGeneralConfig {
-            framerate: config.general.framerate,
+            framerate,
             bars: bar_count,
             autosens: config.general.autosens,
             sensitivity: config.general.sensitivity,
@@ -1017,6 +1022,8 @@ pub(crate) fn run() {
         background_color,
         config_path: config_filename.clone(),
         bars_from,
+        framerate,
+        framerate_from,
         bars_follow_shell,
         frame_pending: false,
         redraw: false,

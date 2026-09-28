@@ -13,8 +13,8 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
+use std::time::{Duration, SystemTime};
 
 use cavawall::app_config::{self, Config, WallpaperConfig};
 use cavawall::control::{self, Request};
@@ -32,6 +32,9 @@ const MAX_BODY: usize = 64 << 20;
 const IDLE: Duration = Duration::from_secs(10);
 
 /// What every connection needs, shared read-only between their threads
+/// What is being edited, cloned per request. `/switch` replaces it whole, so a
+/// request never pairs the new wallpaper with the old key
+#[derive(Clone)]
 struct Site {
     wallpaper: PathBuf,
     key: String,
@@ -74,11 +77,11 @@ fn main() {
     let _ = detached(Command::new("xdg-open").arg(&url));
     println!("cavawall-tune: ctrl-c when finished");
 
-    let site = Arc::new(Site {
+    let site = Arc::new(RwLock::new(Site {
         wallpaper,
         key,
         hosts: [format!("127.0.0.1:{port}"), format!("localhost:{port}")],
-    });
+    }));
     for stream in listener.incoming().flatten() {
         let site = Arc::clone(&site);
         // One thread per connection: a stalled one then stalls nothing else
@@ -138,7 +141,8 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> Option<Req> {
     Some(Req { method, path, host, origin, body })
 }
 
-fn handle(stream: TcpStream, site: &Site) {
+fn handle(stream: TcpStream, server: &RwLock<Site>) {
+    let site = &server.read().unwrap_or_else(PoisonError::into_inner).clone();
     let _ = stream.set_read_timeout(Some(IDLE));
     let _ = stream.set_write_timeout(Some(IDLE));
     let Ok(read_half) = stream.try_clone() else { return };
@@ -242,8 +246,52 @@ fn handle(stream: TcpStream, site: &Site) {
             };
             reply(&mut out, "200 OK", "application/json", body.to_string().as_bytes());
         }
+        // What is on screen now, so the page can offer to follow a change
+        ("GET", "/current") => {
+            let body = match on_screen() {
+                Some((path, key)) => serde_json::json!({
+                    "key": key,
+                    "name": path.file_name().map(|n| n.to_string_lossy().into_owned()),
+                }),
+                None => serde_json::json!({ "key": null }),
+            };
+            reply(&mut out, "200 OK", "application/json", body.to_string().as_bytes());
+        }
+        // Edit the wallpaper on screen from now on; the page reloads after
+        ("POST", "/switch") => {
+            let body = match on_screen() {
+                Some((wallpaper, key)) => {
+                    println!("cavawall-tune: now editing {}", wallpaper.display());
+                    let mut s = server.write().unwrap_or_else(PoisonError::into_inner);
+                    s.wallpaper = wallpaper;
+                    s.key.clone_from(&key);
+                    serde_json::json!({ "ok": true, "key": key })
+                }
+                None => serde_json::json!({ "ok": false, "error": "cannot tell which wallpaper is on screen" }),
+            };
+            reply(&mut out, "200 OK", "application/json", body.to_string().as_bytes());
+        }
         _ => reply(&mut out, "404 Not Found", "text/plain", b"no"),
     }
+}
+
+/// The wallpaper on screen and its content key. The key hashes the whole
+/// image and the page asks every few seconds, so it is kept until the path,
+/// size or mtime changes
+fn on_screen() -> Option<(PathBuf, String)> {
+    static LAST: Mutex<Option<(PathBuf, u64, SystemTime, String)>> = Mutex::new(None);
+    let path = curve::current_wallpaper().filter(|p| p.is_file())?;
+    let meta = std::fs::metadata(&path).ok()?;
+    let (len, mtime) = (meta.len(), meta.modified().ok()?);
+    let mut last = LAST.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some((p, l, m, key)) = last.as_ref() {
+        if *p == path && *l == len && *m == mtime {
+            return Some((path, key.clone()));
+        }
+    }
+    let key = curve::content_key(&path)?;
+    *last = Some((path.clone(), len, mtime, key.clone()));
+    Some((path, key))
 }
 
 const IMAGE_EXTENSIONS: [&str; 6] = ["png", "jpg", "jpeg", "webp", "gif", "avif"];

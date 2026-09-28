@@ -155,6 +155,11 @@ footer{display:flex;gap:14px;align-items:center;padding:5px 14px;border-top:1px 
 footer #status{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #dirty{font:11px var(--mono)}
 #dirty.on{color:var(--warn)}
+#wpAsk{position:fixed;inset:0;display:grid;place-items:center;background:rgba(0,0,0,.45);z-index:50}
+#wpAsk[hidden]{display:none}
+#wpAsk .card{background:var(--ink2);border:1px solid var(--line);border-radius:var(--r);padding:16px 18px;max-width:440px;box-shadow:0 12px 40px rgba(0,0,0,.5)}
+#wpAsk p{margin:0 0 14px}
+#wpAsk .acts{display:flex;gap:8px;justify-content:flex-end}
 .toast{position:fixed;left:50%;bottom:46px;transform:translate(-50%,20px);opacity:0;background:var(--ink2);border:1px solid var(--line);
   border-radius:9px;padding:8px 14px;box-shadow:0 10px 30px #0008;transition:transform .18s,opacity .18s;pointer-events:none}
 .toast.show{transform:translate(-50%,0);opacity:1}
@@ -207,6 +212,7 @@ footer #status{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   </section>
 </main>
 <footer><span id=status>Loading the wallpaper…</span><span class=grow></span><span id=dirty>saved</span></footer>
+<div id=wpAsk hidden role=dialog aria-modal=true aria-labelledby=wpAskText><div class=card><p id=wpAskText></p><div class=acts id=wpAskActs></div></div></div>
 <div class=toast id=toast role=status></div>
 <script>
 'use strict';
@@ -962,6 +968,12 @@ function buildSound() {
 
   s = section('Timing', '', '', host);
   gRow(s, {t: 'general', k: 'framerate', label: 'Frame rate', min: 20, max: 165, step: 1, int: true, dflt: 60, unit: '', required: true});
+  // This wallpaper's own rate, over the one above. Kept in its file, and
+  // cavawall changes rate with the wallpaper
+  chip(s, 'Own rate for this wallpaper', () => S.W.framerate != null,
+    on => { if (on) S.W.framerate = gVal('general', 'framerate', 60); else delete S.W.framerate; syncFields(); },
+    'Only this wallpaper; every other one keeps the frame rate above');
+  wallpaperRate(s);
   gRow(s, {t: 'general', k: 'sleep_timer', label: 'Sleep after', min: 0, max: 30, step: 1, int: true, dflt: 0, unit: 's', hint: 'seconds of silence before cava sleeps; waking takes about half a second'});
 
   s = section('Smoothing', '', '', host);
@@ -1637,8 +1649,70 @@ setInterval(refreshLive, 10000);
 let toastT = 0;
 function toast(msg, bad) { const t = $('toast'); t.textContent = msg; t.className = 'toast show' + (bad ? ' bad' : ''); clearTimeout(toastT); toastT = setTimeout(() => t.className = 'toast', bad ? 5000 : 2600); }
 
+// The slider for S.W.framerate, shown while the wallpaper has its own rate.
+// Not row(): that reads an unset value as 0, where here it inherits the
+// global rate
+function wallpaperRate(host) {
+  const el = document.createElement('div'); el.className = 'row';
+  el.innerHTML = '<label title="Frames per second for this wallpaper only">This wallpaper</label><input type=range min=20 max=165 step=1 aria-label="This wallpaper\'s frame rate"><output></output>';
+  const input = el.querySelector('input'), out = el.querySelector('output');
+  const sync = () => {
+    el.style.display = S.W.framerate == null ? 'none' : '';
+    const v = S.W.framerate ?? gVal('general', 'framerate', 60);
+    input.value = v; input.style.setProperty('--p', ((v - 20) / 145 * 100) + '%'); out.textContent = Math.round(v);
+  };
+  input.addEventListener('pointerdown', snapshot);
+  input.addEventListener('keydown', snapshot);
+  input.addEventListener('input', () => { S.W.framerate = Math.round(+input.value); sync(); status(); });
+  input.addEventListener('change', commit);
+  host.appendChild(el); ROWS.push(sync); sync();
+}
+
+// ---------------------------------------------------------------- wallpaper switch
+// The editor edits the wallpaper it opened on. When the one on screen changes,
+// offer to follow it, asking about unsaved edits first: following reloads the
+// page. Declining is remembered per wallpaper, so it asks once, not every poll
+const EDIT_KEY = '__KEY__';
+let declined = null;
+function ask(text, acts) {
+  $('wpAskText').textContent = text;
+  const box = $('wpAskActs'); box.innerHTML = '';
+  for (const [label, cls, fn] of acts) {
+    const b = document.createElement('button'); b.className = 'btn ' + cls; b.textContent = label;
+    b.onclick = () => { $('wpAsk').hidden = true; fn(); }; box.appendChild(b);
+  }
+  $('wpAsk').hidden = false; box.lastChild.focus();
+}
+async function follow() {
+  const r = await fetch('/switch', {method: 'POST'}).then(r => r.json()).catch(() => ({}));
+  if (!r.ok) { toast('Could not switch: ' + (r.error || 'no reply'), true); return; }
+  saved = null; // leaving on purpose: beforeunload must not ask again
+  location.reload();
+}
+function offerSwitch(cur) {
+  declined = cur.key;
+  ask(`The wallpaper changed to ${cur.name || cur.key}. Edit that one instead?`, [
+    ['Stay here', 'ghost', () => {}],
+    ['Switch', 'primary', () => {
+      if (!isDirty()) { follow(); return; }
+      ask('This wallpaper has unsaved changes.', [
+        ['Cancel', 'ghost', () => {}],
+        ['Discard', '', follow],
+        ['Save', 'primary', async () => { await save(); if (!isDirty()) follow(); }],
+      ]);
+    }],
+  ]);
+}
+setInterval(() => {
+  if (!$('wpAsk').hidden || document.hidden) return;
+  fetch('/current').then(r => r.json()).then(cur => {
+    if (cur.key && cur.key !== EDIT_KEY && cur.key !== declined) offerSwitch(cur);
+  }).catch(() => {});
+}, 3000);
+
 // ---------------------------------------------------------------- keys
 addEventListener('keydown', e => {
+  if (!$('wpAsk').hidden) { if (e.key === 'Escape') { e.preventDefault(); $('wpAskActs').firstChild.click(); } return; }
   const typing = /INPUT|SELECT|TEXTAREA/.test(e.target.tagName) && e.target.type !== 'range';
   const mod = e.ctrlKey || e.metaKey;
   if (mod && e.key.toLowerCase() === 's') { e.preventDefault(); if (isDirty()) save(); return; }
