@@ -771,11 +771,10 @@ impl AppState {
     ///
     /// exec, rather than spawning cavawall-launch as everything else does. exec
     /// keeps the PID, so every guard built on "is one running" stays true right
-    /// through the swap: the launcher's flock and 5s kill-wait, and
-    /// fullscreen-watch's instance count. There is never a moment with zero or
+    /// through the swap: the launcher's flock and 5s kill-wait. There is never a moment with zero or
     /// two instances, so the stacking race that lock exists for cannot start
-    /// here. The environment carries over too, so a CAVAWALL_OUTPUT that
-    /// fullscreen-watch set to move us to another monitor survives the restart
+    /// here. The environment carries over too, so a CAVAWALL_OUTPUT pin set by
+    /// `cavawall move` survives the restart
     fn reexec(&mut self) {
         // On exec our Wayland connection closes exactly as it would on a kill
         self.clear_surface();
@@ -994,8 +993,8 @@ impl AppState {
     /// Rank a connected output; lower wins, None means "not eligible at all".
     ///
     /// A pin excludes everything else outright rather than merely preferring
-    /// the pinned output - when fullscreen-watch says "eDP-1", falling back
-    /// to the monitor it just ruled out would defeat the point
+    /// the pinned output - when `cavawall move eDP-1` names a monitor, falling
+    /// back to another would defeat the point
     fn output_rank(&self, name: &str) -> Option<u8> {
         if self.on_fullscreen == FullscreenPolicy::Move && self.covered.contains(name) {
             return None;

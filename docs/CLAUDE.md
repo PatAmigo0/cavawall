@@ -68,8 +68,8 @@ matches the shell running it and kills your own command.
 `~/.local/bin/cavawall-launch` is the only thing that should ever start the
 session's instance. It holds an flock and kills stale instances first.
 
-**argv must stay exactly `[binary]`.** The launcher, `cavawall-theme.fish` and
-`fullscreen-watch` identify this process by an exact argv match. New knobs go
+**argv must stay exactly `[binary]`.** The launcher and `cavawall-theme.fish`
+identify this process by an exact argv match. New knobs go
 in `config.toml` or an env var (`CAVAWALL_OUTPUT`, `CAVAWALL_DEBUG`), never a
 CLI flag. `--config` exists for tests only. Any other first word is a command:
 `cli_help::dispatch` execs cavawallctl with it (and `CAVAWALL_AS=cavawall`, so
