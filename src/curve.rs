@@ -4,7 +4,7 @@
 //! vertex shader indexes by `gl_InstanceID`, so a curve costs what a straight
 //! row costs - one float per bar per frame, and no path maths in `draw()`
 
-use crate::math::fma;
+use crate::math::{fma, lerp};
 
 /// One bar's place on the path, as uploaded
 ///
@@ -82,9 +82,9 @@ fn densify(controls: &[Control], per_segment: usize) -> Vec<([f32; 2], f32, Opti
                 (None, None) => None,
                 (Some(a), None) => Some(a),
                 (None, Some(b)) => Some(b),
-                (Some(a), Some(b)) => Some(a + (b - a) * t),
+                (Some(a), Some(b)) => Some(lerp(a, b, t)),
             };
-            out.push((catmull_rom(p0, p1, p2, p3, t), s1 + (s2 - s1) * t, angle));
+            out.push((catmull_rom(p0, p1, p2, p3, t), lerp(s1, s2, t), angle));
         }
     }
     let last = controls[n - 1];
@@ -111,7 +111,8 @@ fn arc(controls: &[Control], aspect: f32) -> Arc {
     acc.push(0.0f32);
     for w in dense.windows(2) {
         let (a, b) = (w[0].0, w[1].0);
-        total += (((b[0] - a[0]) * aspect).powi(2) + (b[1] - a[1]).powi(2)).sqrt();
+        let dx = (b[0] - a[0]) * aspect;
+        total += fma(dx, dx, (b[1] - a[1]).powi(2)).sqrt();
         acc.push(total);
     }
     Arc { dense, acc, total }
@@ -159,19 +160,19 @@ fn sample_arc(a: &Arc, count: usize, flip: bool, upright: bool, aspect: f32) -> 
         let t = ((target - acc[cursor]) / seg).clamp(0.0, 1.0);
         let (a, sa, aa) = dense[cursor];
         let (b, sb, _) = dense[cursor + 1];
-        let pos = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+        let pos = [lerp(a[0], b[0], t), lerp(a[1], b[1], t)];
 
         // Tangent from the segment, normal perpendicular to it. Degenerate
         // segments fall back to straight up rather than producing NaN.
         // Into the pixel frame before taking the perpendicular
         let (dx, dy) = ((b[0] - a[0]) * aspect, b[1] - a[1]);
-        let len = (dx * dx + dy * dy).sqrt();
+        let len = fma(dx, dx, dy * dy).sqrt();
         // Direction first, THEN flip, applied uniformly - an angle override
         // included
         let mut normal = if let Some(deg) = aa {
             // Degrees clockwise from up, so 0 is [0,1] and 90 is [1,0].
-            let r = deg.to_radians();
-            [r.sin(), r.cos()]
+            let (s, c) = deg.to_radians().sin_cos();
+            [s, c]
         } else if upright || len <= f32::EPSILON {
             // Straight rectangles rising from the path rather than leaning
             // with it
@@ -182,7 +183,7 @@ fn sample_arc(a: &Arc, count: usize, flip: bool, upright: bool, aspect: f32) -> 
         if flip {
             normal = [-normal[0], -normal[1]];
         }
-        out.push((Sample { pos, normal }, sa + (sb - sa) * t));
+        out.push((Sample { pos, normal }, lerp(sa, sb, t)));
     }
     out
 }
