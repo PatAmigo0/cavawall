@@ -71,17 +71,52 @@ pub fn relevant(events: &mut UnixStream, partial: &mut Vec<u8>) -> Option<bool> 
     Some(hit)
 }
 
-/// Monitor names showing a fullscreen window right now. None when Hyprland
-/// could not be read - which is not "nothing is covered" and must not be
-/// treated as it
+/// The one question asked: every monitor and every window, in one reply
+const QUERY: &[u8] = b"[[BATCH]]j/monitors;j/clients";
+
+/// Monitor names showing a fullscreen window right now, waiting for the
+/// answer. Only at startup, before anything is drawn; the running instance
+/// asks through `query` and the event loop instead. None when Hyprland could
+/// not be read - which is not "nothing is covered" and must not be treated
+/// as it
 pub fn covered() -> Option<BTreeSet<String>> {
     let mut s = UnixStream::connect(socket_dir()?.join(".socket.sock")).ok()?;
     let _ = s.set_read_timeout(Some(Duration::from_millis(500)));
     let _ = s.set_write_timeout(Some(Duration::from_millis(500)));
-    s.write_all(b"[[BATCH]]j/monitors;j/clients").ok()?;
-    let mut raw = String::new();
-    s.read_to_string(&mut raw).ok()?;
-    let mut docs = serde_json::Deserializer::from_str(&raw).into_iter::<serde_json::Value>();
+    s.write_all(QUERY).ok()?;
+    let mut raw = Vec::new();
+    s.read_to_end(&mut raw).ok()?;
+    parse_covered(&raw)
+}
+
+/// Ask without waiting: the request is written - a few dozen bytes, which a
+/// fresh socket always takes whole - and the reply is left for the event
+/// loop to read as it arrives. Hyprland closes the socket after answering,
+/// and that end is when the reply is complete
+pub fn query() -> Option<UnixStream> {
+    let mut s = UnixStream::connect(socket_dir()?.join(".socket.sock")).ok()?;
+    s.write_all(QUERY).ok()?;
+    s.set_nonblocking(true).ok()?;
+    Some(s)
+}
+
+/// Read what has arrived of a reply: Some(true) once it is complete
+pub fn read_reply(s: &mut UnixStream, raw: &mut Vec<u8>) -> Option<bool> {
+    let mut buf = [0u8; 16384];
+    loop {
+        match s.read(&mut buf) {
+            Ok(0) => return Some(true),
+            Ok(n) => raw.extend_from_slice(&buf[..n]),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return Some(false),
+            Err(_) => return None,
+        }
+    }
+}
+
+/// The covered monitors from a complete reply
+pub fn parse_covered(raw: &[u8]) -> Option<BTreeSet<String>> {
+    let mut docs = serde_json::Deserializer::from_slice(raw).into_iter::<serde_json::Value>();
     let monitors = docs.next()?.ok()?;
     let clients = docs.next()?.ok()?;
 

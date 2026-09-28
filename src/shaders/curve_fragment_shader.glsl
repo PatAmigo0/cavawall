@@ -3,6 +3,9 @@
 // along the bar by vRadial exactly as there
 layout(std430, binding = 0) readonly buffer GradientColors {
     int gradient_colors_size;
+    // count - 1 and count - 2, written by the CPU once per palette
+    float stop_span;
+    int last_pair;
     vec4 gradient_colors[];
 };
 // One bit per occluder, rasterised once per configure. Surface-sized, so a
@@ -58,13 +61,13 @@ void main() {
     }
 #endif
 #ifdef GRADIENT_ROW
-    float findex = vAlong * float(gradient_colors_size - 1);
+    float findex = vAlong * stop_span;
 #else
-    float findex = t * float(gradient_colors_size - 1);
+    float findex = t * stop_span;
 #endif
     // Safe with no lower bound only because gradient_buffer uploads a lone
     // configured stop twice
-    int index = min(int(findex), gradient_colors_size - 2);
+    int index = min(int(findex), last_pair);
     vec4 c = mix(gradient_colors[index], gradient_colors[index + 1], findex - float(index));
     c.a *= mix(InnerAlpha, OuterAlpha, t);
 #ifdef REVEAL

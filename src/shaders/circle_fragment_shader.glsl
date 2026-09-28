@@ -2,6 +2,9 @@
 // readonly: nothing here writes the palette
 layout(std430, binding = 0) readonly buffer GradientColors {
     int gradient_colors_size;
+    // count - 1 and count - 2, written by the CPU once per palette
+    float stop_span;
+    int last_pair;
     vec4 gradient_colors[];
 };
 // 0 at the inner edge, 1 at the rim. Stop 1 is therefore the centre and the
@@ -43,14 +46,14 @@ void main() {
     }
 #endif
 #ifdef GRADIENT_ROW
-    float findex = vAlong * float(gradient_colors_size - 1);
+    float findex = vAlong * stop_span;
 #else
-    float findex = t * float(gradient_colors_size - 1);
+    float findex = t * stop_span;
 #endif
     // Clamped before the fraction is taken, as in the linear shader. Safe with
     // no lower bound only because gradient_buffer uploads a lone configured
     // stop twice - do not "optimise" that duplication away
-    int index = min(int(findex), gradient_colors_size - 2);
+    int index = min(int(findex), last_pair);
     vec4 c = mix(gradient_colors[index], gradient_colors[index + 1], findex - float(index));
     // Radial alpha ramp, applied on top of whatever alpha the stop carries
     c.a *= mix(InnerAlpha, OuterAlpha, t);

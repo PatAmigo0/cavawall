@@ -508,10 +508,11 @@ struct AppState {
     path_ssbo: u32,
     width_ssbo: u32,
     /// Every bar, built when an output is chosen and uploaded on the next
-    /// configure. They depend on the OUTPUT's shape - normals are
-    /// perpendicular in pixel space, and the crop follows the output's aspect
-    /// - so a configure that only resizes the surface does not change them
-    curve_bars: Box<[curve::Bar]>,
+    /// configure, refilled in place so a placement keeps the allocation. The
+    /// bars depend on the OUTPUT's shape, since normals are perpendicular in
+    /// pixel space and the crop follows the output's aspect, so a configure
+    /// that only resizes the surface does not change them
+    curve_bars: Vec<curve::Bar>,
     /// Occluders as authored, in IMAGE coordinates; index i is mask bit 1 << i.
     /// Where they land depends on how the wallpaper crops onto the output, so
     /// they are rasterised only once one is known
@@ -522,7 +523,11 @@ struct AppState {
     mask: Option<MaskPass>,
     /// How high the occluders every bar tests reach, in output coordinates.
     /// Kept so the bounding box can stop where nothing is visible below
-    curve_horizon: Box<[f32]>,
+    curve_horizon: Vec<f32>,
+    /// Scratch for occluder_floor, and the mask's triangles: kept between
+    /// placements like the two above
+    horizon_scratch: Vec<f32>,
+    mask_tris: Vec<curve::MaskVertex>,
     curve_fit: FitMode,
     /// The wallpaper the running curve was resolved against, and every key the
     /// config has one for. Together they answer the only question a wallpaper
@@ -576,6 +581,12 @@ struct AppState {
     covered: std::collections::BTreeSet<String>,
     /// A line of Hyprland events split across reads
     hypr_partial: Vec<u8>,
+    /// The coverage query in flight, its reply so far, and whether events
+    /// arrived meanwhile that need one more
+    hypr_reply: Vec<u8>,
+    hypr_busy: bool,
+    hypr_again: bool,
+    loop_handle: smithay_client_toolkit::reexports::calloop::LoopHandle<'static, AppState>,
     /// cava suspended with SIGSTOP while nothing can be shown
     cava_stopped: bool,
     /// Windows from the foreign-toplevel protocol, where Hyprland's IPC is
@@ -1164,15 +1175,47 @@ impl AppState {
             Some(false) => return true,
             Some(true) => {}
         }
-        // Unreadable is not "nothing covered": keep the last answer
-        if let Some(now) = hypr::covered() {
-            if now != self.covered {
-                self.covered = now;
-                let qh = self.qh.clone();
-                self.retarget(&qh);
-            }
+        // One query at a time: a burst of events while one is out asks once
+        // more when it lands, not once per event
+        if self.hypr_busy {
+            self.hypr_again = true;
+        } else {
+            self.ask_hypr();
         }
         true
+    }
+
+    /// Send the coverage query and let the loop collect the reply
+    fn ask_hypr(&mut self) {
+        let Some(stream) = hypr::query() else { return };
+        self.hypr_busy = true;
+        self.hypr_reply.clear();
+        let inserted = self.loop_handle.insert_source(
+            Generic::new(stream, Interest::READ, CalloopMode::Level),
+            |_, stream, state: &mut AppState| {
+                // SAFETY: the stream is only read, and only here
+                let done = hypr::read_reply(unsafe { stream.get_mut() }, &mut state.hypr_reply);
+                if done == Some(false) {
+                    return Ok(PostAction::Continue);
+                }
+                state.hypr_busy = false;
+                // Unreadable is not "nothing covered": keep the last answer
+                if let Some(now) = done.and_then(|_| hypr::parse_covered(&state.hypr_reply)) {
+                    if now != state.covered {
+                        state.covered = now;
+                        let qh = state.qh.clone();
+                        state.retarget(&qh);
+                    }
+                }
+                if std::mem::take(&mut state.hypr_again) {
+                    state.ask_hypr();
+                }
+                Ok(PostAction::Remove)
+            },
+        );
+        if inserted.is_err() {
+            self.hypr_busy = false;
+        }
     }
 
     /// Build a fresh layer surface on `output` and start drawing to it
@@ -1270,9 +1313,14 @@ impl AppState {
                 // ridge it was drawn on
                 let fit = self.fit_for(self.curve_output);
                 let aspect = self.width as f32 / self.height.max(1) as f32;
-                self.curve_bars = curve::build(&self.curve_paths, self.bar_count, aspect, fit).into();
-                self.curve_horizon =
-                    curve::occluder_floor(&self.occluders, self.common_mask, fit).into_boxed_slice();
+                curve::build_into(&mut self.curve_bars, &self.curve_paths, self.bar_count, aspect, fit);
+                curve::occluder_floor_into(
+                    &mut self.curve_horizon,
+                    &mut self.horizon_scratch,
+                    &self.occluders,
+                    self.common_mask,
+                    fit,
+                );
                 self.curve_box = self.curve_bbox();
                 match self.curve_box {
                     Some((left, top, w, h)) => {

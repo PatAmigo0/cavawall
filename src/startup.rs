@@ -820,7 +820,7 @@ pub(crate) fn run() {
             gl::Uniform1f(gl::GetUniformLocation(shader_program, c"Blocks".as_ptr()), blocks as f32);
         }
         if along_row {
-            gl::Uniform1f(gl::GetUniformLocation(shader_program, c"Count".as_ptr()), bar_count as f32);
+            gl::Uniform1f(gl::GetUniformLocation(shader_program, c"InvCount".as_ptr()), 1.0 / bar_count as f32);
         }
         // Taken by value: the pixels are freed once GL has its copy, where a
         // local of this function would live as long as the process
@@ -977,11 +977,13 @@ pub(crate) fn run() {
         curve_paths: curve_paths.into_boxed_slice(),
         path_ssbo,
         width_ssbo,
-        curve_bars: Box::new([]),
+        curve_bars: Vec::new(),
         occluders: occluders.into_boxed_slice(),
         common_mask,
         mask,
-        curve_horizon: Box::new([]),
+        curve_horizon: Vec::new(),
+        horizon_scratch: Vec::new(),
+        mask_tris: Vec::new(),
         curve_fit,
         curve_key,
         curve_keys,
@@ -1011,6 +1013,10 @@ pub(crate) fn run() {
         on_fullscreen,
         covered,
         hypr_partial: Vec::new(),
+        hypr_reply: Vec::new(),
+        hypr_busy: false,
+        hypr_again: false,
+        loop_handle: loop_handle.clone(),
         cava_stopped: false,
         toplevels: toplevel::Toplevels::default(),
         placed_on: None,

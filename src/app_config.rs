@@ -808,20 +808,25 @@ fn live_colour(stop: &ConfigColor, scheme: Option<&HashMap<String, String>>) -> 
 }
 
 /// Pack stops into the std430 layout the fragment shader declares: an int
-/// count, three words of padding to satisfy vec4 alignment, then the stops
+/// count, then in what would be padding before the vec4-aligned stops the
+/// two numbers every fragment needs - count - 1 as a float, count - 2 as an
+/// int - so no fragment converts or subtracts them itself
 ///
 /// Shared by the initial upload and every live re-upload; when this layout and
 /// the shader's `GradientColors` block disagree the result is silent garbage on
 /// screen, so there is exactly one copy of it
 #[must_use]
 pub fn gradient_buffer(rgba: &[[f32; 4]]) -> Vec<u8> {
-    /// i32 count plus three words of padding to reach the stops' vec4 alignment
+    /// i32 count, f32 span, i32 last pair, one word of padding: the stops'
+    /// vec4 alignment
     const HEADER: usize = 16;
     let stops = uploaded_stops(rgba.len());
     // Sized up front: one allocation for the whole buffer
     let mut buf = Vec::with_capacity(HEADER + stops * std::mem::size_of::<[f32; 4]>());
     buf.extend_from_slice(&(stops as i32).to_le_bytes());
-    buf.extend_from_slice(&[0u8; HEADER - 4]);
+    buf.extend_from_slice(&((stops - 1) as f32).to_le_bytes());
+    buf.extend_from_slice(&(stops as i32 - 2).to_le_bytes());
+    buf.extend_from_slice(&[0u8; HEADER - 12]);
     // A lone stop is written twice. It costs 16 bytes and lets the shader index
     // `size - 2` unconditionally, which is what makes its clamp branchless
     for color in rgba.iter().chain(rgba.last().filter(|_| rgba.len() == 1)) {
@@ -956,7 +961,12 @@ mod tests {
     fn gradient_buffer_matches_std430_layout() {
         let buf = gradient_buffer(&[[1.0, 0.0, 0.0, 1.0], [0.0, 1.0, 0.0, 1.0]]);
         assert_eq!(&buf[0..4], &2i32.to_le_bytes());
-        assert_eq!(&buf[4..16], &[0u8; 12], "vec4 alignment padding");
+        assert_eq!(&buf[4..8], &1.0f32.to_le_bytes(), "stop_span, count - 1");
+        assert_eq!(&buf[8..12], &0i32.to_le_bytes(), "last_pair, count - 2");
+        assert_eq!(&buf[12..16], &[0u8; 4], "vec4 alignment padding");
+        // A lone stop is doubled, so the shader still sees a pair
+        let one = gradient_buffer(&[[1.0, 0.0, 0.0, 1.0]]);
+        assert_eq!((&one[0..4], &one[4..8], &one[8..12]), (&2i32.to_le_bytes()[..], &1.0f32.to_le_bytes()[..], &0i32.to_le_bytes()[..]));
         assert_eq!(buf.len(), 16 + 2 * 16);
         assert_eq!(&buf[16..20], &1.0f32.to_le_bytes());
     }

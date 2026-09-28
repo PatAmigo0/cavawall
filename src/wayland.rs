@@ -180,7 +180,10 @@ impl LayerShellHandler for AppState {
             // at startup and never unbound
             if curve {
                 let (ow, oh) = (self.curve_output.0 as f32, self.curve_output.1 as f32);
-                gl::Uniform1f(self.aspect_location, ow / oh.max(1.0));
+                // The aspect and its reciprocal: the shader multiplies by both rather
+                // than divide by one
+                let aspect = ow / oh.max(1.0);
+                gl::Uniform2f(self.aspect_location, aspect, 1.0 / aspect);
                 // Identity when the surface IS the output. The compositor is
                 // free to grant a size other than the one asked for, so the map
                 // is built from what this configure granted
@@ -193,9 +196,10 @@ impl LayerShellHandler for AppState {
                 gl::Uniform2f(self.path_scale_location, scale[0], scale[1]);
                 gl::Uniform2f(self.path_offset_location, offset[0], offset[1]);
                 if let Some(mask) = &self.mask {
-                    let tris = curve::occluder_triangles(&self.occluders, self.fit_for(self.curve_output));
+                    let fit = self.fit_for(self.curve_output);
+                    curve::occluder_triangles_into(&mut self.mask_tris, &self.occluders, fit);
                     mask.rasterise(
-                        &tris,
+                        &self.mask_tris,
                         (self.width, self.height),
                         (scale, offset),
                         (self.program, self.vao),

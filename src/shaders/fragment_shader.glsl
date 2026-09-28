@@ -2,6 +2,9 @@
 // readonly: nothing here writes the palette
 layout(std430, binding = 0) readonly buffer GradientColors {
     int gradient_colors_size;
+    // count - 1 and count - 2, written by the CPU once per palette
+    float stop_span;
+    int last_pair;
     vec4 gradient_colors[];
 };
 // 0 at a bar's base to 1 at the top of the surface
@@ -51,14 +54,14 @@ void main() {
     }
 #endif
 #ifdef GRADIENT_ROW
-    float findex = vAlong * float(gradient_colors_size - 1);
+    float findex = vAlong * stop_span;
 #else
-    float findex = level * float(gradient_colors_size - 1);
+    float findex = level * stop_span;
 #endif
     // Clamped before the fraction is taken, so the top row lands on the last
     // stop rather than a step of 0.0 into the one below it. Branchless, and
     // gradient_buffer guarantees at least two stops so this cannot go negative
-    int index = min(int(findex), gradient_colors_size - 2);
+    int index = min(int(findex), last_pair);
     vec4 c = mix(gradient_colors[index], gradient_colors[index + 1], findex - float(index));
 #ifdef REVEAL
 #ifdef REVEAL_PULSE
