@@ -490,6 +490,9 @@ struct AppState {
     /// Where `bar_count` came from, for `status`: curve, circle, wallpaper,
     /// shell or config
     bars_from: &'static str,
+    /// cava's rate, and whether the wallpaper's file or config.toml set it
+    framerate: u32,
+    framerate_from: &'static str,
     /// The count came from the shell's setting, so a change there re-execs.
     /// False whenever something more specific set it
     bars_follow_shell: bool,
@@ -742,6 +745,8 @@ impl AppState {
                     "output_size": self.placed_size,
                     "bars": self.bar_count,
                     "bars_from": self.bars_from,
+                    "framerate": self.framerate,
+                    "framerate_from": self.framerate_from,
                     "parked": self.idle,
                     "curve_key": self.curve_key,
                 });

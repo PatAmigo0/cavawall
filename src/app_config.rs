@@ -152,6 +152,10 @@ pub struct WallpaperConfig {
     pub name: Option<String>,
     /// Which figure this wallpaper gets, overriding `general.mode`
     pub mode: Option<Mode>,
+    /// Frames per second for this wallpaper, overriding `general.framerate`.
+    /// Startup-only, being cava's own rate: a wallpaper switch re-execs
+    /// whenever either side has a file, so it applies on the switch
+    pub framerate: Option<u32>,
     pub circle: Option<CircleConfig>,
     pub bars: Option<BarOverride>,
     pub curve: Option<CurveConfig>,
@@ -165,6 +169,7 @@ impl WallpaperConfig {
 #
 #   name    label for you; nothing reads it
 #   mode    bars | circle | curve, overriding general.mode in config.toml
+#   framerate  frames per second, overriding general.framerate
 #   bars    amount, gap, max_height, opacity, matte, left, span, baseline,
 #           grow, radius, blocks, mirror, gradient, reveal, reveal_pulse -
 #           each falls back to [bars] in config.toml
@@ -1086,5 +1091,16 @@ mod tests {
         let cfg: Config = toml::from_str(text).expect("config.toml deserialises");
         assert!(!cfg.colors.is_empty(), "a palette is not optional");
         assert!(cfg.general.framerate > 0);
+    }
+
+    /// A wallpaper's own rate survives a save, and an unset one is not written
+    #[test]
+    fn a_wallpaper_can_carry_its_own_framerate() {
+        let w: WallpaperConfig = toml::from_str("mode = \"bars\"\nframerate = 30\n").unwrap();
+        assert_eq!(w.framerate, Some(30));
+        let out = toml::to_string(&toml::Value::try_from(&w).unwrap()).unwrap();
+        assert!(out.contains("framerate = 30"), "{out}");
+        let none = toml::to_string(&toml::Value::try_from(WallpaperConfig::default()).unwrap()).unwrap();
+        assert!(!none.contains("framerate"), "{none}");
     }
 }
