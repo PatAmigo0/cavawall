@@ -36,6 +36,10 @@ background_color = { hex = "#000000", alpha = 0.0 }
 # the surface unmapped and cava suspended. Hyprland through its IPC; Sway,
 # river, niri, labwc and Wayfire through the foreign-toplevel protocol
 # on_fullscreen = "move"
+# Load only this EGL driver, for the GPU the compositor renders on: "nvidia"
+# or "mesa". Unset, every installed driver is loaded to find the one that
+# fits; on NVIDIA that leaves Mesa and its LLVM in memory, about 7 MB
+# gl_driver = "nvidia"
 # Source cava captures from, forwarded to its [input] section as
 # method=pulse, source=<this>. Left unset, cava monitors whatever the current
 # DEFAULT SINK is - which goes silent the moment that sink's monitor does

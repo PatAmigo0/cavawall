@@ -30,17 +30,17 @@ out vec2 vLocal;
 flat out vec2 vSize;
 #endif
 void main() {
-    float x = Stride * float(gl_InstanceID) - 1.0 + corner.x * BarWidth;
+    float x = fma(corner.x, BarWidth, fma(Stride, float(gl_InstanceID), -1.0));
 #ifdef MIRROR
     // The surface is centred on the line and a full bar reaches its edge.
     // Signed, so it interpolates across the line; the fragment stage takes abs
-    float side = corner.y * 2.0 - 1.0;
+    float side = fma(corner.y, 2.0, -1.0);
     vLevel = side * height;
     gl_Position = vec4(x, vLevel, 0.0, 1.0);
 #else
     float side = corner.y;
     vLevel = corner.y * height;
-    gl_Position = vec4(x, Grow * (vLevel * 2.0 - 1.0), 0.0, 1.0);
+    gl_Position = vec4(x, Grow * fma(vLevel, 2.0, -1.0), 0.0, 1.0);
 #endif
 #ifdef GRADIENT_ROW
     vAlong = (float(gl_InstanceID) + corner.x) / Count;

@@ -10,5 +10,5 @@ uniform vec2 PathOffset;
 flat out uint vBit;
 void main() {
     vBit = bit;
-    gl_Position = vec4(point * PathScale + PathOffset, 0.0, 1.0);
+    gl_Position = vec4(fma(point, PathScale, PathOffset), 0.0, 1.0);
 }

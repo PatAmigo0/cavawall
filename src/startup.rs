@@ -176,6 +176,24 @@ pub(crate) fn run() {
     let config: Config = toml::from_str(&config_str)
         .unwrap_or_else(|e| fatal!("{}: {e}", config_filename.display()));
     cavawall::notify::configure(config.notify.as_ref());
+    // Before the first EGL call, which is when the loader reads it. An
+    // explicit variable in the environment wins
+    if let Some(driver) = config.general.gl_driver.as_deref() {
+        let file = match driver {
+            "nvidia" => Some("10_nvidia.json"),
+            "mesa" => Some("50_mesa.json"),
+            other => {
+                say!("unknown gl_driver {other:?}: nvidia or mesa; loading every driver");
+                None
+            }
+        };
+        let path = file.map(|f| PathBuf::from("/usr/share/glvnd/egl_vendor.d").join(f));
+        match path {
+            Some(p) if !p.exists() => say!("gl_driver = {driver:?}, but {} is not installed; loading every driver", p.display()),
+            Some(p) if env::var_os("__EGL_VENDOR_LIBRARY_FILENAMES").is_none() => env::set_var("__EGL_VENDOR_LIBRARY_FILENAMES", p),
+            _ => {}
+        }
+    }
     // Where the palette and the wallpaper come from, before either is read
     let scheme = config.scheme.as_ref();
     scheme::configure_colours(scheme.and_then(|s| s.source.as_deref()), scheme.and_then(|s| s.path.as_deref()));
@@ -1082,6 +1100,12 @@ pub(crate) fn run() {
     WaylandSource::new(conn.clone(), event_queue)
         .insert(loop_handle)
         .unwrap();
+    // Startup is done: config text, shader sources, the curve's dense
+    // samples and the driver's setup scratch are freed, and this returns the
+    // pages to the kernel instead of keeping them for a run that never
+    // allocates again
+    // SAFETY: malloc_trim only walks glibc's own free lists
+    unsafe { libc::malloc_trim(0) };
     if let Err(e) = event_loop.run(None, &mut simple_window, AppState::tick) {
         // A compositor that restarts or crashes ends up here
         fatal!("the event loop stopped: {e}; the compositor connection most likely closed");

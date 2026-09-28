@@ -175,6 +175,7 @@ per-wallpaper settings to `wallpapers/<key>.toml` beside it. The annotated
 | `general.mode` | `bars`, `circle` or `curve` |
 | `general.framerate` | frames per second |
 | `general.preferred_output` | monitor name; omit to prefer an external monitor over the laptop panel |
+| `general.gl_driver` | `nvidia` or `mesa`: load only that EGL driver; on NVIDIA this skips Mesa and its LLVM, a quarter of cavawall's memory |
 | `general.on_fullscreen` | `move` off a monitor a fullscreen window covers, `pause`, or `ignore` (default); Hyprland, or any compositor with foreign-toplevel |
 | `general.channels`, `general.mono_option` | `mono` for one sweep across every bar; stereo mirrors the halves |
 | `general.audio_source` | cava's input; omit for its default |
