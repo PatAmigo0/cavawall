@@ -62,12 +62,15 @@ pub fn relevant(events: &mut UnixStream, partial: &mut Vec<u8>) -> Option<bool> 
             Err(_) => return None,
         }
     }
-    while let Some(nl) = partial.iter().position(|&b| b == b'\n') {
-        let line = &partial[..nl];
+    // One drain at the end, not one per line; matching stops at the first hit
+    let mut start = 0;
+    while let Some(nl) = partial[start..].iter().position(|&b| b == b'\n') {
+        let line = &partial[start..start + nl];
         let name = line.split(|&b| b == b'>').next().unwrap_or(line);
-        hit |= WATCHED.iter().any(|w| w.as_bytes() == name);
-        partial.drain(..=nl);
+        hit = hit || WATCHED.iter().any(|w| w.as_bytes() == name);
+        start += nl + 1;
     }
+    partial.drain(..start);
     Some(hit)
 }
 
