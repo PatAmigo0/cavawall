@@ -101,11 +101,11 @@ impl Dispatch2<ZwlrForeignToplevelHandleV1, AppState> for HandleData {
                 }
             }
             Event::Done => {
-                if let Some(w) = state.toplevels.windows.get_mut(&id) {
-                    if let Some((f, m)) = w.pending_state.take() {
-                        w.fullscreen = f;
-                        w.minimized = m;
-                    }
+                if let Some(w) = state.toplevels.windows.get_mut(&id)
+                    && let Some((f, m)) = w.pending_state.take()
+                {
+                    w.fullscreen = f;
+                    w.minimized = m;
                 }
                 state.recheck_toplevels(qh);
             }

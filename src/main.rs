@@ -44,10 +44,9 @@ const SILENCE_THRESHOLD: f32 = 0.005;
 /// unpacking to f32 first
 const SILENCE_RAW: u16 = (SILENCE_THRESHOLD * 65530.0) as u16;
 
-/// `2.0 * (n / 65530.0) - 1.0` folded into one multiply-add per bar
-/// One raw cava sample to NDC. The vertex fetch normalises a u16 by 65535, so
-/// this divisor has to be the same one or damage stops covering the bars
-const BAR_NDC_SCALE: f32 = 2.0 / 65535.0;
+/// One raw cava sample as a fraction of full height. The vertex fetch
+/// normalises a u16 by 65535, so damage has to use the same divisor
+const BAR_UNIT: f32 = 1.0 / 65535.0;
 
 /// Damage rectangles emitted per frame
 ///
@@ -187,7 +186,7 @@ use app_config::*;
 use std::collections::HashSet;
 use cavawall::scheme;
 pub mod cli_help;
-use cli_help::*;
+use cli_help::dispatch;
 use std::collections::HashMap;
 
 const VERTEX_SHADER_SRC: &str = include_str!("shaders/vertex_shader.glsl");
@@ -207,7 +206,7 @@ const MASK_FRAGMENT_SHADER_SRC: &str = include_str!("shaders/mask_fragment_shade
 fn bar_geometry(bar_count: u32, gap: f32) -> (f32, f32) {
     let bars = bar_count as f32;
     // NDC is 2.0 wide, shared by `bars` bars and `bars - 1` gaps of `gap` bars
-    let bar_width = 2.0 / (bars + (bars - 1.0) * gap);
+    let bar_width = 2.0 / fma(bars - 1.0, gap, bars);
     // Left edge to the next left edge
     (bar_width, bar_width * (1.0 + gap))
 }
@@ -241,8 +240,8 @@ impl CircleGeom {
         let (free_w, free_h) = (w.saturating_sub(d) as i32, h.saturating_sub(d) as i32);
         if let Some((x, y)) = self.position {
             let half = d as f32 * 0.5;
-            let left = (x * w as f32 - half).round() as i32;
-            let top = (y * h as f32 - half).round() as i32;
+            let left = fma(x, w as f32, -half).round() as i32;
+            let top = fma(y, h as f32, -half).round() as i32;
             return (top.clamp(0, free_h), left.clamp(0, free_w));
         }
         let centre_x = free_w / 2;
@@ -329,7 +328,7 @@ fn link_program(vert_src: &str, frag_src: &str) -> u32 {
         gl::AttachShader(program, frag);
         gl::LinkProgram(program);
         let mut status: gl::types::GLint = 0;
-        gl::GetProgramiv(program, gl::LINK_STATUS, &mut status);
+        gl::GetProgramiv(program, gl::LINK_STATUS, &raw mut status);
         if status != gl::TRUE as gl::types::GLint {
             fatal!("the GPU driver would not link the shaders; please report this with the log:\n{}", program_log(program));
         }
@@ -357,10 +356,10 @@ fn compile_shader(kind: gl::types::GLenum, src: &str, what: &str) -> u32 {
         );
         gl::CompileShader(shader);
         let mut status: gl::types::GLint = 0;
-        gl::GetShaderiv(shader, gl::COMPILE_STATUS, &mut status);
+        gl::GetShaderiv(shader, gl::COMPILE_STATUS, &raw mut status);
         if status != gl::TRUE as gl::types::GLint {
             let mut len: gl::types::GLint = 0;
-            gl::GetShaderiv(shader, gl::INFO_LOG_LENGTH, &mut len);
+            gl::GetShaderiv(shader, gl::INFO_LOG_LENGTH, &raw mut len);
             fatal!(
                 "the GPU driver would not compile the {what} shader; please report this with the log:\n{}",
                 read_log(len, |n, written, buf| gl::GetShaderInfoLog(shader, n, written, buf))
@@ -374,7 +373,7 @@ fn program_log(program: u32) -> String {
     // SAFETY: live program name, current context
     unsafe {
         let mut len: gl::types::GLint = 0;
-        gl::GetProgramiv(program, gl::INFO_LOG_LENGTH, &mut len);
+        gl::GetProgramiv(program, gl::INFO_LOG_LENGTH, &raw mut len);
         read_log(len, |n, written, buf| gl::GetProgramInfoLog(program, n, written, buf))
     }
 }
@@ -388,7 +387,7 @@ unsafe fn read_log(
 ) -> String {
     let mut buf = vec![0u8; len.max(0) as usize];
     let mut written: GLsizei = 0;
-    get(len, &mut written, buf.as_mut_ptr().cast());
+    get(len, &raw mut written, buf.as_mut_ptr().cast());
     buf.truncate(written.max(0) as usize);
     String::from_utf8_lossy(&buf).into_owned()
 }
@@ -414,13 +413,16 @@ fn debug_palette(what: &str, rgba: &[[f32; 4]]) {
     say!("{what} palette: {}", stops.join(" "));
 }
 
-
-
-
-
-
 fn main() {
     startup::run();
+}
+
+/// What a re-exec does with the CAVAWALL_OUTPUT pin
+#[derive(Clone, Copy)]
+enum Pin<'a> {
+    Keep,
+    Set(&'a str),
+    Clear,
 }
 
 struct AppState {
@@ -589,7 +591,7 @@ struct AppState {
     hypr_reply: Vec<u8>,
     hypr_busy: bool,
     hypr_again: bool,
-    loop_handle: smithay_client_toolkit::reexports::calloop::LoopHandle<'static, AppState>,
+    loop_handle: smithay_client_toolkit::reexports::calloop::LoopHandle<'static, Self>,
     /// cava suspended with SIGSTOP while nothing can be shown
     cava_stopped: bool,
     /// Windows from the foreign-toplevel protocol, where Hyprland's IPC is
@@ -612,7 +614,7 @@ struct AppState {
     idle: bool,
     /// Kept because event_loop.run's callback hands back only &mut AppState,
     /// and `tick()` draws, which requests frame callbacks
-    qh: QueueHandle<AppState>,
+    qh: QueueHandle<Self>,
     /// Same reason, for the roundtrip in clear_and_exit and reexec
     conn: Connection,
 }
@@ -638,7 +640,7 @@ impl AppState {
     /// vanishes, so leaving without this burns the last bars onto the wallpaper
     ///
     /// Nothing to clear when unplaced: the surface was closed or never mapped
-    fn clear_surface(&mut self) {
+    fn clear_surface(&self) {
         if self.placed_on.is_none() {
             return;
         }
@@ -755,7 +757,7 @@ impl AppState {
             // Answer before acting: re-exec never comes back to write one
             Request::Move { output } => {
                 control::write_response(stream, &Response::ok(None));
-                self.reexec_pinned(Some(output.as_deref()));
+                self.reexec_pinned(output.as_deref().map_or(Pin::Clear, Pin::Set));
             }
             Request::Refresh => {
                 control::write_response(stream, &Response::ok(None));
@@ -787,15 +789,14 @@ impl AppState {
     /// with zero or two instances. The environment carries over too, so a
     /// CAVAWALL_OUTPUT pin set by `cavawall move` survives the restart
     fn reexec(&mut self) {
-        self.reexec_pinned(None);
+        self.reexec_pinned(Pin::Keep);
     }
 
-    /// `reexec`, with `pin` replacing CAVAWALL_OUTPUT when given: Some(None)
-    /// drops the pin
+    /// `reexec`, doing what `pin` says with CAVAWALL_OUTPUT
     ///
     /// The new environment goes to execve rather than through set_var: GL
     /// driver and notify threads are alive here, and set_var under them is UB
-    fn reexec_pinned(&mut self, pin: Option<Option<&str>>) {
+    fn reexec_pinned(&mut self, pin: Pin) {
         // On exec our Wayland connection closes exactly as it would on a kill
         self.clear_surface();
 
@@ -833,9 +834,10 @@ impl AppState {
             .collect();
 
         // The next image is this instance carrying on, not a new start
-        let set = [Some(("CAVAWALL_REEXEC", "1")), pin.flatten().map(|o| ("CAVAWALL_OUTPUT", o))];
+        let pinned = if let Pin::Set(o) = pin { Some(("CAVAWALL_OUTPUT", o)) } else { None };
+        let set = [Some(("CAVAWALL_REEXEC", "1")), pinned];
         let envs: Vec<CString> = env::vars_os()
-            .filter(|(k, _)| k != "CAVAWALL_REEXEC" && (pin.is_none() || k != "CAVAWALL_OUTPUT"))
+            .filter(|(k, _)| k != "CAVAWALL_REEXEC" && (matches!(pin, Pin::Keep) || k != "CAVAWALL_OUTPUT"))
             .map(|(k, v)| (k.into_vec(), v.into_vec()))
             .chain(set.into_iter().flatten().map(|(k, v)| (k.into(), v.into())))
             .filter_map(|(mut kv, v)| {
@@ -907,7 +909,7 @@ impl AppState {
             gl::BufferData(
                 gl::SHADER_STORAGE_BUFFER,
                 buf.len() as GLsizeiptr,
-                buf.as_ptr() as *const ffi::c_void,
+                buf.as_ptr().cast::<ffi::c_void>(),
                 gl::STATIC_DRAW,
             );
             gl::BindBufferBase(gl::SHADER_STORAGE_BUFFER, 0, self.gradient_colors_ssbo);
@@ -1111,19 +1113,18 @@ impl AppState {
         let (ow, oh) = (self.width as f32, self.height as f32);
         let (x0, y0, x1, y1) = curve::bounds(&self.curve_bars, ow / oh.max(1.0), self.bars_at.mirror);
         // NDC -> pixels, y flipped: NDC counts up, a margin counts down
-        let pad = 2.0;
-        let left = (((x0 + 1.0) * 0.5 * ow) - pad).floor().clamp(0.0, ow);
-        let right = (((x1 + 1.0) * 0.5 * ow) + pad).ceil().clamp(0.0, ow);
-        let top = ((1.0 - (y1 + 1.0) * 0.5) * oh - pad).floor().clamp(0.0, oh);
-        let bottom = ((1.0 - (y0 + 1.0) * 0.5) * oh + pad).ceil().clamp(0.0, oh);
+        let (pad, hw, hh) = (2.0, ow * 0.5, oh * 0.5);
+        let left = fma(x0, hw, hw - pad).floor().clamp(0.0, ow);
+        let right = fma(x1, hw, hw + pad).ceil().clamp(0.0, ow);
+        let top = fma(y1, -hh, hh - pad).floor().clamp(0.0, oh);
+        let bottom = fma(y0, -hh, hh + pad).ceil().clamp(0.0, oh);
         // The occluder cuts the box too: every fragment below the ridge is
         // discarded, so the surface never has to reach down there. On a
         // ridgeline that sits high in the frame this is the difference
         // between a band and a strip
-        let bottom = match self.horizon_floor(left / ow, right / ow) {
-            Some(h) => bottom.min(((1.0 - h) * oh + pad).ceil().clamp(0.0, oh)),
-            None => bottom,
-        };
+        let bottom = self
+            .horizon_floor(left / ow, right / ow)
+            .map_or(bottom, |h| bottom.min(fma(h, -oh, oh + pad).ceil().clamp(0.0, oh)));
         let (w, h) = ((right - left).max(1.0), (bottom - top).max(1.0));
         if w * h > ow * oh * 0.8 {
             return None;
@@ -1213,7 +1214,7 @@ impl AppState {
         self.hypr_reply.clear();
         let inserted = self.loop_handle.insert_source(
             Generic::new(stream, Interest::READ, CalloopMode::Level),
-            |_, stream, state: &mut AppState| {
+            |_, stream, state: &mut Self| {
                 // SAFETY: the stream is only read, and only here
                 let done = hypr::read_reply(unsafe { stream.get_mut() }, &mut state.hypr_reply);
                 if done == Some(false) {
@@ -1221,12 +1222,12 @@ impl AppState {
                 }
                 state.hypr_busy = false;
                 // Unreadable is not "nothing covered": keep the last answer
-                if let Some(now) = done.and_then(|_| hypr::parse_covered(&state.hypr_reply)) {
-                    if now != state.covered {
-                        state.covered = now;
-                        let qh = state.qh.clone();
-                        state.retarget(&qh);
-                    }
+                if let Some(now) = done.and_then(|_| hypr::parse_covered(&state.hypr_reply))
+                    && now != state.covered
+                {
+                    state.covered = now;
+                    let qh = state.qh.clone();
+                    state.retarget(&qh);
                 }
                 if std::mem::take(&mut state.hypr_again) {
                     state.ask_hypr();
@@ -1343,20 +1344,17 @@ impl AppState {
                     fit,
                 );
                 self.curve_box = self.curve_bbox();
-                match self.curve_box {
-                    Some((left, top, w, h)) => {
-                        self.surface_origin = (left, top);
-                        self.layer_surface.set_size(w, h);
-                        self.layer_surface.set_anchor(Anchor::TOP | Anchor::LEFT);
-                        self.layer_surface.set_margin(top as i32, 0, 0, left as i32);
-                        (w, h)
-                    }
-                    None => {
-                        self.surface_origin = (0, 0);
-                        self.layer_surface.set_size(self.width, self.height);
-                        self.layer_surface.set_anchor(Anchor::TOP | Anchor::LEFT);
-                        (self.width, self.height)
-                    }
+                if let Some((left, top, w, h)) = self.curve_box {
+                    self.surface_origin = (left, top);
+                    self.layer_surface.set_size(w, h);
+                    self.layer_surface.set_anchor(Anchor::TOP | Anchor::LEFT);
+                    self.layer_surface.set_margin(top as i32, 0, 0, left as i32);
+                    (w, h)
+                } else {
+                    self.surface_origin = (0, 0);
+                    self.layer_surface.set_size(self.width, self.height);
+                    self.layer_surface.set_anchor(Anchor::TOP | Anchor::LEFT);
+                    (self.width, self.height)
                 }
             }
             Mode::Circle => {
@@ -1530,9 +1528,9 @@ impl MaskPass {
         let (mut vao, mut vbo, mut fbo) = (0, 0, 0);
         // SAFETY: the caller guarantees a current context
         unsafe {
-            gl::GenVertexArrays(1, &mut vao);
-            gl::GenBuffers(1, &mut vbo);
-            gl::GenFramebuffers(1, &mut fbo);
+            gl::GenVertexArrays(1, &raw mut vao);
+            gl::GenBuffers(1, &raw mut vbo);
+            gl::GenFramebuffers(1, &raw mut fbo);
             gl::BindVertexArray(vao);
             gl::BindBuffer(gl::ARRAY_BUFFER, vbo);
             let stride = std::mem::size_of::<curve::MaskVertex>() as GLsizei;
@@ -1696,24 +1694,19 @@ impl AppState {
         // full-volume bar fills it exactly. Applying it twice made the bars
         // max_height^2 tall, visibly short
         unsafe {
-            // Respecifying the store orphans it, so the driver hands back a
-            // fresh region and never waits for the GPU to finish reading the
-            // old one. Naming the buffer in the call leaves the frame with no
-            // binding to make; without direct state access it takes one
-            let base = match &mut self.ring {
-                Some(ring) => ring.write(&self.cava_buffer),
-                None => {
-                    // Respecifying the store orphans it, so the driver never
-                    // waits for the GPU to finish reading the old one
-                    gl::BindBuffer(gl::ARRAY_BUFFER, self.height_vbo);
-                    gl::BufferData(
-                        gl::ARRAY_BUFFER,
-                        self.frame_bytes,
-                        self.cava_buffer.as_ptr().cast(),
-                        gl::DYNAMIC_DRAW,
-                    );
-                    0
-                }
+            let base = if let Some(ring) = &mut self.ring {
+                ring.write(&self.cava_buffer)
+            } else {
+                // Respecifying the store orphans it, so the driver never
+                // waits for the GPU to finish reading the old one
+                gl::BindBuffer(gl::ARRAY_BUFFER, self.height_vbo);
+                gl::BufferData(
+                    gl::ARRAY_BUFFER,
+                    self.frame_bytes,
+                    self.cava_buffer.as_ptr().cast(),
+                    gl::DYNAMIC_DRAW,
+                );
+                0
             };
             gl::Clear(gl::COLOR_BUFFER_BIT);
             // Every bar of every mode in one draw: four vertices per instance,

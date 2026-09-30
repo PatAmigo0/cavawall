@@ -51,3 +51,32 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = true
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+# GL and pixel maths cast between ints and floats by design
+cast_possible_truncation = "allow"
+cast_precision_loss = "allow"
+cast_sign_loss = "allow"
+cast_possible_wrap = "allow"
+cast_lossless = "allow"
+# Slower here: f32::midpoint goes through f64, hypot guards overflow that can't happen
+manual_midpoint = "allow"
+imprecise_flops = "allow"
+# Style that fights this codebase
+doc_markdown = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+too_many_lines = "allow"
+too_long_first_doc_paragraph = "allow"
+redundant_pub_crate = "allow"
+similar_names = "allow"
+many_single_char_names = "allow"
+struct_excessive_bools = "allow"
+option_if_let_else = "allow"
+wildcard_imports = "allow"
+# Maps only ever come from serde, with the default hasher
+implicit_hasher = "allow"
+# Consts sit beside their one use
+items_after_statements = "allow"

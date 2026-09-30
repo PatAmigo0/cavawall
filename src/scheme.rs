@@ -18,15 +18,11 @@ fn home() -> PathBuf {
 }
 
 fn state_dir() -> PathBuf {
-    std::env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home().join(".local/state"))
+    std::env::var_os("XDG_STATE_HOME").map_or_else(|| home().join(".local/state"), PathBuf::from)
 }
 
 fn config_dir() -> PathBuf {
-    std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home().join(".config"))
+    std::env::var_os("XDG_CONFIG_HOME").map_or_else(|| home().join(".config"), PathBuf::from)
 }
 
 /// The live palette's file: Caelestia's scheme.json unless `[scheme]` names
@@ -38,9 +34,7 @@ static PALETTE: OnceLock<PathBuf> = OnceLock::new();
 pub fn configure_colours(source: Option<&str>, path: Option<&str>) {
     let file = match (source.unwrap_or("caelestia"), path) {
         (_, Some(p)) => crate::wallpaper::expand(p),
-        ("pywal", None) => std::env::var_os("XDG_CACHE_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home().join(".cache"))
+        ("pywal", None) => std::env::var_os("XDG_CACHE_HOME").map_or_else(|| home().join(".cache"), PathBuf::from)
             .join("wal/colors.json"),
         ("caelestia", None) => state_dir().join("caelestia/scheme.json"),
         (other, None) => {
@@ -185,19 +179,15 @@ impl Watch {
             wallpaper_name: None,
             buf: Box::new(EventBuf([0; 4096])),
         };
-        if scheme {
-            if let Some(dir) = palette().parent() {
-                w.scheme_wd = w.add(dir);
-            }
+        if scheme && let Some(dir) = palette().parent() {
+            w.scheme_wd = w.add(dir);
         }
         if shell {
             w.shell_wd = w.add(shell_dir());
         }
-        if wallpaper {
-            if let Some((dir, name)) = crate::wallpaper::watch_target() {
-                w.wallpaper_wd = w.add(&dir);
-                w.wallpaper_name = name;
-            }
+        if wallpaper && let Some((dir, name)) = crate::wallpaper::watch_target() {
+            w.wallpaper_wd = w.add(&dir);
+            w.wallpaper_name = name;
         }
         if w.scheme_wd < 0 && w.shell_wd < 0 && w.wallpaper_wd < 0 {
             return None; // Drop closes the fd

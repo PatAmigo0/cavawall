@@ -97,15 +97,15 @@ fn follow(lines: usize) -> ! {
         if len == pos {
             continue;
         }
-        if let Ok(mut f) = std::fs::File::open(&path) {
-            if f.seek(SeekFrom::Start(pos)).is_ok() {
-                buf.clear();
-                if f.read_to_end(&mut buf).is_ok() {
-                    pos += buf.len() as u64;
-                    let mut out = std::io::stdout().lock();
-                    let _ = out.write_all(&buf);
-                    let _ = out.flush();
-                }
+        if let Ok(mut f) = std::fs::File::open(&path)
+            && f.seek(SeekFrom::Start(pos)).is_ok()
+        {
+            buf.clear();
+            if f.read_to_end(&mut buf).is_ok() {
+                pos += buf.len() as u64;
+                let mut out = std::io::stdout().lock();
+                let _ = out.write_all(&buf);
+                let _ = out.flush();
             }
         }
     }
@@ -285,22 +285,19 @@ fn main() {
             exit(127);
         }
         Command::Kill => {
-            match locked_pid() {
-                Some(pid) => {
-                    // SAFETY: a plain signal to a pid this process just resolved
-                    if unsafe { libc::kill(pid, libc::SIGKILL) } == 0 {
-                        if !cli.json {
-                            println!("killed {pid}");
-                        }
-                    } else {
-                        eprintln!("{name}: cannot kill {pid}: {}", std::io::Error::last_os_error());
-                        exit(1);
+            if let Some(pid) = locked_pid() {
+                // SAFETY: a plain signal to a pid this process just resolved
+                if unsafe { libc::kill(pid, libc::SIGKILL) } == 0 {
+                    if !cli.json {
+                        println!("killed {pid}");
                     }
-                }
-                None => {
-                    eprintln!("{name}: no locked instance to kill");
+                } else {
+                    eprintln!("{name}: cannot kill {pid}: {}", std::io::Error::last_os_error());
                     exit(1);
                 }
+            } else {
+                eprintln!("{name}: no locked instance to kill");
+                exit(1);
             }
             return;
         }

@@ -851,6 +851,7 @@ pub fn uploaded_stops(configured: usize) -> usize {
 }
 
 #[cfg(test)]
+#[allow(clippy::float_cmp, clippy::suboptimal_flops, clippy::manual_midpoint, clippy::decimal_bitwise_operands, reason = "tests compare exact values and keep their maths independent of the code they check")]
 mod tests {
     use super::*;
 
@@ -873,7 +874,7 @@ mod tests {
     #[test]
     fn stops_sort_by_trailing_number_not_string() {
         let colors: HashMap<String, ConfigColor> = (1..=12)
-            .map(|i| (format!("c{i}"), stop(&format!("#{:02x}0000", i))))
+            .map(|i| (format!("c{i}"), stop(&format!("#{i:02x}0000"))))
             .collect();
         let got: Vec<[f32; 4]> = resolve_stops(&ordered_stops(&colors), None);
         let reds: Vec<u8> = got.iter().map(|c| (c[0] * 255.0).round() as u8).collect();
@@ -887,7 +888,7 @@ mod tests {
             .map(|i| {
                 (
                     format!("gradient_color_{i}"),
-                    stop(&format!("#{:02x}0000", i)),
+                    stop(&format!("#{i:02x}0000")),
                 )
             })
             .collect();
@@ -901,11 +902,10 @@ mod tests {
     #[test]
     fn role_resolves_from_scheme_and_keeps_alpha() {
         let stops = vec![roled("#000000", "mauve")];
-        let scheme: HashMap<String, String> =
-            [("mauve".to_string(), "ff8000".to_string())].into_iter().collect();
+        let scheme = HashMap::from([("mauve".to_string(), "ff8000".to_string())]);
         let got = resolve_stops(&stops, Some(&scheme));
         assert_eq!(got[0][0], 1.0);
-        assert!((got[0][1] - 0.5019608).abs() < 1e-6);
+        assert!((got[0][1] - 0.501_960_8).abs() < 1e-6);
         assert_eq!(got[0][2], 0.0);
         assert_eq!(got[0][3], 0.5, "alpha must come from the config, not the scheme");
     }
@@ -916,8 +916,7 @@ mod tests {
     #[test]
     fn every_miss_falls_back_to_static_hex() {
         let empty: HashMap<String, String> = HashMap::new();
-        let junk: HashMap<String, String> =
-            [("mauve".to_string(), "not-a-colour".to_string())].into_iter().collect();
+        let junk = HashMap::from([("mauve".to_string(), "not-a-colour".to_string())]);
         for scheme in [None, Some(&empty), Some(&junk)] {
             let got = resolve_stops(&[roled("#00ff00", "mauve")], scheme);
             assert_eq!(got[0], [0.0, 1.0, 0.0, 0.5]);
@@ -984,13 +983,13 @@ mod tests {
         // Deserialised as the curve map itself: the surrounding Config wants
         // half a dozen unrelated sections that say nothing about a curve
         let short: HashMap<String, CurveConfig> = toml::from_str(
-            r#"
+            r"
             [abc]
             bars = 27
             height = 0.10
             upright = true
             points = [[0.1, 0.2], [0.3, 0.4]]
-            "#,
+            ",
         )
         .expect("shorthand parses");
         let curve = &short["abc"];
@@ -1002,7 +1001,7 @@ mod tests {
         assert_eq!(curve.bars, Some(27));
 
         let many: HashMap<String, CurveConfig> = toml::from_str(
-            r#"
+            r"
             [abc]
             bars = 40
             occlude = [[0.0, 0.5], [1.0, 0.5]]
@@ -1015,7 +1014,7 @@ mod tests {
             height = 0.05
             flip = true
             points = [[0.6, 0.3], [0.9, 0.3]]
-            "#,
+            ",
         )
         .expect("path blocks parse");
         let curve = &many["abc"];

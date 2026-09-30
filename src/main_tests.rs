@@ -1,6 +1,10 @@
 //! Tests for the binary crate's own items.
+#![allow(clippy::float_cmp, clippy::suboptimal_flops, clippy::manual_midpoint, reason = "tests compare exact values and keep their maths independent of the code they check")]
 
     use super::*;
+
+    /// One raw sample to NDC, as the vertex shader does
+    const BAR_NDC_SCALE: f32 = 2.0 * BAR_UNIT;
 
     /// A circle closes, so it has as many gaps as bars - one more than a row
     /// of the same count. Getting that wrong leaves a visible seam at bar 0 or

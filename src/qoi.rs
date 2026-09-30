@@ -157,7 +157,6 @@ mod tests {
         for i in 0u32..300 {
             let v = (i * 7 % 256) as u8;
             let px = match i % 6 {
-                0 | 1 => [10, 20, 30, 255],
                 2 => [11, 21, 29, 255],
                 3 => [v, v.wrapping_add(9), v.wrapping_add(3), 255],
                 4 => [v, 255 - v, v / 2, (i % 256) as u8],
