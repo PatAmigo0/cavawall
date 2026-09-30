@@ -190,7 +190,8 @@ pub(crate) fn run() {
         let path = file.map(|f| PathBuf::from("/usr/share/glvnd/egl_vendor.d").join(f));
         match path {
             Some(p) if !p.exists() => say!("gl_driver = {driver:?}, but {} is not installed; loading every driver", p.display()),
-            Some(p) if env::var_os("__EGL_VENDOR_LIBRARY_FILENAMES").is_none() => env::set_var("__EGL_VENDOR_LIBRARY_FILENAMES", p),
+            // SAFETY: no thread exists yet; the first notify spawns one below
+            Some(p) if env::var_os("__EGL_VENDOR_LIBRARY_FILENAMES").is_none() => unsafe { env::set_var("__EGL_VENDOR_LIBRARY_FILENAMES", p) },
             _ => {}
         }
     }
@@ -198,13 +199,17 @@ pub(crate) fn run() {
     let scheme = config.scheme.as_ref();
     scheme::configure_colours(scheme.and_then(|s| s.source.as_deref()), scheme.and_then(|s| s.path.as_deref()));
     cavawall::wallpaper::configure(config.wallpaper.as_ref());
+    // Taken before any notify, whose waiter thread would make remove_var unsound
+    let reexeced = env::var_os("CAVAWALL_REEXEC").is_some();
+    if reexeced {
+        // SAFETY: no thread exists yet
+        unsafe { env::remove_var("CAVAWALL_REEXEC") };
+    }
     if let Some(crash) = cavawall::log::previous_crash() {
         say!("the previous instance crashed: {crash}");
         cavawall::notify::send(NotifyEvent::Crash, "the previous run crashed. `cavawall log last-exit` says how");
     }
-    if env::var_os("CAVAWALL_REEXEC").is_some() {
-        env::remove_var("CAVAWALL_REEXEC");
-    } else {
+    if !reexeced {
         cavawall::notify::send(NotifyEvent::Start, "started");
     }
     // Colours are checked here, once, so a typo is a message naming the key

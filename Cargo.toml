@@ -2,7 +2,7 @@
 name = "cavawall"
 version = "0.6.0"
 license = "GPL-3.0-or-later"
-edition = "2021"
+edition = "2024"
 
 [[bin]]
 name = "cavawall"
