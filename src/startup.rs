@@ -1100,7 +1100,7 @@ pub(crate) fn run() {
     // Elsewhere, the standard protocol: bound only when the policy is on and
     // Hyprland's IPC is not answering it more precisely
     if on_fullscreen != FullscreenPolicy::Ignore && hypr_events.is_none() {
-        match globals.bind::<wayland_protocols_wlr::foreign_toplevel::v1::client::zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1, _, _>(&qh, 1..=3, ()) {
+        match globals.bind::<wayland_protocols_wlr::foreign_toplevel::v1::client::zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1, _, _>(&qh, 1..=3, toplevel::ManagerData) {
             Ok(_) => say!("following fullscreen windows through foreign-toplevel"),
             Err(_) => say!("on_fullscreen is set, but the compositor offers neither Hyprland IPC nor foreign-toplevel; ignoring fullscreen windows"),
         }
