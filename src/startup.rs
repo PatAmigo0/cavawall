@@ -443,7 +443,7 @@ pub(crate) fn run() {
     drop(input_region);
     egl.bind_api(egl::OPENGL_API)
         .unwrap_or_else(|e| fatal!("EGL has no desktop OpenGL API ({e}); is the GPU driver's EGL installed?"));
-    let egl_display = unsafe { egl.get_display(conn.display().id().as_ptr() as *mut std::ffi::c_void) }
+    let egl_display = unsafe { egl.get_display(conn.display().id().as_ptr().cast::<std::ffi::c_void>()) }
         .unwrap_or_else(|| fatal!("EGL has no display for this Wayland connection"));
     egl.initialize(egl_display).unwrap_or_else(|e| fatal!("EGL will not initialise ({e})"));
     // Colour only. Occluders live in a texture filled once per configure, so
@@ -663,16 +663,16 @@ pub(crate) fn run() {
     let background_color = array_from_config_color(&config.general.background_color);
 
     unsafe {
-        gl::GenVertexArrays(1, &mut vao);
+        gl::GenVertexArrays(1, &raw mut vao);
         gl::BindVertexArray(vao);
-        gl::GenBuffers(1, &mut quad_vbo);
-        gl::GenBuffers(1, &mut height_vbo);
-        gl::GenBuffers(1, &mut gradient_colors_ssbo);
+        gl::GenBuffers(1, &raw mut quad_vbo);
+        gl::GenBuffers(1, &raw mut height_vbo);
+        gl::GenBuffers(1, &raw mut gradient_colors_ssbo);
         gl::BindBuffer(gl::SHADER_STORAGE_BUFFER, gradient_colors_ssbo);
         gl::BufferData(
             gl::SHADER_STORAGE_BUFFER,
             buffer_data.len() as GLsizeiptr,
-            buffer_data.as_ptr() as *const ffi::c_void,
+            buffer_data.as_ptr().cast::<ffi::c_void>(),
             gl::STATIC_DRAW,
         );
         gl::BindBufferBase(gl::SHADER_STORAGE_BUFFER, 0, gradient_colors_ssbo);
@@ -695,8 +695,8 @@ pub(crate) fn run() {
         if ring.is_none() {
             // A failed mapping leaves immutable storage behind, which cannot
             // be respecified: start over on a fresh name
-            gl::DeleteBuffers(1, &height_vbo);
-            gl::GenBuffers(1, &mut height_vbo);
+            gl::DeleteBuffers(1, &raw const height_vbo);
+            gl::GenBuffers(1, &raw mut height_vbo);
             gl::BindBuffer(gl::ARRAY_BUFFER, height_vbo);
             gl::BufferData(gl::ARRAY_BUFFER, frame_bytes, std::ptr::null(), gl::DYNAMIC_DRAW);
         }
@@ -787,8 +787,8 @@ pub(crate) fn run() {
                 // Created empty and bound. Bars cannot be built until a surface
                 // exists - their normals and their crop both depend on the
                 // output's shape - and configure() fills these before any draw
-                gl::GenBuffers(1, &mut path_ssbo);
-                gl::GenBuffers(1, &mut width_ssbo);
+                gl::GenBuffers(1, &raw mut path_ssbo);
+                gl::GenBuffers(1, &raw mut width_ssbo);
                 upload_bars(&[], path_ssbo, width_ssbo);
                 curve_fit = cfg.fit.unwrap_or_default();
                 curve_image = wallpaper.as_ref().and_then(|(_, size)| *size);
@@ -849,7 +849,7 @@ pub(crate) fn run() {
             // Unit 1; unit 0 is the occluder mask's. Filtered, since the image
             // is scaled onto the output; clamped, so the crop never wraps
             let mut texture = 0u32;
-            gl::GenTextures(1, &mut texture);
+            gl::GenTextures(1, &raw mut texture);
             gl::ActiveTexture(gl::TEXTURE1);
             gl::BindTexture(gl::TEXTURE_2D, texture);
             gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::LINEAR as i32);
@@ -914,7 +914,7 @@ pub(crate) fn run() {
         // SAFETY: a context is current and nothing else uses texture unit 0
         unsafe {
             let mut texture = 0u32;
-            gl::GenTextures(1, &mut texture);
+            gl::GenTextures(1, &raw mut texture);
             gl::ActiveTexture(gl::TEXTURE0);
             gl::BindTexture(gl::TEXTURE_2D, texture);
             // Integer textures cannot be filtered, and a filtered one is
@@ -1025,7 +1025,7 @@ pub(crate) fn run() {
         program: shader_program,
         silent_frames: 0,
         background_color,
-        config_path: config_filename.clone(),
+        config_path: config_filename,
         bars_from,
         framerate,
         framerate_from,
@@ -1126,7 +1126,7 @@ pub(crate) fn run() {
             })
             .unwrap();
     }
-    WaylandSource::new(conn.clone(), event_queue)
+    WaylandSource::new(conn, event_queue)
         .insert(loop_handle)
         .unwrap();
     // Startup is done: config text, shader sources, the curve's dense

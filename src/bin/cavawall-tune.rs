@@ -262,9 +262,11 @@ fn handle(stream: TcpStream, server: &RwLock<Site>) {
             let body = match on_screen() {
                 Some((wallpaper, key)) => {
                     println!("cavawall-tune: now editing {}", wallpaper.display());
-                    let mut s = server.write().unwrap_or_else(PoisonError::into_inner);
-                    s.wallpaper = wallpaper;
-                    s.key.clone_from(&key);
+                    {
+                        let mut s = server.write().unwrap_or_else(PoisonError::into_inner);
+                        s.wallpaper = wallpaper;
+                        s.key.clone_from(&key);
+                    }
                     serde_json::json!({ "ok": true, "key": key })
                 }
                 None => serde_json::json!({ "ok": false, "error": "cannot tell which wallpaper is on screen" }),
@@ -283,14 +285,17 @@ fn on_screen() -> Option<(PathBuf, String)> {
     let path = curve::current_wallpaper().filter(|p| p.is_file())?;
     let meta = std::fs::metadata(&path).ok()?;
     let (len, mtime) = (meta.len(), meta.modified().ok()?);
-    let mut last = LAST.lock().unwrap_or_else(PoisonError::into_inner);
-    if let Some((p, l, m, key)) = last.as_ref() {
-        if *p == path && *l == len && *m == mtime {
-            return Some((path, key.clone()));
-        }
+    let lock = || LAST.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some((p, l, m, key)) = lock().as_ref()
+        && *p == path
+        && *l == len
+        && *m == mtime
+    {
+        return Some((path, key.clone()));
     }
+    // Hashed unlocked, so a slow image never holds up another request
     let key = curve::content_key(&path)?;
-    *last = Some((path.clone(), len, mtime, key.clone()));
+    *lock() = Some((path.clone(), len, mtime, key.clone()));
     Some((path, key))
 }
 
@@ -326,7 +331,7 @@ fn reveal_source(wallpaper: &Path) -> Option<PathBuf> {
 
 /// The extension a picture's own bytes call for, so a file named wrongly, or
 /// something that is no picture at all, is caught here
-fn sniff(bytes: &[u8]) -> Option<&'static str> {
+const fn sniff(bytes: &[u8]) -> Option<&'static str> {
     match bytes {
         [0x89, b'P', b'N', b'G', ..] => Some("png"),
         [0xff, 0xd8, 0xff, ..] => Some("jpg"),

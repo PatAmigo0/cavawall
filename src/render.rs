@@ -15,7 +15,7 @@ pub(crate) fn surface_map(out: (u32, u32), rect: (u32, u32, u32, u32)) -> ([f32;
     let bottom = oh - t - sh;
     (
         [ow / sw, oh / sh],
-        [(ow - sw - 2.0 * l) / sw, (oh - sh - 2.0 * bottom) / sh],
+        [fma(-2.0, l, ow - sw) / sw, fma(-2.0, bottom, oh - sh) / sh],
         [l / ow, bottom / oh, sw / ow, sh / oh],
     )
 }
@@ -118,8 +118,8 @@ pub(crate) struct DamageMap {
     bucket_of: Box<[u8]>,
     /// Each bucket's pixel x-range, already widened and clamped
     bucket_x: [(i32, i32); DAMAGE_BUCKETS],
-    /// Half the surface height, the one NDC-to-pixel factor still needed
-    half_h: f32,
+    /// Surface pixels per raw cava unit: a sample straight to a pixel row
+    px_per_unit: f32,
     height: i32,
     /// Bars hang from the top edge, so a height counts down from there
     down: bool,
@@ -138,7 +138,7 @@ impl DamageMap {
     ) -> Self {
         const _: () = assert!(DAMAGE_BUCKETS <= u8::MAX as usize, "bucket must fit a u8");
         let bars = bar_count as usize;
-        let (w, iw) = (width as f32, width as i32);
+        let (hw, iw) = (width as f32 * 0.5, width as i32);
         let mut bucket_of = vec![0u8; bars].into_boxed_slice();
         let mut bucket_x = [(i32::MAX, i32::MIN); DAMAGE_BUCKETS];
         for (i, slot) in bucket_of.iter_mut().enumerate() {
@@ -147,12 +147,14 @@ impl DamageMap {
             // Widened a pixel each way here, once, rather than per frame: the
             // NDC-to-pixel conversion rounds, and a rect one pixel short leaves
             // a stale line of the old bar on screen
-            let x0 = (bar_stride * i as f32 * 0.5 * w).floor() as i32 - 1;
-            let x1 = ((bar_stride * i as f32 + bar_width) * 0.5 * w).ceil() as i32 + 1;
+            // The vertex shader's own edges, then its viewport transform
+            let left = fma(bar_stride, i as f32, -1.0);
+            let x0 = fma(left, hw, hw).floor() as i32 - 1;
+            let x1 = fma(left + bar_width, hw, hw).ceil() as i32 + 1;
             bucket_x[b].0 = bucket_x[b].0.min(x0.clamp(0, iw));
             bucket_x[b].1 = bucket_x[b].1.max(x1.clamp(0, iw));
         }
-        Self { bucket_of, bucket_x, half_h: height as f32 * 0.5, height: height as i32, down, mirror }
+        Self { bucket_of, bucket_x, px_per_unit: height as f32 * BAR_UNIT, height: height as i32, down, mirror }
     }
 }
 
@@ -163,8 +165,8 @@ impl DamageMap {
 /// old bar on screen that no test touching GL would catch either
 ///
 /// The per-bar loop is a table lookup and four min/max with no arithmetic at
-/// all; heights stay in NDC until the eight buckets are converted at the end,
-/// so the conversion runs eight times instead of once per bar
+/// all; heights stay raw until the eight buckets are converted at the end,
+/// one multiply each, so eight times instead of once per bar
 ///
 /// EGL wants surface coordinates with the origin bottom-left, which is the
 /// direction bar heights already run, so nothing has to be flipped
@@ -197,13 +199,9 @@ pub(crate) fn damage_rects(frame: &[u8], prev: &[u8], map: &DamageMap, out: &mut
         if lr > hr {
             continue; // nothing in this bucket moved
         }
-        let (l, h) = (
-            fma(f32::from(lr), BAR_NDC_SCALE, -1.0),
-            fma(f32::from(hr), BAR_NDC_SCALE, -1.0),
-        );
         let (x0, x1) = map.bucket_x[b];
-        let y0 = (((l + 1.0) * map.half_h).floor() as i32 - 1).clamp(0, map.height);
-        let y1 = (((h + 1.0) * map.half_h).ceil() as i32 + 1).clamp(0, map.height);
+        let y0 = ((f32::from(lr) * map.px_per_unit).floor() as i32 - 1).clamp(0, map.height);
+        let y1 = ((f32::from(hr) * map.px_per_unit).ceil() as i32 + 1).clamp(0, map.height);
         let (y0, y1) = if map.mirror {
             (0, map.height)
         } else if map.down {

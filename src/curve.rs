@@ -33,8 +33,8 @@ pub struct Control {
 
 impl Control {
     /// NDC has y running the other way and both axes spanning -1..1
-    pub(crate) fn to_ndc(self) -> [f32; 2] {
-        [self.x * 2.0 - 1.0, 1.0 - self.y * 2.0]
+    pub(crate) const fn to_ndc(self) -> [f32; 2] {
+        [fma(self.x, 2.0, -1.0), fma(self.y, -2.0, 1.0)]
     }
 }
 
@@ -50,8 +50,8 @@ impl Control {
 fn catmull_rom(p0: [f32; 2], p1: [f32; 2], p2: [f32; 2], p3: [f32; 2], t: f32) -> [f32; 2] {
     let mut out = [0.0; 2];
     for i in 0..2 {
-        let a = -p0[i] + 3.0 * p1[i] - 3.0 * p2[i] + p3[i];
-        let b = 2.0 * p0[i] - 5.0 * p1[i] + 4.0 * p2[i] - p3[i];
+        let a = fma(3.0, p1[i] - p2[i], p3[i] - p0[i]);
+        let b = fma(2.0, p0[i], fma(-5.0, p1[i], fma(4.0, p2[i], -p3[i])));
         let c = -p0[i] + p2[i];
         let d = 2.0 * p1[i];
         out[i] = 0.5 * fma(fma(fma(a, t, b), t, c), t, d);
@@ -171,8 +171,7 @@ fn sample_arc(a: &Arc, count: usize, flip: bool, upright: bool, aspect: f32) -> 
         // included
         let mut normal = if let Some(deg) = aa {
             // Degrees clockwise from up, so 0 is [0,1] and 90 is [1,0].
-            let (s, c) = deg.to_radians().sin_cos();
-            [s, c]
+            deg.to_radians().sin_cos().into()
         } else if upright || len <= f32::EPSILON {
             // Straight rectangles rising from the path rather than leaning
             // with it
@@ -469,10 +468,11 @@ pub fn corners(bar: &Bar, aspect: f32) -> [[f32; 2]; 4] {
     let n = bar.normal;
     let across = [-n[1] * bar.width, n[0] * aspect * bar.width];
     let along = [n[0] / aspect * bar.reach, n[1] * bar.reach];
+    // The vertex shader's own form, so the CPU box matches what it draws
     [(-0.5, 0.0), (0.5, 0.0), (-0.5, 1.0), (0.5, 1.0)].map(|(u, v)| {
         [
-            bar.pos[0] + across[0] * u + along[0] * v,
-            bar.pos[1] + across[1] * u + along[1] * v,
+            fma(along[0], v, fma(across[0], u, bar.pos[0])),
+            fma(along[1], v, fma(across[1], u, bar.pos[1])),
         ]
     })
 }
@@ -490,7 +490,7 @@ pub fn bounds(bars: &[Bar], aspect: f32, mirror: bool) -> (f32, f32, f32, f32) {
     // tip corners reflected through its base
     let reflected = |b: &Bar| {
         let c = corners(b, aspect);
-        [0, 1].map(|i| [2.0 * c[i][0] - c[i + 2][0], 2.0 * c[i][1] - c[i + 2][1]])
+        [0, 1].map(|i| [fma(2.0, c[i][0], -c[i + 2][0]), fma(2.0, c[i][1], -c[i + 2][1])])
     };
     let back = bars.iter().filter(|_| mirror).flat_map(reflected);
     for [x, y] in bars.iter().flat_map(|b| corners(b, aspect)).chain(back) {
@@ -640,26 +640,26 @@ impl Fit {
     /// The image is treated as already output-shaped. What every curve
     /// authored before `image_size` existed assumed, and what a daemon that
     /// stretches rather than crops actually does
-    pub const STRETCH: Fit = Fit { sx: 1.0, sy: 1.0, ox: 0.0, oy: 0.0 };
+    pub const STRETCH: Self = Self { sx: 1.0, sy: 1.0, ox: 0.0, oy: 0.0 };
 
     /// Scale to cover the output, centre, crop the overflow
     #[must_use]
-    pub fn cover(image: (u32, u32), output: (u32, u32)) -> Fit {
+    pub fn cover(image: (u32, u32), output: (u32, u32)) -> Self {
         let (iw, ih) = (image.0 as f32, image.1 as f32);
         let (ow, oh) = (output.0 as f32, output.1 as f32);
         if iw <= 0.0 || ih <= 0.0 || ow <= 0.0 || oh <= 0.0 {
-            return Fit::STRETCH;
+            return Self::STRETCH;
         }
         let scale = (ow / iw).max(oh / ih);
         let (sx, sy) = (iw * scale / ow, ih * scale / oh);
-        Fit { sx, sy, ox: (1.0 - sx) * 0.5, oy: (1.0 - sy) * 0.5 }
+        Self { sx, sy, ox: (1.0 - sx) * 0.5, oy: (1.0 - sy) * 0.5 }
     }
 
     /// Image coordinates to output coordinates, both normalised, origin top
     /// left
     #[must_use]
-    pub fn map(&self, p: [f32; 2]) -> [f32; 2] {
-        [p[0] * self.sx + self.ox, p[1] * self.sy + self.oy]
+    pub const fn map(&self, p: [f32; 2]) -> [f32; 2] {
+        [fma(p[0], self.sx, self.ox), fma(p[1], self.sy, self.oy)]
     }
 }
 
@@ -682,6 +682,7 @@ pub fn current_wallpaper() -> Option<std::path::PathBuf> {
 }
 
 #[cfg(test)]
+#[allow(clippy::float_cmp, clippy::suboptimal_flops, clippy::manual_midpoint, clippy::decimal_bitwise_operands, reason = "tests compare exact values and keep their maths independent of the code they check")]
 mod tests {
     use super::*;
 

@@ -52,7 +52,7 @@ pub struct Response {
 
 impl Response {
     #[must_use]
-    pub fn ok(data: Option<serde_json::Value>) -> Self {
+    pub const fn ok(data: Option<serde_json::Value>) -> Self {
         Self { ok: true, error: None, data }
     }
     #[must_use]
@@ -64,6 +64,10 @@ impl Response {
 /// Bind the socket, replacing a stale one.
 ///
 /// Unlinking first is safe only while the instance lock is held.
+///
+/// # Errors
+///
+/// When the socket cannot be bound
 pub fn bind() -> std::io::Result<UnixListener> {
     let path = socket_path();
     let _ = std::fs::remove_file(&path);

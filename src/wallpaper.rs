@@ -28,7 +28,7 @@ fn home() -> PathBuf {
 }
 
 fn xdg(var: &str, fallback: &str) -> PathBuf {
-    std::env::var_os(var).map(PathBuf::from).unwrap_or_else(|| home().join(fallback))
+    std::env::var_os(var).map_or_else(|| home().join(fallback), PathBuf::from)
 }
 
 /// `~/` expanded against home; anything else as written
@@ -47,20 +47,22 @@ pub fn configure(cfg: Option<&WallpaperSource>) {
             cfg.and_then(|c| c.path.as_deref())
                 .map_or_else(|| xdg("XDG_CONFIG_HOME", ".config").join("waypaper/config.ini"), expand),
         ),
-        "file" => match cfg.and_then(|c| c.path.as_deref()) {
-            Some(p) => Source::File(expand(p)),
-            None => {
+        "file" => {
+            if let Some(p) = cfg.and_then(|c| c.path.as_deref()) {
+                Source::File(expand(p))
+            } else {
                 eprintln!("cavawall: [wallpaper] source = \"file\" needs a path; using Caelestia's");
                 caelestia()
             }
-        },
-        "command" => match cfg.and_then(|c| c.command.clone()).filter(|c| !c.is_empty()) {
-            Some(c) => Source::Command(c),
-            None => {
+        }
+        "command" => {
+            if let Some(c) = cfg.and_then(|c| c.command.clone()).filter(|c| !c.is_empty()) {
+                Source::Command(c)
+            } else {
                 eprintln!("cavawall: [wallpaper] source = \"command\" needs a command; using Caelestia's");
                 caelestia()
             }
-        },
+        }
         other => {
             eprintln!("cavawall: unknown [wallpaper] source {other:?}; using Caelestia's");
             caelestia()

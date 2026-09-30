@@ -51,7 +51,7 @@ fn now() -> String {
     unsafe {
         let t = libc::time(std::ptr::null_mut());
         let mut tm: libc::tm = std::mem::zeroed();
-        libc::localtime_r(&t, &mut tm);
+        libc::localtime_r(&raw const t, &raw mut tm);
         format!(
             "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
             tm.tm_year + 1900,
@@ -180,6 +180,10 @@ pub fn prepare_crash_record() {
 }
 
 /// The last `n` lines of the log
+///
+/// # Errors
+///
+/// When the log cannot be read
 pub fn tail(n: usize) -> std::io::Result<String> {
     let text = fs::read_to_string(path())?;
     let lines: Vec<&str> = text.lines().collect();
