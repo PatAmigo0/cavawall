@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Rust-2021-orange.svg" alt="Rust">
+  <img src="https://img.shields.io/badge/Rust-2024-orange.svg" alt="Rust">
   <img src="https://img.shields.io/badge/Wayland-layer--shell-green.svg" alt="Wayland">
   <img src="https://img.shields.io/badge/OpenGL-4.3%2B-blue.svg" alt="OpenGL">
   <img src="https://img.shields.io/badge/license-GPL--3.0-lightgrey.svg" alt="GPL-3.0">

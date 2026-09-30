@@ -164,7 +164,7 @@ use std::io::Write;
 use std::process::exit;
 use std::os::fd::AsRawFd;
 use std::path::PathBuf;
-use std::os::unix::ffi::OsStrExt;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::{env, fs, ptr};
 use std::{
     process::{Command, Stdio},
@@ -754,12 +754,8 @@ impl AppState {
             }
             // Answer before acting: re-exec never comes back to write one
             Request::Move { output } => {
-                match &output {
-                    Some(name) => env::set_var("CAVAWALL_OUTPUT", name),
-                    None => env::remove_var("CAVAWALL_OUTPUT"),
-                }
                 control::write_response(stream, &Response::ok(None));
-                self.reexec();
+                self.reexec_pinned(Some(output.as_deref()));
             }
             Request::Refresh => {
                 control::write_response(stream, &Response::ok(None));
@@ -791,6 +787,15 @@ impl AppState {
     /// with zero or two instances. The environment carries over too, so a
     /// CAVAWALL_OUTPUT pin set by `cavawall move` survives the restart
     fn reexec(&mut self) {
+        self.reexec_pinned(None);
+    }
+
+    /// `reexec`, with `pin` replacing CAVAWALL_OUTPUT when given: Some(None)
+    /// drops the pin
+    ///
+    /// The new environment goes to execve rather than through set_var: GL
+    /// driver and notify threads are alive here, and set_var under them is UB
+    fn reexec_pinned(&mut self, pin: Option<Option<&str>>) {
         // On exec our Wayland connection closes exactly as it would on a kill
         self.clear_surface();
 
@@ -828,14 +833,26 @@ impl AppState {
             .collect();
 
         // The next image is this instance carrying on, not a new start
-        env::set_var("CAVAWALL_REEXEC", "1");
-        if let Some(program) = program {
-            if let Ok(prog) = CString::new(program.as_os_str().as_bytes()) {
-                let mut argv: Vec<*const libc::c_char> =
-                    args.iter().map(|a| a.as_ptr()).collect();
-                argv.push(ptr::null());
-                unsafe { libc::execv(prog.as_ptr(), argv.as_ptr()) };
-            }
+        let set = [Some(("CAVAWALL_REEXEC", "1")), pin.flatten().map(|o| ("CAVAWALL_OUTPUT", o))];
+        let envs: Vec<CString> = env::vars_os()
+            .filter(|(k, _)| k != "CAVAWALL_REEXEC" && (pin.is_none() || k != "CAVAWALL_OUTPUT"))
+            .map(|(k, v)| (k.into_vec(), v.into_vec()))
+            .chain(set.into_iter().flatten().map(|(k, v)| (k.into(), v.into())))
+            .filter_map(|(mut kv, v)| {
+                kv.push(b'=');
+                kv.extend(v);
+                CString::new(kv).ok()
+            })
+            .collect();
+        if let Some(program) = program
+            && let Ok(prog) = CString::new(program.as_os_str().as_bytes())
+        {
+            let nul_terminated = |v: &[CString]| {
+                v.iter().map(|a| a.as_ptr()).chain([ptr::null()]).collect::<Vec<_>>()
+            };
+            let (argv, envp) = (nul_terminated(&args), nul_terminated(&envs));
+            // SAFETY: every pointer is a live CString and both arrays end in NULL
+            unsafe { libc::execve(prog.as_ptr(), argv.as_ptr(), envp.as_ptr()) };
         }
         // Only reachable if the exec failed. Carrying on at the old bar count
         // beats dying over a settings change: the surface just cleared gets
