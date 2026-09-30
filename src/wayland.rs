@@ -46,11 +46,8 @@ impl OutputHandler for AppState {
     }
 }
 
-delegate_compositor!(AppState);
-
-delegate_output!(AppState);
+delegate_dispatch2!(AppState);
 delegate_registry!(AppState);
-delegate_layer!(AppState);
 
 impl ProvidesRegistryState for AppState {
     fn registry(&mut self) -> &mut RegistryState {

@@ -11,12 +11,12 @@ use smithay_client_toolkit::shell::wlr_layer::{
 };
 use smithay_client_toolkit::shell::WaylandSurface;
 use smithay_client_toolkit::{
-    compositor::{CompositorHandler, CompositorState, Region},
+    compositor::{CompositorHandler, CompositorState, FrameCallbackData, Region},
     output::{OutputHandler, OutputInfo, OutputState},
     registry::RegistryState,
 };
 use smithay_client_toolkit::{
-    delegate_compositor, delegate_layer, delegate_output, delegate_registry, registry_handlers,
+    delegate_dispatch2, delegate_registry, registry_handlers,
 };
 use wayland_client::protocol::wl_surface::WlSurface;
 use wayland_client::Proxy;
@@ -1733,7 +1733,7 @@ impl AppState {
         // is double-buffered state and takes effect on the next commit, which
         // the swap provides; requested afterwards it waits for a commit that
         // may never come. frame-then-swap keeps exactly one callback in flight
-        self.surface.frame(&self.qh, self.surface.clone());
+        self.surface.frame(&self.qh, FrameCallbackData(self.surface.clone()));
         self.frame_pending = true;
         self.present();
     }

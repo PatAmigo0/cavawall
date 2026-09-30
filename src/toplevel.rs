@@ -9,9 +9,9 @@
 
 use std::collections::{BTreeSet, HashMap};
 
+use smithay_client_toolkit::dispatch2::Dispatch2;
 use smithay_client_toolkit::reexports::client::{
-    backend::ObjectId, event_created_child, protocol::wl_output::WlOutput, Connection, Dispatch, Proxy,
-    QueueHandle,
+    backend::ObjectId, event_created_child, protocol::wl_output::WlOutput, Connection, Proxy, QueueHandle,
 };
 use wayland_protocols_wlr::foreign_toplevel::v1::client::{
     zwlr_foreign_toplevel_handle_v1::{self, State, ZwlrForeignToplevelHandleV1},
@@ -46,14 +46,20 @@ impl Toplevels {
     }
 }
 
-impl Dispatch<ZwlrForeignToplevelManagerV1, ()> for AppState {
+/// User data of the manager and of each window handle
+#[derive(Default)]
+pub struct ManagerData;
+#[derive(Default)]
+pub struct HandleData;
+
+impl Dispatch2<ZwlrForeignToplevelManagerV1, AppState> for ManagerData {
     fn event(
-        state: &mut Self,
+        &self,
+        state: &mut AppState,
         _: &ZwlrForeignToplevelManagerV1,
         event: zwlr_foreign_toplevel_manager_v1::Event,
-        _: &(),
         _: &Connection,
-        _: &QueueHandle<Self>,
+        _: &QueueHandle<AppState>,
     ) {
         if let zwlr_foreign_toplevel_manager_v1::Event::Toplevel { toplevel } = event {
             state.toplevels.windows.insert(toplevel.id(), Window::default());
@@ -61,18 +67,18 @@ impl Dispatch<ZwlrForeignToplevelManagerV1, ()> for AppState {
     }
 
     event_created_child!(AppState, ZwlrForeignToplevelManagerV1, [
-        zwlr_foreign_toplevel_manager_v1::EVT_TOPLEVEL_OPCODE => (ZwlrForeignToplevelHandleV1, ()),
+        zwlr_foreign_toplevel_manager_v1::EVT_TOPLEVEL_OPCODE => (ZwlrForeignToplevelHandleV1, HandleData),
     ]);
 }
 
-impl Dispatch<ZwlrForeignToplevelHandleV1, ()> for AppState {
+impl Dispatch2<ZwlrForeignToplevelHandleV1, AppState> for HandleData {
     fn event(
-        state: &mut Self,
+        &self,
+        state: &mut AppState,
         handle: &ZwlrForeignToplevelHandleV1,
         event: zwlr_foreign_toplevel_handle_v1::Event,
-        _: &(),
         _: &Connection,
-        qh: &QueueHandle<Self>,
+        qh: &QueueHandle<AppState>,
     ) {
         use zwlr_foreign_toplevel_handle_v1::Event;
         let id = handle.id();
