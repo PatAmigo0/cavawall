@@ -34,6 +34,27 @@ flat out uint vMask;
 uniform float InvCount;
 out float vAlong;
 #endif
+#ifdef PATH_PALETTES
+// Paths with palettes of their own. Per bar: x = its palette's first stop,
+// y = that palette's stop count less one, z = where the bar starts along the
+// bars sharing the palette and w = how far it runs, both 0..1
+layout(std430, binding = 4) readonly buffer BarPalettes {
+    vec4 bar_palette[];
+};
+flat out int vFirst;
+flat out float vSpan;
+flat out int vLast;
+#ifdef MATTE
+// Every palette's mean follows its last stop
+layout(std430, binding = 0) readonly buffer GradientColors {
+    int gradient_colors_size;
+    float stop_span;
+    int last_pair;
+    vec4 gradient_colors[];
+};
+flat out vec3 vMatte;
+#endif
+#endif
 #ifdef REVEAL_PULSE
 flat out float vPeak;
 #endif
@@ -68,8 +89,21 @@ void main() {
     vSize = vec2(g.x * 0.5 * OutputPx.x, height * g.y * 0.5 * OutputPx.y);
     vLocal = vec2((corner.x - 0.5) * vSize.x, side * vSize.y);
 #endif
+#ifdef PATH_PALETTES
+    vec4 pal = bar_palette[gl_InstanceID];
+    vFirst = int(pal.x);
+    vSpan = pal.y;
+    vLast = int(pal.y) - 1;
+#ifdef MATTE
+    vMatte = gradient_colors[vFirst + vLast + 2].rgb;
+#endif
+#endif
 #ifdef GRADIENT_ROW
+#ifdef PATH_PALETTES
+    vAlong = fma(corner.x, pal.w, pal.z);
+#else
     vAlong = (float(gl_InstanceID) + corner.x) * InvCount;
+#endif
 #endif
 #ifdef REVEAL_PULSE
     vPeak = height;

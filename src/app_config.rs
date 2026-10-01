@@ -156,6 +156,9 @@ pub struct WallpaperConfig {
     /// Startup-only, being cava's own rate: a wallpaper switch re-execs
     /// whenever either side has a file, so it applies on the switch
     pub framerate: Option<u32>,
+    /// This wallpaper's own gradient, replacing `[colors]`. Stops with a
+    /// `role` follow the live palette exactly as there
+    pub colors: Option<Palette>,
     pub circle: Option<CircleConfig>,
     pub bars: Option<BarOverride>,
     pub curve: Option<CurveConfig>,
@@ -163,20 +166,23 @@ pub struct WallpaperConfig {
 
 impl WallpaperConfig {
     /// Prepended on write; `toml` cannot emit comments itself.
-    const HEADER: &'static str = "\
+    pub const HEADER: &'static str = "\
 # cavawall settings for one wallpaper, keyed by its content hash so the file
 # survives a rename or a move. Written by `cavawall tune`; hand edits are fine.
 #
-#   name    label for you; nothing reads it
-#   mode    bars | circle | curve, overriding general.mode in config.toml
-#   framerate  frames per second, overriding general.framerate
-#   bars    amount, gap, max_height, opacity, matte, left, span, baseline,
-#           grow, radius, blocks, mirror, gradient, reveal, reveal_pulse -
-#           each falls back to [bars] in config.toml
-#   circle  bars, diameter, inner_radius, inner_alpha, outer_alpha, and
-#           anchor with margin_x/margin_y, or position = [x, y]
-#   curve   bars, height, width, fit, [[curve.occluder]] shapes, and one
-#           [[curve.path]] per stretch; a path names what hides it in cut_by
+#   name      label for you; nothing reads it
+#   mode      bars | circle | curve, overriding general.mode in config.toml
+#   framerate frames per second, overriding general.framerate
+#   colors    this wallpaper's own gradient, base to tip, replacing [colors]:
+#             [\"#rrggbb\", { hex = \"#rrggbb\", alpha = 0.5, role = \"mauve\" }]
+#   bars      amount, gap, max_height, opacity, matte, left, span, baseline,
+#             grow, radius, blocks, mirror, gradient, reveal, reveal_pulse -
+#             each falls back to [bars] in config.toml
+#   circle    bars, diameter, inner_radius, inner_alpha, outer_alpha, and
+#             anchor with margin_x/margin_y, or position = [x, y]
+#   curve     bars, height, width, fit, [[curve.occluder]] shapes, and one
+#             [[curve.path]] per stretch; a path names what hides it in
+#             cut_by and can carry its own colors
 #
 # Delete this file to go back to config.toml's defaults for this wallpaper.
 
@@ -204,7 +210,66 @@ impl WallpaperConfig {
         round_floats(&mut value);
         let body = toml::to_string(&value)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        std::fs::write(path, Self::HEADER.to_owned() + &body)
+        let mut doc: toml_edit::DocumentMut =
+            body.parse().map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        inline_palettes(doc.as_table_mut());
+        if let Some(paths) = doc.get_mut("curve").and_then(|c| c.get_mut("path")).and_then(toml_edit::Item::as_array_of_tables_mut) {
+            paths.iter_mut().for_each(inline_palettes);
+        }
+        std::fs::write(path, Self::HEADER.to_owned() + &doc.to_string())
+    }
+}
+
+/// A palette as one line, `colors = [{ hex = .., alpha = .. }, ..]`, where
+/// the writer would give every stop a `[[colors]]` block of its own
+fn inline_palettes(table: &mut toml_edit::Table) {
+    let Some(item) = table.get_mut("colors") else { return };
+    let mut stops = match std::mem::take(item) {
+        toml_edit::Item::ArrayOfTables(blocks) => blocks.into_array(),
+        toml_edit::Item::Value(toml_edit::Value::Array(stops)) => stops,
+        other => {
+            *item = other;
+            return;
+        }
+    };
+    let rank = |k: &str| ["hex", "alpha", "role"].iter().position(|r| *r == k).unwrap_or(3);
+    for stop in stops.iter_mut().filter_map(toml_edit::Value::as_inline_table_mut) {
+        stop.sort_values_by(|a, _, b, _| rank(a.get()).cmp(&rank(b.get())));
+        stop.fmt();
+    }
+    stops.fmt();
+    *item = toml_edit::value(stops);
+    if let Some(mut key) = table.key_mut("colors") {
+        key.fmt();
+    }
+}
+
+/// Gradient stops in order, base to tip: a wallpaper's own palette, or a
+/// curve path's
+///
+/// Written as an array, or as a table keyed like `[colors]` and ordered the
+/// same way, by the number its keys end in. Always written back as an array
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct Palette(pub Vec<ConfigColor>);
+
+impl Serialize for Palette {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        self.0.serialize(s)
+    }
+}
+
+impl<'de> Deserialize<'de> for Palette {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Written {
+            List(Vec<ConfigColor>),
+            Keyed(HashMap<String, ConfigColor>),
+        }
+        Ok(Self(match Written::deserialize(d)? {
+            Written::List(stops) => stops,
+            Written::Keyed(keyed) => into_ordered_stops(keyed),
+        }))
     }
 }
 
@@ -294,6 +359,8 @@ pub struct PathConfig {
     /// Exactly this many bars on this path, instead of its share by length.
     /// A short foreground ridge can want more bars than a long distant one
     pub bars: Option<u32>,
+    /// This path's own gradient; absent uses the wallpaper's
+    pub colors: Option<Palette>,
     pub height: Option<f32>,
     pub width: Option<f32>,
     pub flip: Option<bool>,
@@ -305,6 +372,14 @@ pub struct PathConfig {
     /// The occluders that cut this path, by name. Absent is every one of
     /// them; empty is none. Several cut by their union
     pub cut_by: Option<Vec<String>>,
+}
+
+impl PathConfig {
+    /// Two points or more: anything less draws nothing and takes no bars
+    #[must_use]
+    pub fn is_drawn(&self) -> bool {
+        self.points.iter().filter(|p| p.len() >= 2).count() >= 2
+    }
 }
 
 /// A shape bars hide behind, shared by every path that names it
@@ -371,6 +446,7 @@ impl CurveConfig {
             _ => Cow::Owned(vec![PathConfig {
                 points: self.points.clone().unwrap_or_default(),
                 bars: self.bars,
+                colors: None,
                 height: self.height,
                 width: self.width,
                 flip: self.flip,
@@ -651,14 +727,30 @@ pub struct SmoothingConfig {
     pub noise_reduction: Option<f32>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(untagged)]
 pub enum ConfigColor {
     Simple(String),
     Complex(HexColorConfig),
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+impl ConfigColor {
+    #[must_use]
+    pub fn hex(&self) -> &str {
+        match self {
+            Self::Simple(hex) => hex,
+            Self::Complex(c) => &c.hex,
+        }
+    }
+
+    /// Takes its colour from the live palette when one is followed
+    #[must_use]
+    pub const fn has_role(&self) -> bool {
+        matches!(self, Self::Complex(HexColorConfig { role: Some(_), .. }))
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct HexColorConfig {
     pub hex: String,
     pub alpha: Option<f32>,
@@ -711,9 +803,6 @@ pub fn color_from_hex(hex: &str, a: f32) -> [f32; 4] {
     }
 }
 
-/// Borrows rather than consumes: this runs per stop on every palette reload,
-/// and the old signature cloned the hex `String` twice per call to read six
-/// characters out of it
 #[must_use]
 pub fn array_from_config_color(color: &ConfigColor) -> [f32; 4] {
     match color {
@@ -751,11 +840,7 @@ const fn hex_nibble(b: u8) -> Option<u8> {
 ///
 /// The shader treats the SSBO as an ordered ramp - it mixes stop `i` into
 /// `i + 1` down the surface - but the section deserialises into a HashMap,
-/// whose iteration order is arbitrary AND randomised per process. Upstream fed
-/// that straight to the GPU, so the gradient was shuffled on every launch. It
-/// went unnoticed here because the palette in use was eight near-identical
-/// greys, and every permutation of those looks the same; the orange gradient
-/// this repo also ships would have made it obvious
+/// whose iteration order is arbitrary and randomised per process
 ///
 /// Ordered on the key's trailing number where it has one, so this handles both
 /// naming styles in use - `c1..c8` and `gradient_color_1..8` - and
@@ -764,25 +849,30 @@ const fn hex_nibble(b: u8) -> Option<u8> {
 /// name: losing a stop silently is worse than giving it an arbitrary position
 #[must_use]
 pub fn ordered_stops(colors: &HashMap<String, ConfigColor>) -> Vec<ConfigColor> {
-    fn trailing_number(k: &str) -> Option<u64> {
-        let digits = k.trim_end_matches(|c: char| !c.is_ascii_digit());
-        // Counted in bytes: the run is ASCII digits, so the count is also a
-        // valid byte index
-        let start = digits.len() - digits.bytes().rev().take_while(u8::is_ascii_digit).count();
-        digits[start..].parse().ok()
-    }
     // Sorts on borrowed keys, cloning only the colours that reach the result
-    let mut stops: Vec<(bool, u64, &str, &ConfigColor)> = colors
-        .iter()
-        .map(|(k, v)| {
-            let n = trailing_number(k);
-            (n.is_none(), n.unwrap_or(0), k.as_str(), v)
-        })
-        .collect();
+    let mut stops: Vec<(&str, &ConfigColor)> = colors.iter().map(|(k, v)| (k.as_str(), v)).collect();
     // Unstable is free: map keys are unique, so there are no ties to preserve,
     // and it skips `sort_by`'s scratch allocation
-    stops.sort_unstable_by(|a, b| (a.0, a.1, a.2).cmp(&(b.0, b.1, b.2)));
-    stops.into_iter().map(|(_, _, _, v)| v.clone()).collect()
+    stops.sort_unstable_by(|a, b| stop_order(a.0).cmp(&stop_order(b.0)));
+    stops.into_iter().map(|(_, v)| v.clone()).collect()
+}
+
+/// `ordered_stops` for a table already owned, moving the colours out
+#[must_use]
+pub fn into_ordered_stops(colors: HashMap<String, ConfigColor>) -> Vec<ConfigColor> {
+    let mut stops: Vec<(String, ConfigColor)> = colors.into_iter().collect();
+    stops.sort_unstable_by(|a, b| stop_order(&a.0).cmp(&stop_order(&b.0)));
+    stops.into_iter().map(|(_, v)| v).collect()
+}
+
+/// Where a stop's key sorts: numbered keys by their number, then the rest by name
+fn stop_order(k: &str) -> (bool, u64, &str) {
+    let digits = k.trim_end_matches(|c: char| !c.is_ascii_digit());
+    // Counted in bytes: the run is ASCII digits, so the count is also a
+    // valid byte index
+    let start = digits.len() - digits.bytes().rev().take_while(u8::is_ascii_digit).count();
+    let n = digits[start..].parse().ok();
+    (n.is_none(), n.unwrap_or(0), k)
 }
 
 /// Resolve ordered stops to RGBA, routing each through the live scheme when one
@@ -812,34 +902,78 @@ fn live_colour(stop: &ConfigColor, scheme: Option<&HashMap<String, String>>) -> 
     try_color_from_hex(live, c.alpha.unwrap_or(1.0))
 }
 
-/// Pack stops into the std430 layout the fragment shader declares: an int
-/// count, then in what would be padding before the vec4-aligned stops the
-/// two numbers every fragment needs - count - 1 as a float, count - 2 as an
-/// int - so no fragment converts or subtracts them itself
+/// Where one palette sits among the uploaded stops
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PaletteSlot {
+    /// Its first stop's index in the shader's `gradient_colors`
+    pub first: u32,
+    /// Stops as uploaded, a lone configured one counted twice
+    pub stops: u32,
+}
+
+/// Where each palette lands in `gradient_buffer`: back to back, and with
+/// more than one, each followed by its mean
+#[must_use]
+pub fn palette_slots(configured: &[usize]) -> Vec<PaletteSlot> {
+    let mean = u32::from(configured.len() > 1);
+    let mut first = 0;
+    configured
+        .iter()
+        .map(|&n| {
+            let slot = PaletteSlot { first, stops: uploaded_stops(n) as u32 };
+            first += slot.stops + mean;
+            slot
+        })
+        .collect()
+}
+
+/// Pack palettes into the std430 layout the shaders declare: an int count,
+/// then in what would be padding before the vec4-aligned stops the two
+/// numbers every fragment needs - count - 1 as a float, count - 2 as an int -
+/// so no fragment converts or subtracts them itself. The header describes the
+/// first palette, the only one a single-palette shader reads
+///
+/// Further palettes are curve paths' own. With them, every palette's stops are
+/// followed by its mean, the tone its bars flatten toward under a matte finish
 ///
 /// Shared by the initial upload and every live re-upload; when this layout and
 /// the shader's `GradientColors` block disagree the result is silent garbage on
 /// screen, so there is exactly one copy of it
 #[must_use]
-pub fn gradient_buffer(rgba: &[[f32; 4]]) -> Vec<u8> {
+pub fn gradient_buffer<P: AsRef<[[f32; 4]]>>(palettes: &[P]) -> Vec<u8> {
     /// i32 count, f32 span, i32 last pair, one word of padding: the stops'
     /// vec4 alignment
     const HEADER: usize = 16;
-    let stops = uploaded_stops(rgba.len());
+    const STOP: usize = std::mem::size_of::<[f32; 4]>();
+    let counts: Vec<usize> = palettes.iter().map(|p| p.as_ref().len()).collect();
+    let slots = palette_slots(&counts);
+    let means = usize::from(palettes.len() > 1);
+    let stops = slots.first().map_or(2, |s| s.stops as usize);
     // Sized up front: one allocation for the whole buffer
-    let mut buf = Vec::with_capacity(HEADER + stops * std::mem::size_of::<[f32; 4]>());
+    let total: usize = slots.iter().map(|s| s.stops as usize + means).sum();
+    let mut buf = Vec::with_capacity(HEADER + total * STOP);
     buf.extend_from_slice(&(stops as i32).to_le_bytes());
     buf.extend_from_slice(&((stops - 1) as f32).to_le_bytes());
     buf.extend_from_slice(&(stops as i32 - 2).to_le_bytes());
     buf.extend_from_slice(&[0u8; HEADER - 12]);
-    // A lone stop is written twice. It costs 16 bytes and lets the shader index
-    // `size - 2` unconditionally, which is what makes its clamp branchless
-    for color in rgba.iter().chain(rgba.last().filter(|_| rgba.len() == 1)) {
-        for v in color {
-            buf.extend_from_slice(&v.to_le_bytes());
+    let mut put = |c: &[f32]| c.iter().for_each(|v| buf.extend_from_slice(&v.to_le_bytes()));
+    // An empty palette still takes its two stops, transparent, so every slot
+    // lands where palette_slots says
+    let clear = [[0.0; 4]];
+    for rgba in palettes {
+        let rgba = Some(rgba.as_ref()).filter(|p| !p.is_empty()).unwrap_or(&clear);
+        // A lone stop is written twice. It costs 16 bytes and lets the shader
+        // index `size - 2` unconditionally, which is what makes its clamp
+        // branchless
+        for color in rgba.iter().chain(rgba.last().filter(|_| rgba.len() == 1)) {
+            put(color);
+        }
+        if means == 1 {
+            let m = palette_mean(rgba);
+            put(&[m[0], m[1], m[2], 1.0]);
         }
     }
-    debug_assert_eq!(buf.len(), HEADER + stops * std::mem::size_of::<[f32; 4]>());
+    debug_assert_eq!(buf.len(), HEADER + total * STOP);
     buf
 }
 
@@ -941,7 +1075,7 @@ mod tests {
     /// between, or its unconditional `size - 2` index goes negative
     #[test]
     fn a_lone_stop_is_uploaded_twice() {
-        let buf = gradient_buffer(&[[0.25, 0.5, 0.75, 1.0]]);
+        let buf = gradient_buffer(&[[[0.25, 0.5, 0.75, 1.0]]]);
         assert_eq!(&buf[0..4], &2i32.to_le_bytes(), "count reported to the shader");
         assert_eq!(buf.len(), 16 + 2 * 16);
         assert_eq!(&buf[16..32], &buf[32..48], "both stops identical");
@@ -963,13 +1097,13 @@ mod tests {
 
     #[test]
     fn gradient_buffer_matches_std430_layout() {
-        let buf = gradient_buffer(&[[1.0, 0.0, 0.0, 1.0], [0.0, 1.0, 0.0, 1.0]]);
+        let buf = gradient_buffer(&[[[1.0, 0.0, 0.0, 1.0], [0.0, 1.0, 0.0, 1.0]]]);
         assert_eq!(&buf[0..4], &2i32.to_le_bytes());
         assert_eq!(&buf[4..8], &1.0f32.to_le_bytes(), "stop_span, count - 1");
         assert_eq!(&buf[8..12], &0i32.to_le_bytes(), "last_pair, count - 2");
         assert_eq!(&buf[12..16], &[0u8; 4], "vec4 alignment padding");
         // A lone stop is doubled, so the shader still sees a pair
-        let one = gradient_buffer(&[[1.0, 0.0, 0.0, 1.0]]);
+        let one = gradient_buffer(&[[[1.0, 0.0, 0.0, 1.0]]]);
         assert_eq!((&one[0..4], &one[4..8], &one[8..12]), (&2i32.to_le_bytes()[..], &1.0f32.to_le_bytes()[..], &0i32.to_le_bytes()[..]));
         assert_eq!(buf.len(), 16 + 2 * 16);
         assert_eq!(&buf[16..20], &1.0f32.to_le_bytes());
@@ -1090,6 +1224,57 @@ mod tests {
         let cfg: Config = toml::from_str(text).expect("config.toml deserialises");
         assert!(!cfg.colors.is_empty(), "a palette is not optional");
         assert!(cfg.general.framerate > 0);
+    }
+
+    /// A palette reads as an array or as a `[colors]`-style table, in the
+    /// table's numbered order, and is written back as the array
+    #[test]
+    fn a_palette_reads_both_ways_and_writes_an_array() {
+        let w: WallpaperConfig = toml::from_str(
+            r##"
+            colors = ["#ff0000", { hex = "#00ff00", alpha = 0.5, role = "green" }]
+            [[curve.path]]
+            points = [[0.0, 0.5], [1.0, 0.5]]
+            [curve.path.colors]
+            c10 = "#0000aa"
+            c2 = "#000022"
+            "##,
+        )
+        .expect("parses");
+        let own = w.colors.as_ref().expect("wallpaper palette");
+        assert_eq!(own.0.len(), 2);
+        assert_eq!(own.0[1].hex(), "#00ff00");
+        assert!(own.0[1].has_role() && !own.0[0].has_role());
+        let path = w.curve.as_ref().unwrap().paths()[0].colors.clone().expect("path palette");
+        assert_eq!(path.0.iter().map(ConfigColor::hex).collect::<Vec<_>>(), ["#000022", "#0000aa"], "c2 before c10");
+        let out = toml::to_string(&toml::Value::try_from(&w).unwrap()).unwrap();
+        let back: WallpaperConfig = toml::from_str(&out).expect("what is written reads back");
+        assert_eq!(back.colors, w.colors, "{out}");
+        assert_eq!(back.curve.unwrap().paths()[0].colors.as_ref(), Some(&path), "{out}");
+    }
+
+    /// Several palettes: the header still describes the first, each palette
+    /// lands where its slot says, and each is followed by its mean
+    #[test]
+    fn several_palettes_pack_back_to_back_with_their_means() {
+        let base: &[[f32; 4]] = &[[1.0, 0.0, 0.0, 1.0], [0.0, 0.0, 1.0, 1.0], [0.0, 1.0, 0.0, 1.0]];
+        let lone: &[[f32; 4]] = &[[0.5, 0.5, 0.5, 0.25]];
+        let slots = palette_slots(&[3, 1]);
+        assert_eq!(slots, [PaletteSlot { first: 0, stops: 3 }, PaletteSlot { first: 4, stops: 2 }]);
+        let buf = gradient_buffer(&[base, lone]);
+        let stop = |i: usize| -> [f32; 4] {
+            let at = 16 + i * 16;
+            std::array::from_fn(|k| f32::from_le_bytes(buf[at + k * 4..at + k * 4 + 4].try_into().unwrap()))
+        };
+        assert_eq!(&buf[0..4], &3i32.to_le_bytes(), "the header is the first palette's");
+        assert_eq!(buf.len(), 16 + (3 + 1 + 2 + 1) * 16);
+        assert_eq!(stop(3), [1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0, 1.0], "the first palette's mean");
+        assert_eq!(stop(4), lone[0]);
+        assert_eq!(stop(5), lone[0], "a lone stop is still doubled");
+        assert_eq!(stop(6), [0.5, 0.5, 0.5, 1.0]);
+        // One palette is laid out exactly as it always was: no mean
+        assert_eq!(gradient_buffer(&[base]).len(), 16 + 3 * 16);
+        assert_eq!(palette_slots(&[3]), [PaletteSlot { first: 0, stops: 3 }]);
     }
 
     /// A wallpaper's own rate survives a save, and an unset one is not written

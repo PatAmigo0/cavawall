@@ -43,6 +43,15 @@ uniform float Blocks;
 #ifdef REVEAL_PULSE
 flat in float vPeak;
 #endif
+#ifdef PATH_PALETTES
+// This bar's palette: its first stop, its count less one and less two
+flat in int vFirst;
+flat in float vSpan;
+flat in int vLast;
+#ifdef MATTE
+flat in vec3 vMatte;
+#endif
+#endif
 out vec4 fragColor;
 void main() {
     // First, before any gradient work is spent on a fragment that is hidden
@@ -62,15 +71,24 @@ void main() {
         discard;
     }
 #endif
-#ifdef GRADIENT_ROW
-    float findex = vAlong * stop_span;
+#ifdef PATH_PALETTES
+    int first = vFirst;
+    float span = vSpan;
+    int last = vLast;
 #else
-    float findex = t * stop_span;
+    const int first = 0;
+    float span = stop_span;
+    int last = last_pair;
+#endif
+#ifdef GRADIENT_ROW
+    float findex = vAlong * span;
+#else
+    float findex = t * span;
 #endif
     // Safe with no lower bound only because gradient_buffer uploads a lone
     // configured stop twice
-    int index = min(int(findex), last_pair);
-    vec4 c = mix(gradient_colors[index], gradient_colors[index + 1], findex - float(index));
+    int index = min(int(findex), last);
+    vec4 c = mix(gradient_colors[first + index], gradient_colors[first + index + 1], findex - float(index));
 #ifdef RAMP
     c.a *= mix(InnerAlpha, OuterAlpha, t);
 #endif
@@ -95,7 +113,11 @@ void main() {
     }
 #endif
 #ifdef MATTE
+#ifdef PATH_PALETTES
+    c.rgb = mix(c.rgb, vMatte, Matte);
+#else
     c.rgb = mix(c.rgb, MatteColor, Matte);
+#endif
 #endif
 #ifdef OPACITY
     c.a *= Opacity;
