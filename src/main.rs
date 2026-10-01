@@ -554,8 +554,10 @@ struct AppState {
     /// Startup-only, like the bar count: the two modes are different programs
     /// with different uniforms and different surface geometry
     mode: Mode,
-    /// Which config file this instance read, for `status`
+    /// Which config file this instance read, for `status`, and the directory
+    /// holding it and `wallpapers/`
     config_path: PathBuf,
+    config_dir: PathBuf,
     /// Where `bar_count` came from, for `status`: curve, circle, wallpaper,
     /// shell or config
     bars_from: &'static str,
@@ -601,11 +603,14 @@ struct AppState {
     horizon_scratch: Vec<f32>,
     mask_tris: Vec<curve::MaskVertex>,
     curve_fit: FitMode,
-    /// The wallpaper the running curve was resolved against, and every key the
-    /// config has one for. Together they answer the only question a wallpaper
-    /// change asks: would this still draw the same thing?
+    /// The wallpaper this instance was started for, and whether it had
+    /// settings of its own. With a look at the new wallpaper's file they
+    /// answer the only question a wallpaper change asks: would this still
+    /// draw the same thing?
     curve_key: Option<String>,
-    curve_keys: HashSet<String>,
+    own_settings: bool,
+    /// Wallpapers with a curve still in config.toml rather than a file
+    legacy_curves: HashSet<String>,
     /// The bar VAO and program. Bound at startup; kept so the mask pass can
     /// hand the pipeline back after rasterising the occluders
     vao: u32,
@@ -765,11 +770,13 @@ impl AppState {
         if changed.wallpaper {
             let key = curve::current_wallpaper().and_then(|w| curve::content_key(&w));
             // Nothing to do when neither the old wallpaper nor the new one has
-            // a curve: both draw plain bars, and restarting to keep drawing
-            // the same thing is churn the user would see as a flicker
-            let drawn = self.curve_key.as_ref().is_some_and(|k| self.curve_keys.contains(k));
-            let wanted = key.as_ref().is_some_and(|k| self.curve_keys.contains(k));
-            if key != self.curve_key && (drawn || wanted) {
+            // settings of its own: both draw the defaults, and restarting to
+            // keep drawing the same thing is churn seen as a flicker. The new
+            // one's file is looked for now, so one written since startup counts
+            let wanted = key.as_deref().is_some_and(|k| {
+                self.legacy_curves.contains(k) || WallpaperConfig::path(&self.config_dir, k).exists()
+            });
+            if key != self.curve_key && (self.own_settings || wanted) {
                 if debug_enabled() {
                     say!(
                         "wallpaper changed {:?} -> {key:?}, restarting",
