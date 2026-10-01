@@ -4,6 +4,7 @@
 //! vertex shader indexes by `gl_InstanceID`, so a curve costs what a straight
 //! row costs - one float per bar per frame, and no path maths in `draw()`
 
+use crate::app_config::{CurveConfig, PaletteSlot, PathConfig};
 use crate::math::{fma, lerp};
 
 /// One bar's place on the path, as uploaded
@@ -201,6 +202,39 @@ pub struct PathSpec {
     pub upright: bool,
     /// The occluders that cut this path, one bit each
     pub mask: u16,
+    /// Which uploaded palette its bars are drawn in; 0 is the wallpaper's
+    pub palette: u16,
+}
+
+impl PathSpec {
+    /// A path as written, with the curve's own values as its defaults
+    ///
+    /// `[x, y]` or `[x, y, scale]` plus an optional angle; a short entry is a
+    /// config typo, and skipping it beats rendering a bar at the origin
+    #[must_use]
+    pub fn from_config(path: &PathConfig, curve: &CurveConfig, mask: u16, palette: u16) -> Self {
+        Self {
+            controls: path
+                .points
+                .iter()
+                .filter(|p| p.len() >= 2)
+                .map(|p| Control {
+                    x: p[0],
+                    y: p[1],
+                    scale: p.get(2).copied().unwrap_or(1.0).max(0.0),
+                    angle: p.get(3).copied(),
+                })
+                .collect(),
+            bars: path.bars,
+            // NDC spans 2.0, so a fraction of the output is twice that
+            reach: path.height.or(curve.height).unwrap_or(0.18).clamp(0.0, 1.0) * 2.0,
+            width: path.width.or(curve.width).unwrap_or(0.006).clamp(0.0, 1.0) * 2.0,
+            flip: path.flip.or(curve.flip).unwrap_or(false),
+            upright: path.upright.or(curve.upright).unwrap_or(false),
+            mask,
+            palette,
+        }
+    }
 }
 
 /// One bar, ready for the GPU: base, normal, and the reach and width already
@@ -216,6 +250,7 @@ pub struct Bar {
     pub reach: f32,
     pub width: f32,
     pub mask: u16,
+    pub palette: u16,
 }
 
 /// A shape bars hide behind, in image coordinates
@@ -453,8 +488,35 @@ pub fn build_into(out: &mut Vec<Bar>, paths: &[PathSpec], count: u32, aspect: f3
             reach: spec.reach * scale,
             width: spec.width * scale,
             mask: spec.mask,
+            palette: spec.palette,
         }));
     }
+}
+
+/// Each bar's palette as the curve shader reads it: the palette's first stop,
+/// its stop count less one, then where the bar starts along the bars sharing
+/// that palette and how far one bar runs, both 0..1. Sharing it, a palette
+/// runs along those bars in order, as the one palette runs along every bar
+#[must_use]
+pub fn bar_palettes(bars: &[Bar], slots: &[PaletteSlot]) -> Vec<[f32; 4]> {
+    if slots.is_empty() {
+        return Vec::new();
+    }
+    let at = |b: &Bar| Some(usize::from(b.palette)).filter(|&p| p < slots.len()).unwrap_or(0);
+    let mut total = vec![0u32; slots.len()];
+    for b in bars {
+        total[at(b)] += 1;
+    }
+    let mut seen = vec![0u32; slots.len()];
+    bars.iter()
+        .map(|b| {
+            let p = at(b);
+            let (slot, n) = (slots[p], total[p] as f32);
+            let k = seen[p] as f32;
+            seen[p] += 1;
+            [slot.first as f32, (slot.stops - 1) as f32, k / n, 1.0 / n]
+        })
+        .collect()
 }
 
 /// A full-volume bar's four corners in the output's NDC, placed exactly as the
@@ -792,7 +854,7 @@ mod tests {
     /// surface to it
     #[test]
     fn bounds_cover_bar_and_width() {
-        let bar = Bar { pos: [0.0, 0.0], normal: [0.0, 1.0], reach: 0.5, width: 0.2, mask: 0 };
+        let bar = Bar { pos: [0.0, 0.0], normal: [0.0, 1.0], reach: 0.5, width: 0.2, mask: 0, palette: 0 };
         let (x0, y0, x1, y1) = bounds(&[bar], 16.0 / 9.0, false);
         assert!((x0 - -0.1).abs() < 1e-6 && (x1 - 0.1).abs() < 1e-6, "width straddles the base");
         assert!((y0 - 0.0).abs() < 1e-6 && (y1 - 0.5).abs() < 1e-6, "reach sets the top");
@@ -810,7 +872,7 @@ mod tests {
     fn a_leaning_bar_is_a_rectangle_on_a_wide_output() {
         let (ow, oh) = (1920.0f32, 1080.0f32);
         let r = 30f32.to_radians();
-        let bar = Bar { pos: [0.1, -0.2], normal: [r.sin(), r.cos()], reach: 0.4, width: 0.02, mask: 0 };
+        let bar = Bar { pos: [0.1, -0.2], normal: [r.sin(), r.cos()], reach: 0.4, width: 0.02, mask: 0, palette: 0 };
         let px = |p: [f32; 2]| [(p[0] + 1.0) * 0.5 * ow, (p[1] + 1.0) * 0.5 * oh];
         let c = corners(&bar, ow / oh).map(px);
         let across = [c[1][0] - c[0][0], c[1][1] - c[0][1]];
@@ -886,11 +948,32 @@ mod tests {
         assert_eq!(long.len(), 13, "0.6 against 0.3 of width");
         assert!(long.iter().all(|b| b.mask == 0b01), "a bar keeps its path's mask");
         assert!(bars.iter().filter(|b| b.mask == 0b10).all(|b| (b.reach - 0.1).abs() < 1e-6));
+        // And its path's palette
+        let mut own = paths.clone();
+        own[1].palette = 1;
+        let bars = build(&own, 20, 16.0 / 9.0, Fit::STRETCH);
+        assert!(bars.iter().all(|b| b.palette == u16::from(b.mask == 0b10)));
         // A path with too few points to be a curve is skipped, not drawn as a
         // point: one path left means it takes every bar
         let broken = vec![paths[0].clone(), PathSpec::default()];
         assert_eq!(build(&broken, 9, 1.0, Fit::STRETCH).len(), 9);
         assert!(build(&[], 9, 1.0, Fit::STRETCH).is_empty());
+    }
+
+    /// A bar finds its palette's stops, and the bars sharing a palette run
+    /// along it in order, each covering its share
+    #[test]
+    fn each_bar_knows_its_palette_and_its_place_along_it() {
+        let bar = |palette| Bar { palette, ..Bar::default() };
+        let slots = [PaletteSlot { first: 0, stops: 3 }, PaletteSlot { first: 4, stops: 2 }];
+        let got = bar_palettes(&[bar(0), bar(1), bar(0), bar(1), bar(0), bar(7)], &slots);
+        // Four bars in the first palette, an unknown index among them
+        assert_eq!(got[0], [0.0, 2.0, 0.0, 0.25]);
+        assert_eq!(got[2], [0.0, 2.0, 0.25, 0.25]);
+        assert_eq!(got[5], [0.0, 2.0, 0.75, 0.25], "an index past the slots falls back to the first");
+        assert_eq!(got[1], [4.0, 1.0, 0.0, 0.5]);
+        assert_eq!(got[3], [4.0, 1.0, 0.5, 0.5]);
+        assert!(bar_palettes(&[bar(0)], &[]).is_empty());
     }
 
     /// Parity fill by XOR needs every point inside a polygon covered an odd

@@ -160,7 +160,7 @@ impl LayerShellHandler for AppState {
         if curve {
             // SAFETY: a context is current here, and both buffers were
             // created at startup
-            unsafe { upload_bars(&self.curve_bars, self.path_ssbo, self.width_ssbo) };
+            unsafe { upload_bars(&self.curve_bars, self.path_ssbo, self.width_ssbo, (self.palette_ssbo, &self.palette_slots)) };
         }
         // The only moment the bar-to-pixel mapping can change
         self.damage_map = DamageMap::new(

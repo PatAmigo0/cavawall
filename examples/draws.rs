@@ -56,15 +56,7 @@ fn main() {
         .paths()
         .iter()
         .zip(occlusion.masks.iter().copied())
-        .map(|(p, mask)| curve::PathSpec {
-            controls: ctrl(&p.points),
-            bars: p.bars,
-            reach: 0.36,
-            width: 0.012,
-            flip: false,
-            upright: true,
-            mask,
-        })
+        .map(|(p, mask)| curve::PathSpec::from_config(p, &c, mask, 0))
         .collect();
     let built = curve::build(&specs, bars, 1920.0 / 1200.0, curve::Fit::STRETCH);
     let tris = curve::occluder_triangles(&occluders, curve::Fit::STRETCH);

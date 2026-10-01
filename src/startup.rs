@@ -141,6 +141,25 @@ fn known_wallpapers(dir: &std::path::Path) -> Vec<String> {
         .collect()
 }
 
+/// A wallpaper's or a path's own palette with every stop that will not parse
+/// dropped, each named; None when nothing is left of it, so it inherits
+fn usable_palette(palette: Option<&Palette>, what: &str) -> Option<Vec<ConfigColor>> {
+    let stops: Vec<ConfigColor> = palette?
+        .0
+        .iter()
+        .enumerate()
+        .filter(|(i, c)| {
+            let ok = app_config::try_color_from_hex(c.hex(), 1.0).is_some();
+            if !ok {
+                say!("{what}: colour {} = {:?} is not a colour; dropped", i + 1, c.hex());
+            }
+            ok
+        })
+        .map(|(_, c)| c.clone())
+        .collect();
+    (!stops.is_empty()).then_some(stops)
+}
+
 pub(crate) fn run() {
     dispatch();
     let mut args = env::args_os().skip(1);
@@ -214,18 +233,12 @@ pub(crate) fn run() {
     }
     // Colours are checked here, once, so a typo is a message naming the key
     // rather than a panic wherever the value is first used
-    let bad_colour = |hex: &str| app_config::try_color_from_hex(hex, 1.0).is_none();
-    let hex_of = |c: &ConfigColor| match c {
-        ConfigColor::Simple(h) => h.clone(),
-        ConfigColor::Complex(c) => c.hex.clone(),
-    };
     for (key, colour) in config.colors.iter().map(|(k, c)| (format!("colors.{k}"), c)).chain(std::iter::once((
         "general.background_color".to_owned(),
         &config.general.background_color,
     ))) {
-        let hex = hex_of(colour);
-        if bad_colour(&hex) {
-            fatal!("{}: {key} = {hex:?} is not a colour; write it as \"#rrggbb\"", config_filename.display());
+        if app_config::try_color_from_hex(colour.hex(), 1.0).is_none() {
+            fatal!("{}: {key} = {:?} is not a colour; write it as \"#rrggbb\"", config_filename.display(), colour.hex());
         }
     }
     // The bar count is startup-only: it is written into the spawned cava's
@@ -244,6 +257,17 @@ pub(crate) fn run() {
     let per_wallpaper = curve_key
         .as_ref()
         .and_then(|key| WallpaperConfig::load(&config_dir, key));
+    // CAVAWALL_OUTPUT wins over the config file, and is how an external
+    // watcher moves the visualiser between monitors: it relaunches with this
+    // set, so argv stays exactly [binary]. The launcher, the shell toggle and
+    // that watcher all identify this process by an EXACT argv match, so a flag
+    // here breaks all three at once
+    //
+    // Unset, with no preferred_output, means choose automatically
+    let pinned_output = env::var("CAVAWALL_OUTPUT")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| config.general.preferred_output.clone());
     let configured_mode = per_wallpaper
         .as_ref()
         .and_then(|w| w.mode)
@@ -562,6 +586,7 @@ pub(crate) fn run() {
     let mut curve_paths: Vec<curve::PathSpec> = Vec::new();
     let mut path_ssbo: u32 = 0;
     let mut width_ssbo: u32 = 0;
+    let mut palette_ssbo: u32 = 0;
     let mut occluders: Vec<curve::Occluder> = Vec::new();
     let mut common_mask = 0u16;
     let mut curve_fit = FitMode::default();
@@ -572,6 +597,62 @@ pub(crate) fn run() {
     if mode == Mode::Curve && active_curve.is_none() {
         mode = Mode::Bars;
     }
+    // The wallpaper's own palette wins over [colors], and each curve path may
+    // carry one more. Ordered once and kept: a live re-resolve reuses these
+    // exact Vecs rather than walking a HashMap again, which would be free to
+    // hand back a different order and silently reshuffle the gradient
+    let wallpaper_file = || format!("wallpapers/{}.toml", curve_key.as_deref().unwrap_or_default());
+    let own_palette = usable_palette(per_wallpaper.as_ref().and_then(|w| w.colors.as_ref()), &wallpaper_file());
+    let palette_from = if own_palette.is_some() { "wallpaper" } else { "config" };
+    let mut palettes = vec![own_palette.unwrap_or_else(|| ordered_stops(&config.colors))];
+    if palettes[0].is_empty() {
+        fatal!("{}: [colors] needs at least one stop to build a gradient from", config_filename.display());
+    }
+    if let Some(cfg) = active_curve.filter(|_| mode == Mode::Curve) {
+        // Every path resolved up front, each with its own geometry, the bits
+        // of the occluders that cut it and its palette: the shader never
+        // learns that paths exist
+        let occlusion = cfg.occlusion();
+        let point = |p: &Vec<f32>| curve::Control { x: p[0], y: p[1], scale: 1.0, angle: None };
+        occluders = occlusion
+            .shapes
+            .iter()
+            .map(|(pts, shape)| curve::Occluder {
+                points: pts.iter().filter(|p| p.len() >= 2).map(point).collect(),
+                closed: *shape == OccluderShape::Closed,
+            })
+            .collect();
+        curve_paths = cfg
+            .paths()
+            .iter()
+            .zip(occlusion.masks.iter().copied())
+            .enumerate()
+            .map(|(i, (path, mask))| {
+                let own = path.is_drawn().then(|| usable_palette(path.colors.as_ref(), &format!("{} path {}", wallpaper_file(), i + 1))).flatten();
+                let palette = own.map_or(0, |p| {
+                    palettes.push(p);
+                    (palettes.len() - 1) as u16
+                });
+                curve::PathSpec::from_config(path, cfg, mask, palette)
+            })
+            .collect();
+        // The occluders every bar tests. Only those may stop the surface
+        // short: one that a single path ignores cannot
+        common_mask = curve_paths
+            .iter()
+            .filter(|p| p.controls.len() >= 2)
+            .fold(u16::MAX, |m, p| m & p.mask);
+        if curve_paths.iter().all(|p| p.controls.len() < 2) {
+            common_mask = 0;
+        }
+        curve_fit = cfg.fit.unwrap_or_default();
+        curve_image = wallpaper.as_ref().and_then(|(_, size)| *size);
+        if curve_image.is_none() && debug_enabled() {
+            say!("wallpaper size unreadable, treating it as output-shaped");
+        }
+    }
+    let path_palettes = palettes.len() > 1;
+    let palette_slots = app_config::palette_slots(&palettes.iter().map(Vec::len).collect::<Vec<_>>());
     let circle = CircleGeom::from_config(circle_config);
     // Rounding and the reveal are compiled in only when used, so a config
     // without them runs the exact shaders it always did
@@ -598,7 +679,7 @@ pub(crate) fn run() {
     let matte = bars_config.matte.unwrap_or(0.0).clamp(0.0, 1.0) > 0.0;
     let opacity = bars_config.opacity.unwrap_or(1.0).clamp(0.0, 1.0) < 1.0;
     let ramp = mode != Mode::Bars && !(circle.inner_alpha >= 1.0 && circle.outer_alpha >= 1.0);
-    let occlude = mode == Mode::Curve && active_curve.is_some_and(|c| !c.occlusion().shapes.is_empty());
+    let occlude = !occluders.is_empty();
     let mut defines = String::new();
     for (on, name) in [
         (round, "ROUND"),
@@ -611,6 +692,7 @@ pub(crate) fn run() {
         (opacity, "OPACITY"),
         (ramp, "RAMP"),
         (occlude, "OCCLUDE"),
+        (path_palettes, "PATH_PALETTES"),
     ] {
         if on {
             defines.push_str("#define ");
@@ -624,23 +706,21 @@ pub(crate) fn run() {
     let mut vao = 0;
     let mut gradient_colors_ssbo = 0;
     let ring: Option<HeightRing>;
-    // Ordered once and kept. A live re-resolve reuses this exact Vec rather
-    // than walking the HashMap again, which would be free to hand back a
-    // different order and silently reshuffle the gradient mid-session
-    let color_stops = ordered_stops(&config.colors);
-    let follow_colors = config.scheme.as_ref().and_then(|s| s.colors).unwrap_or(false);
-    let initial_rgba = resolve_stops(
-        &color_stops,
-        if follow_colors { scheme::colours() } else { None }.as_ref(),
-    );
+    // Followed only when some stop takes a role from it: a new scheme moves
+    // no other
+    let follow_colors = config.scheme.as_ref().and_then(|s| s.colors).unwrap_or(false)
+        && palettes.iter().flatten().any(ConfigColor::has_role);
+    let initial_rgba: Vec<Vec<[f32; 4]>> = {
+        let live = if follow_colors { scheme::colours() } else { None };
+        palettes.iter().map(|p| resolve_stops(p, live.as_ref())).collect()
+    };
     debug_palette(
         if follow_colors { "initial (live)" } else { "initial (static)" },
-        &initial_rgba,
+        &initial_rgba[0],
     );
-    assert!(
-        !initial_rgba.is_empty(),
-        "[colors] needs at least one stop to build a gradient from"
-    );
+    if path_palettes && debug_enabled() {
+        say!("{} paths draw in palettes of their own", palettes.len() - 1);
+    }
     let buffer_data = gradient_buffer(&initial_rgba);
     // One watch over all three files, so a frame costs one read. They are
     // acted on differently: a palette is re-uploaded in place, a bar count or
@@ -729,72 +809,15 @@ pub(crate) fn run() {
                 );
             }
             Mode::Curve => {
-                // Safe: mode was demoted to Bars above when no curve matched.
-                // Aspect from the first output's size; place_on re-derives the
-                // surface but the shape of the screen does not change under us
-                let cfg = active_curve.expect("curve mode implies a matching curve");
-                // [x, y] or [x, y, scale]; a short or empty entry is a config
-                // typo, and skipping it beats rendering a bar at the origin.
-                // Every path resolved up front, each with its own geometry and
-                // the bits of the occluders that cut it: the shader never
-                // learns that paths exist
-                let occlusion = cfg.occlusion();
-                let point = |p: &Vec<f32>| curve::Control { x: p[0], y: p[1], scale: 1.0, angle: None };
-                occluders = occlusion
-                    .shapes
-                    .iter()
-                    .map(|(pts, shape)| curve::Occluder {
-                        points: pts.iter().filter(|p| p.len() >= 2).map(point).collect(),
-                        closed: *shape == OccluderShape::Closed,
-                    })
-                    .collect();
-                curve_paths = cfg
-                    .paths()
-                    .iter()
-                    .zip(occlusion.masks.iter().copied())
-                    .map(|(path, mask)| curve::PathSpec {
-                        controls: path
-                            .points
-                            .iter()
-                            .filter(|p| p.len() >= 2)
-                            .map(|p| curve::Control {
-                                x: p[0],
-                                y: p[1],
-                                scale: p.get(2).copied().unwrap_or(1.0).max(0.0),
-                                angle: p.get(3).copied(),
-                            })
-                            .collect(),
-                        mask,
-                        bars: path.bars,
-                        // NDC spans 2.0, so a fraction of the output is twice
-                        // that. Per path, because two ridges at different
-                        // distances want different reaches
-                        reach: path.height.or(cfg.height).unwrap_or(0.18).clamp(0.0, 1.0) * 2.0,
-                        width: path.width.or(cfg.width).unwrap_or(0.006).clamp(0.0, 1.0) * 2.0,
-                        flip: path.flip.or(cfg.flip).unwrap_or(false),
-                        upright: path.upright.or(cfg.upright).unwrap_or(false),
-                    })
-                    .collect();
-                // The occluders every bar tests. Only those may stop the
-                // surface short: one that a single path ignores cannot
-                common_mask = curve_paths
-                    .iter()
-                    .filter(|p| p.controls.len() >= 2)
-                    .fold(u16::MAX, |m, p| m & p.mask);
-                if curve_paths.iter().all(|p| p.controls.len() < 2) {
-                    common_mask = 0;
-                }
                 // Created empty and bound. Bars cannot be built until a surface
                 // exists - their normals and their crop both depend on the
                 // output's shape - and configure() fills these before any draw
                 gl::GenBuffers(1, &raw mut path_ssbo);
                 gl::GenBuffers(1, &raw mut width_ssbo);
-                upload_bars(&[], path_ssbo, width_ssbo);
-                curve_fit = cfg.fit.unwrap_or_default();
-                curve_image = wallpaper.as_ref().and_then(|(_, size)| *size);
-                if curve_image.is_none() && debug_enabled() {
-                    say!("wallpaper size unreadable, treating it as output-shaped");
+                if path_palettes {
+                    gl::GenBuffers(1, &raw mut palette_ssbo);
                 }
+                upload_bars(&[], path_ssbo, width_ssbo, (palette_ssbo, &palette_slots));
                 gl::Uniform1f(
                     gl::GetUniformLocation(shader_program, c"InnerAlpha".as_ptr()),
                     circle.inner_alpha,
@@ -887,7 +910,7 @@ pub(crate) fn run() {
         unsafe { gl::GetUniformLocation(shader_program, c"MatteColor".as_ptr()) };
     let matte_location = unsafe { gl::GetUniformLocation(shader_program, c"Matte".as_ptr()) };
     unsafe {
-        let mean = palette_mean(&initial_rgba);
+        let mean = palette_mean(&initial_rgba[0]);
         gl::Uniform3f(matte_color_location, mean[0], mean[1], mean[2]);
         gl::Uniform1f(matte_location, bars_config.matte.unwrap_or(0.0).clamp(0.0, 1.0));
         gl::Uniform1f(
@@ -942,23 +965,12 @@ pub(crate) fn run() {
         }
     }).flatten();
 
-    // CAVAWALL_OUTPUT wins over the config file, and is how an external
-    // watcher moves the visualiser between monitors: it relaunches with this
-    // set, so argv stays exactly [binary]. The launcher, the shell toggle and
-    // that watcher all identify this process by an EXACT argv match, so a flag
-    // here breaks all three at once
-    //
-    // Unset, with no preferred_output, means choose automatically
     // Opt-in: with the policy at ignore, Hyprland's socket is never opened.
     // The first reading comes before the first placement, so an instance
     // started under a game does not flash onto its monitor first
     let on_fullscreen = config.general.on_fullscreen.unwrap_or_default();
     let hypr_events = (on_fullscreen != FullscreenPolicy::Ignore).then(hypr::events).flatten();
     let covered = hypr_events.as_ref().and_then(|_| hypr::covered()).unwrap_or_default();
-    let pinned_output = env::var("CAVAWALL_OUTPUT")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .or(config.general.preferred_output);
 
     let mut simple_window = AppState {
         registry_state: RegistryState::new(&globals),
@@ -982,7 +994,10 @@ pub(crate) fn run() {
         bar_count,
         cava_pid,
         gradient_colors_ssbo,
-        color_stops,
+        palettes: palettes.into_boxed_slice(),
+        palette_slots: palette_slots.into_boxed_slice(),
+        palette_ssbo,
+        palette_from,
         watch,
         prev_frame,
         cava_buffer,

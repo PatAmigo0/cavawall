@@ -425,6 +425,66 @@ enum Pin<'a> {
     Clear,
 }
 
+/// Kill and reap cava before replacing our image, because exec keeps the PID
+/// and therefore keeps the children: the outgoing cava stays OUR child, the
+/// incoming image has no handle on it and never waits for it, and nothing else
+/// will ever collect it. Measured: eight bar-count changes left seven
+/// <defunct> cava
+///
+/// SIGKILL rather than SIGTERM: cava owns no surface, no files and no cleanup
+/// worth waiting on, and it has to be gone before the exec
+fn reap_cava(pid: u32) {
+    // SAFETY: a plain signal to our own child
+    unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+    // Reaps that child and any zombie an earlier re-exec left behind, since
+    // those are still ours for the same reason. Terminates on ECHILD
+    // SAFETY: waitpid with a null status pointer only reaps
+    while unsafe { libc::waitpid(-1, ptr::null_mut(), 0) } > 0 {}
+}
+
+/// Become this program again: same pid, same argv, the environment carried
+/// over with the pin applied and `set` added. Returns only if the exec failed
+///
+/// The new environment goes to execve rather than through set_var: GL driver
+/// and notify threads may be alive here, and set_var under them is UB
+fn exec_self(pin: Pin, set: &[(&str, &str)]) -> std::io::Error {
+    // argv[0] before current_exe(): the service and `cavawall start` exec us
+    // by absolute path, and after a `cargo install` over a running instance
+    // /proc/self/exe reads back as "<path> (deleted)", which will not exec.
+    // Both are checked for existence so neither can hand over a dead path
+    let program: Option<PathBuf> = env::args_os()
+        .next()
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute() && p.exists())
+        .or_else(|| env::current_exe().ok().filter(|p| p.exists()));
+    let args: Vec<CString> = env::args_os()
+        .filter_map(|a| CString::new(a.as_os_str().as_bytes()).ok())
+        .collect();
+    // The next image is this instance carrying on, not a new start
+    let pinned = if let Pin::Set(o) = pin { Some(("CAVAWALL_OUTPUT", o)) } else { None };
+    let added: Vec<(&str, &str)> = std::iter::once(("CAVAWALL_REEXEC", "1")).chain(pinned).chain(set.iter().copied()).collect();
+    let envs: Vec<CString> = env::vars_os()
+        .filter(|(k, _)| {
+            !added.iter().any(|(a, _)| k == a) && (matches!(pin, Pin::Keep) || k != "CAVAWALL_OUTPUT")
+        })
+        .map(|(k, v)| (k.into_vec(), v.into_vec()))
+        .chain(added.iter().map(|(k, v)| (k.as_bytes().to_vec(), v.as_bytes().to_vec())))
+        .filter_map(|(mut kv, v)| {
+            kv.push(b'=');
+            kv.extend(v);
+            CString::new(kv).ok()
+        })
+        .collect();
+    let Some(prog) = program.and_then(|p| CString::new(p.into_os_string().into_vec()).ok()) else {
+        return std::io::Error::new(std::io::ErrorKind::NotFound, "no path to this program");
+    };
+    let nul_terminated = |v: &[CString]| v.iter().map(|a| a.as_ptr()).chain([ptr::null()]).collect::<Vec<_>>();
+    let (argv, envp) = (nul_terminated(&args), nul_terminated(&envs));
+    // SAFETY: every pointer is a live CString and both arrays end in NULL
+    unsafe { libc::execve(prog.as_ptr(), argv.as_ptr(), envp.as_ptr()) };
+    std::io::Error::last_os_error()
+}
+
 struct AppState {
     registry_state: RegistryState,
     output_state: OutputState,
@@ -455,8 +515,15 @@ struct AppState {
     bar_count: u32,
     /// Kept so the palette can be re-uploaded in place
     gradient_colors_ssbo: u32,
-    /// The configured stops, already in gradient order
-    color_stops: Vec<ConfigColor>,
+    /// Every palette in upload order, each already in gradient order: the
+    /// wallpaper's first, then each curve path's own
+    palettes: Box<[Vec<ConfigColor>]>,
+    /// Where each palette sits in the SSBO, which every bar of a path with
+    /// its own palette is told, through `palette_ssbo`; 0 when no path has one
+    palette_slots: Box<[PaletteSlot]>,
+    palette_ssbo: u32,
+    /// The wallpaper's own palette or config.toml's, for `status`
+    palette_from: &'static str,
     /// None when neither the palette nor the bar count follows the shell
     watch: Option<scheme::Watch>,
     /// The cava child, kept so a re-exec can kill and reap it
@@ -747,6 +814,8 @@ impl AppState {
                     "output_size": self.placed_size,
                     "bars": self.bar_count,
                     "bars_from": self.bars_from,
+                    "palette": self.palette_from,
+                    "path_palettes": self.palettes.len() - 1,
                     "framerate": self.framerate,
                     "framerate_from": self.framerate_from,
                     "parked": self.idle,
@@ -793,69 +862,11 @@ impl AppState {
     }
 
     /// `reexec`, doing what `pin` says with CAVAWALL_OUTPUT
-    ///
-    /// The new environment goes to execve rather than through set_var: GL
-    /// driver and notify threads are alive here, and set_var under them is UB
     fn reexec_pinned(&mut self, pin: Pin) {
         // On exec our Wayland connection closes exactly as it would on a kill
         self.clear_surface();
-
-        // Kill and reap cava before replacing our image, because exec keeps the
-        // PID and therefore keeps the children: the outgoing cava stays OUR
-        // child, the incoming image has no handle on it and never waits for it,
-        // and nothing else will ever collect it. It dies on its own the moment
-        // its stdout pipe closes, so what is left is a zombie - one per
-        // bar-count change, all parented to a process that will not reap them.
-        // Measured: eight bar-count changes left seven <defunct> cava
-        //
-        // SIGKILL rather than SIGTERM: cava owns no surface, no files and no
-        // cleanup worth waiting on, and we want it gone before the exec rather
-        // than at some point after it
-        unsafe { libc::kill(self.cava_pid as libc::pid_t, libc::SIGKILL) };
-        // Reaps that child and any zombie an earlier re-exec left behind, since
-        // those are still ours for the same reason. Terminates on ECHILD
-        loop {
-            if unsafe { libc::waitpid(-1, ptr::null_mut(), 0) } <= 0 {
-                break;
-            }
-        }
-
-        // argv[0] before current_exe(): the service and `cavawall start` exec
-        // us by absolute path, and after a `cargo install` over a running instance
-        // /proc/self/exe reads back as "<path> (deleted)", which will not exec.
-        // Both are checked for existence so neither can hand over a dead path
-        let program: Option<PathBuf> = env::args_os()
-            .next()
-            .map(PathBuf::from)
-            .filter(|p| p.is_absolute() && p.exists())
-            .or_else(|| env::current_exe().ok().filter(|p| p.exists()));
-        let args: Vec<CString> = env::args_os()
-            .filter_map(|a| CString::new(a.as_os_str().as_bytes()).ok())
-            .collect();
-
-        // The next image is this instance carrying on, not a new start
-        let pinned = if let Pin::Set(o) = pin { Some(("CAVAWALL_OUTPUT", o)) } else { None };
-        let set = [Some(("CAVAWALL_REEXEC", "1")), pinned];
-        let envs: Vec<CString> = env::vars_os()
-            .filter(|(k, _)| k != "CAVAWALL_REEXEC" && (matches!(pin, Pin::Keep) || k != "CAVAWALL_OUTPUT"))
-            .map(|(k, v)| (k.into_vec(), v.into_vec()))
-            .chain(set.into_iter().flatten().map(|(k, v)| (k.into(), v.into())))
-            .filter_map(|(mut kv, v)| {
-                kv.push(b'=');
-                kv.extend(v);
-                CString::new(kv).ok()
-            })
-            .collect();
-        if let Some(program) = program
-            && let Ok(prog) = CString::new(program.as_os_str().as_bytes())
-        {
-            let nul_terminated = |v: &[CString]| {
-                v.iter().map(|a| a.as_ptr()).chain([ptr::null()]).collect::<Vec<_>>()
-            };
-            let (argv, envp) = (nul_terminated(&args), nul_terminated(&envs));
-            // SAFETY: every pointer is a live CString and both arrays end in NULL
-            unsafe { libc::execve(prog.as_ptr(), argv.as_ptr(), envp.as_ptr()) };
-        }
+        reap_cava(self.cava_pid);
+        let err = exec_self(pin, &[]);
         // Only reachable if the exec failed. Carrying on at the old bar count
         // beats dying over a settings change: the surface just cleared gets
         // repainted by the next draw, so the visible cost is one blank frame
@@ -870,20 +881,16 @@ impl AppState {
                 self.background_color[3],
             );
         }
-        say!(
-            "re-exec failed, keeping {} bars: {}",
-            self.bar_count,
-            std::io::Error::last_os_error()
-        );
+        say!("re-exec failed, keeping {} bars: {err}", self.bar_count);
     }
 
-    /// Re-resolve the palette against the current scheme and re-upload it
+    /// Re-resolve the palettes against the current scheme and re-upload them
     ///
     /// Cheap enough to do inline: one small buffer upload, no pipeline rebuild,
-    /// no surface reconfigure. Nothing reachable from here can change the stop
+    /// no surface reconfigure. Nothing reachable from here can change a stop
     /// COUNT - a role the scheme lacks falls back to that stop's own hex rather
-    /// than dropping it - so no geometry is invalidated and the next frame
-    /// simply draws in the new colours
+    /// than dropping it - so every slot stays put, no geometry is invalidated
+    /// and the next frame simply draws in the new colours
     ///
     /// A scheme that will not read or parse leaves the current palette alone
     /// instead of falling back to the static one. The file is written while we
@@ -893,14 +900,14 @@ impl AppState {
         let Some(live) = scheme::colours() else {
             return;
         };
-        let rgba = resolve_stops(&self.color_stops, Some(&live));
-        debug_palette("reloaded", &rgba);
+        let rgba: Vec<Vec<[f32; 4]>> = self.palettes.iter().map(|p| resolve_stops(p, Some(&live))).collect();
+        debug_palette("reloaded", &rgba[0]);
         // Every bar is repainted in new colours, which bar heights do not
         // describe: without this the next frame would declare only the bars
         // that moved and leave the rest in the old palette on screen
         self.force_full_damage = true;
         let buf = gradient_buffer(&rgba);
-        let mean = palette_mean(&rgba);
+        let mean = palette_mean(&rgba[0]);
         unsafe {
             // The matte tone is the palette's mean, so a new palette means a
             // new tone; leaving it would flatten toward the old scheme
@@ -1422,26 +1429,30 @@ impl AppState {
 }
 
 /// Upload every bar: one vec4 of base and unit normal, one vec4 of width,
-/// reach and occluder mask
+/// reach and occluder mask, and with paths of their own palettes, one vec4
+/// saying which palette and where along it
 ///
 /// Rewritten whole, since it changes only when the output's shape does, which
 /// is a monitor change, not a frame
 ///
 /// # Safety
-/// A GL context must be current and both buffers must already exist
-unsafe fn upload_bars(bars: &[curve::Bar], path_ssbo: u32, width_ssbo: u32) {
+/// A GL context must be current and every buffer named must already exist;
+/// `palette_ssbo` is 0 when no path has a palette of its own
+unsafe fn upload_bars(bars: &[curve::Bar], path_ssbo: u32, width_ssbo: u32, (palette_ssbo, slots): (u32, &[PaletteSlot])) {
     let packed: Vec<[f32; 4]> =
         bars.iter().map(|b| [b.pos[0], b.pos[1], b.normal[0], b.normal[1]]).collect();
     let geom: Vec<[f32; 4]> =
         bars.iter().map(|b| [b.width, b.reach, f32::from(b.mask), 0.0]).collect();
-    // SAFETY: the caller guarantees a current context and live buffers; both
-    // are only ever rewritten here, each bound to its own binding point
+    let palettes = if palette_ssbo == 0 { Vec::new() } else { curve::bar_palettes(bars, slots) };
+    // SAFETY: the caller guarantees a current context and live buffers; each
+    // is only ever rewritten here, bound to its own binding point
     unsafe {
-        let pairs: [(u32, usize, *const ffi::c_void, u32); 2] = [
+        let buffers: [(u32, usize, *const ffi::c_void, u32); 3] = [
             (path_ssbo, size_of_val(packed.as_slice()), packed.as_ptr().cast(), 1),
             (width_ssbo, size_of_val(geom.as_slice()), geom.as_ptr().cast(), 3),
+            (palette_ssbo, size_of_val(palettes.as_slice()), palettes.as_ptr().cast(), 4),
         ];
-        for (buf, bytes, ptr, binding) in pairs {
+        for (buf, bytes, ptr, binding) in buffers.into_iter().filter(|b| b.0 != 0) {
             gl::BindBuffer(gl::SHADER_STORAGE_BUFFER, buf);
             gl::BufferData(gl::SHADER_STORAGE_BUFFER, bytes as GLsizeiptr, ptr, gl::STATIC_DRAW);
             gl::BindBufferBase(gl::SHADER_STORAGE_BUFFER, binding, buf);
