@@ -524,6 +524,8 @@ struct AppState {
     palette_ssbo: u32,
     /// The wallpaper's own palette or config.toml's, for `status`
     palette_from: &'static str,
+    /// `[scheme] colors`, and some stop has a role to follow
+    follow_colors: bool,
     /// None when neither the palette nor the bar count follows the shell
     watch: Option<scheme::Watch>,
     /// The cava child, kept so a re-exec can kill and reap it
@@ -904,6 +906,11 @@ impl AppState {
     /// may be reading it, and a momentary flash of the fallback palette every
     /// time the wallpaper changes would be worse than a frame of staleness
     fn reload_colors(&mut self) {
+        // `cavawall refresh` asks too, and must not switch a static palette to
+        // live colours
+        if !self.follow_colors {
+            return;
+        }
         let Some(live) = scheme::colours() else {
             return;
         };

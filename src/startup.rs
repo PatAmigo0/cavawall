@@ -994,6 +994,7 @@ pub(crate) fn run() {
         palette_slots: palette_slots.into_boxed_slice(),
         palette_ssbo,
         palette_from,
+        follow_colors,
         watch,
         prev_frame,
         cava_buffer,
