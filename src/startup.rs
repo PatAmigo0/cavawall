@@ -254,9 +254,13 @@ pub(crate) fn run() {
     let wallpaper = curve::current_wallpaper().and_then(|w| curve::describe(&w));
     let curve_key = wallpaper.as_ref().map(|(key, _)| key.clone());
     migrate_curves(&config_dir, &config);
-    let per_wallpaper = curve_key
-        .as_ref()
-        .and_then(|key| WallpaperConfig::load(&config_dir, key));
+    // One wallpaper's typo must not stop the visualiser: said, and skipped
+    let per_wallpaper = curve_key.as_ref().and_then(|key| {
+        WallpaperConfig::load(&config_dir, key).unwrap_or_else(|e| {
+            say!("{e}; drawing config.toml's defaults on this wallpaper");
+            None
+        })
+    });
     // CAVAWALL_OUTPUT wins over the config file, and is how an external
     // watcher moves the visualiser between monitors: it relaunches with this
     // set, so argv stays exactly [binary]. The launcher, the shell toggle and

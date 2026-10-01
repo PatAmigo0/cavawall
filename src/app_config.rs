@@ -193,9 +193,18 @@ impl WallpaperConfig {
         dir.join("wallpapers").join(format!("{key}.toml"))
     }
 
-    #[must_use]
-    pub fn load(dir: &std::path::Path, key: &str) -> Option<Self> {
-        toml::from_str(&std::fs::read_to_string(Self::path(dir, key)).ok()?).ok()
+    /// This wallpaper's settings: `Ok(None)` when it has no file
+    ///
+    /// # Errors
+    /// The file exists but will not read or parse, with the file named
+    pub fn load(dir: &std::path::Path, key: &str) -> Result<Option<Self>, String> {
+        let path = Self::path(dir, key);
+        let text = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(format!("{}: {e}", path.display())),
+        };
+        toml::from_str(&text).map(Some).map_err(|e| format!("{}: {e}", path.display()))
     }
 
     /// # Errors
@@ -1275,6 +1284,17 @@ mod tests {
         // One palette is laid out exactly as it always was: no mean
         assert_eq!(gradient_buffer(&[base]).len(), 16 + 3 * 16);
         assert_eq!(palette_slots(&[3]), [PaletteSlot { first: 0, stops: 3 }]);
+    }
+
+    #[test]
+    fn a_broken_wallpaper_file_is_an_error_and_a_missing_one_is_not() {
+        let dir = std::env::temp_dir().join(format!("cavawall-load-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("wallpapers")).unwrap();
+        assert!(matches!(WallpaperConfig::load(&dir, "absent"), Ok(None)));
+        std::fs::write(WallpaperConfig::path(&dir, "bad"), "mode = [").unwrap();
+        let err = WallpaperConfig::load(&dir, "bad").expect_err("a typo is reported");
+        assert!(err.contains("bad.toml"), "{err}");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// A wallpaper's own rate survives a save, and an unset one is not written

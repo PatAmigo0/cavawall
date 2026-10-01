@@ -171,13 +171,19 @@ fn handle(stream: TcpStream, server: &RwLock<Site>) {
             Ok(bytes) => reply(&mut out, "200 OK", mime(&site.wallpaper), &bytes),
             Err(_) => reply(&mut out, "404 Not Found", "text/plain", b"no wallpaper"),
         },
-        ("GET", "/existing") => {
-            // Whatever this wallpaper already has, so an edit starts from it
-            let body = WallpaperConfig::load(&config_dir(), &site.key)
-                .and_then(|w| serde_json::to_string(&w).ok())
-                .unwrap_or_else(|| "{}".to_owned());
-            reply(&mut out, "200 OK", "application/json", body.as_bytes());
-        }
+        // Whatever this wallpaper already has, so an edit starts from it. A
+        // file that will not parse is the page's to say, not to overwrite
+        // unannounced
+        ("GET", "/existing") => match WallpaperConfig::load(&config_dir(), &site.key) {
+            Ok(w) => {
+                let body = w.and_then(|w| serde_json::to_string(&w).ok()).unwrap_or_else(|| "{}".to_owned());
+                reply(&mut out, "200 OK", "application/json", body.as_bytes());
+            }
+            Err(e) => {
+                let body = serde_json::json!({ "error": e }).to_string();
+                reply(&mut out, "422 Unprocessable Entity", "application/json", body.as_bytes());
+            }
+        },
         ("GET", "/context") => {
             let body = context(site).to_string();
             reply(&mut out, "200 OK", "application/json", body.as_bytes());
