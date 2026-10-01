@@ -127,18 +127,10 @@ fn migrate_curves(dir: &std::path::Path, config: &app_config::Config) {
     }
 }
 
-/// Wallpaper keys that have a per-wallpaper file.
-fn known_wallpapers(dir: &std::path::Path) -> Vec<String> {
-    let Ok(entries) = std::fs::read_dir(dir.join("wallpapers")) else {
-        return Vec::new();
-    };
-    entries
-        .flatten()
-        .filter_map(|e| {
-            let p = e.path();
-            (p.extension()? == "toml").then(|| p.file_stem()?.to_str().map(str::to_owned))?
-        })
-        .collect()
+/// Some wallpaper has a file of its own
+fn any_wallpaper_settings(dir: &std::path::Path) -> bool {
+    std::fs::read_dir(dir.join("wallpapers"))
+        .is_ok_and(|entries| entries.flatten().any(|e| e.path().extension().is_some_and(|x| x == "toml")))
 }
 
 /// A wallpaper's or a path's own palette with every stop that will not parse
@@ -290,12 +282,8 @@ pub(crate) fn run() {
         .as_ref()
         .and_then(|w| w.circle.as_ref())
         .or(config.circle.as_ref());
-    let curve_keys: HashSet<String> = config
-        .curves
-        .iter()
-        .flat_map(|m| m.keys().cloned())
-        .chain(known_wallpapers(&config_dir))
-        .collect();
+    let legacy_curves: HashSet<String> = config.curves.iter().flat_map(|m| m.keys().cloned()).collect();
+    let own_settings = per_wallpaper.is_some() || curve_key.as_ref().is_some_and(|k| legacy_curves.contains(k));
     let active_curve = (configured_mode == Mode::Curve)
         .then(|| {
             let key = curve_key.clone()?;
@@ -733,7 +721,11 @@ pub(crate) fn run() {
     // The wallpaper is watched whenever any wallpaper has settings of its own,
     // whatever this one draws: a per-wallpaper file can pick the figure, so
     // moving onto or off one of them can change everything
-    let watch = scheme::Watch::new(follow_colors, bars_follow_shell, !curve_keys.is_empty());
+    let watch = scheme::Watch::new(
+        follow_colors,
+        bars_follow_shell,
+        !legacy_curves.is_empty() || any_wallpaper_settings(&config_dir),
+    );
 
     // Sized from the bar count, which cannot change without a re-exec, so both
     // are allocated once here rather than on every frame
@@ -1026,7 +1018,8 @@ pub(crate) fn run() {
         mask_tris: Vec::new(),
         curve_fit,
         curve_key,
-        curve_keys,
+        own_settings,
+        legacy_curves,
         curve_image,
         curve_box: None,
         curve_output: (1, 1),
@@ -1045,6 +1038,7 @@ pub(crate) fn run() {
         silent_frames: 0,
         background_color,
         config_path: config_filename,
+        config_dir,
         bars_from,
         framerate,
         framerate_from,
