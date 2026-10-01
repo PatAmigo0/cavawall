@@ -123,6 +123,13 @@ fn migrate_curves(dir: &std::path::Path, config: &app_config::Config) {
     }
 }
 
+/// Bytes malloc has handed out and not had back, mapped chunks included
+fn heap_in_use() -> usize {
+    // SAFETY: mallinfo2 only reads the allocator's own counters
+    let m = unsafe { libc::mallinfo2() };
+    m.uordblks + m.hblkhd
+}
+
 /// Some wallpaper has a file of its own
 fn any_wallpaper_settings(dir: &std::path::Path) -> bool {
     std::fs::read_dir(dir.join("wallpapers"))
@@ -208,9 +215,13 @@ pub(crate) fn run() {
     cavawall::wallpaper::configure(config.wallpaper.as_ref());
     // Taken before any notify, whose waiter thread would make remove_var unsound
     let reexeced = env::var_os("CAVAWALL_REEXEC").is_some();
-    if reexeced {
-        // SAFETY: no thread exists yet
-        unsafe { env::remove_var("CAVAWALL_REEXEC") };
+    // This start follows one that compiled the shaders, so they come from the
+    // driver's cache now; see COMPILER_KEPT
+    let warm = env::var_os("CAVAWALL_WARM").is_some();
+    // SAFETY: no thread exists yet
+    unsafe {
+        env::remove_var("CAVAWALL_REEXEC");
+        env::remove_var("CAVAWALL_WARM");
     }
     if let Some(crash) = cavawall::log::previous_crash() {
         say!("the previous instance crashed: {crash}");
@@ -692,7 +703,9 @@ pub(crate) fn run() {
             defines.push('\n');
         }
     }
+    let compiling = heap_in_use();
     let shader_program = build_program(mode, &defines);
+    let mut compiler_kept = heap_in_use().saturating_sub(compiling);
     let mut quad_vbo = 0;
     let mut height_vbo = 0;
     let mut vao = 0;
@@ -813,7 +826,9 @@ pub(crate) fn run() {
                 if path_palettes {
                     gl::GenBuffers(1, &raw mut palette_ssbo);
                 }
-                upload_bars(&[], path_ssbo, width_ssbo, (palette_ssbo, &palette_slots));
+                // One bar of nothing until then, so the warm-up draw below
+                // reads real buffers
+                upload_bars(&[curve::Bar::default()], path_ssbo, width_ssbo, (palette_ssbo, &palette_slots));
                 gl::Uniform1f(
                     gl::GetUniformLocation(shader_program, c"InnerAlpha".as_ptr()),
                     circle.inner_alpha,
@@ -952,7 +967,9 @@ pub(crate) fn run() {
                 [0u16].as_ptr().cast(),
             );
             gl::Uniform1i(gl::GetUniformLocation(shader_program, c"Occluders".as_ptr()), 0);
+            let compiling = heap_in_use();
             let pass = (!occluders.is_empty()).then(|| MaskPass::new(texture));
+            compiler_kept += heap_in_use().saturating_sub(compiling);
             // The pass's constructor bound its own VAO and buffer
             gl::UseProgram(shader_program);
             gl::BindVertexArray(vao);
@@ -960,6 +977,35 @@ pub(crate) fn run() {
             pass
         }
     }).flatten();
+    // The driver compiles once more at the first draw, for the state the
+    // program draws under. One instance into the bootstrap surface, never
+    // presented, has that happen here as well
+    let compiling = heap_in_use();
+    // SAFETY: a context is current and every buffer either program reads exists
+    unsafe {
+        if let Some(pass) = &mask {
+            let nothing = [curve::MaskVertex { pos: [0.0; 2], bit: 0 }; 3];
+            pass.rasterise(&nothing, (1, 1), ([1.0; 2], [0.0; 2]), (shader_program, vao));
+            gl::BindBuffer(gl::ARRAY_BUFFER, height_vbo);
+        }
+        gl::DrawArraysInstancedBaseInstance(gl::TRIANGLE_STRIP, 0, 4, 1, 0);
+        gl::Finish();
+    }
+    compiler_kept += heap_in_use().saturating_sub(compiling);
+    // A GPU driver keeps its shader compiler in memory once it has run: 46 MB
+    // of heap and 14 MB mapped on NVIDIA, against 11 MB of anonymous memory in
+    // all for a start whose programs came from the driver's shader cache. A
+    // start that compiled therefore hands over to a fresh image, which finds
+    // them in that cache now. Once: a driver with no cache compiles again
+    const COMPILER_KEPT: usize = 16 << 20;
+    if debug_enabled() {
+        say!("compiling the shaders kept {} KB{}", compiler_kept >> 10, if warm { ", after a restart for the cache" } else { "" });
+    }
+    if compiler_kept > COMPILER_KEPT && !warm {
+        say!("the GPU driver kept {} MB after compiling the shaders; starting again from its shader cache", compiler_kept >> 20);
+        reap_cava(cava_pid);
+        fatal!("cannot start again: {}", exec_self(Pin::Keep, &[("CAVAWALL_WARM", "1")]));
+    }
 
     // Opt-in: with the policy at ignore, Hyprland's socket is never opened.
     // The first reading comes before the first placement, so an instance
