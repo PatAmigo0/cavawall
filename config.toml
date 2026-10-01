@@ -114,8 +114,9 @@ gap = 0.1
 # on the current wallpaper and writes the block itself.
 #
 # [curves.07cfa6d114ed3a98]
-# # Bars for this curve, shared by its paths. Omit it and paths that each name
-# # a count add up to the total instead.
+# # Bars shared by length between the paths that set no count of their own;
+# # a path's own count is added to these, never taken from them. Unset, the
+# # wallpaper's [bars] amount, the shell's or this file's applies.
 # bars = 20
 # # How the wallpaper covers the output: "cover" (default) scales it to fill
 # # and centre-crops the overflow, the way a wallpaper daemon does; "stretch"
@@ -134,8 +135,11 @@ gap = 0.1
 # # One block per stretch of path. Two ridges at different distances want
 # # different bars, so all of this is per path.
 # [[curves.07cfa6d114ed3a98.path]]
-# # Exactly this many bars on this path, instead of its share by length.
+# # Exactly this many bars on this path, on top of the shared ones.
 # bars = 10
+# # This path in colours of its own, base to tip; absent draws it in the
+# # wallpaper's palette.
+# colors = ["#ffcc80", { hex = "#e65100", alpha = 0.8 }]
 # # How far a full-volume bar reaches along the path's normal, as a fraction
 # # of the output height, and how wide it is as a fraction of the width.
 # height = 0.17
@@ -150,19 +154,17 @@ gap = 0.1
 # points = [[0.53, 0.41, 1.0], [0.62, 0.33, 0.8], [0.99, 0.41, 0.6]]
 
 [colors]
-# The stops form a gradient from the TOP of the surface down, and their ORDER
-# matters - the shader mixes each stop into the next one.
+# Gradient stops from a bar's base to the tip of a full one. Their ORDER
+# matters - the shader mixes each stop into the next - and is the number each
+# key ends in, so `c1..c8` and `gradient_color_1..8` both come out as written
+# and c10 follows c9. A key ending in no digits sorts by name, after them.
 #
 # In circle mode the axis is RADIAL instead: the first stop is the centre and
 # the last one the rim. Same keys, same order, different direction.
 #
-# Upstream's comment here said they "can be named however you like, only the
-# values matter", which was not true: this section deserialises into a hash map,
-# so the order came back arbitrary and randomised per run, and the gradient was
-# quietly shuffled on every launch. Stops are now ordered by the number at the
-# end of the key, which makes both `gradient_color_1..8` and `c1..c8` come out
-# in the order they are written. A key ending in no digits still works; it just
-# sorts by name, after the numbered ones.
+# A wallpaper can have a palette of its own instead: `colors` in its
+# wallpapers/<key>.toml, which `cavawall tune` writes. A curve path can carry
+# one more, the same way.
 gradient_color_1 = '#94e2d5'
 gradient_color_2 = '#89dceb'
 gradient_color_3 = '#74c7ec'
@@ -219,6 +221,8 @@ gradient_color_8 = '#f38ba8'
 # path = "~/.cache/wal/colors.json"
 
 # How cavawall knows which wallpaper is on screen, so each gets its own figure.
+# `cavawall disable` turns it off on the one on screen - no bars, no cava -
+# until another wallpaper is up, and `cavawall enable` turns it back on.
 # [wallpaper]
 # source = "swww"                  # caelestia (default) | swww | waypaper | file | command
 # path = "~/.cache/current-wallpaper"   # for file (a file holding the path) or waypaper

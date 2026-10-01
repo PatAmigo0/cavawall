@@ -24,7 +24,8 @@ behind whatever you mark as in front of them. Everything is placed on the
 image, not the screen, so a figure lands on the same ridge on any monitor.
 
 Each wallpaper keeps its own settings, keyed by the image's content: rename or
-move the file and they follow it.
+move the file and they follow it. That includes its own palette, one more for
+any path of a curve, or no bars at all: a wallpaper can turn cavawall off.
 
 ### Styles
 
@@ -67,13 +68,17 @@ applies everything to the running visualiser in place.
 - **Shape**: drag the row, the circle or a curve's points on the image; bar
   count, height, placement, anchors
 - **Look**: rounded tips, blocks, mirror, colours along the row, opacity and
-  matte; the x-ray with its picture and filters; the palette, stop by stop
+  matte; the x-ray with its picture and filters; the palette, stop by stop,
+  for every wallpaper or only this one
 - **Cava**: input source, sensitivity, frame rate, smoothing; which monitor
   and what a fullscreen window does; where the wallpaper and palette come
   from; notifications
 - A **layers card** for a curve's paths and occluders, with a grid of which
-  occluder hides which path; it folds away. The **point editor** opens next
-  to the selected point. The settings panel can be **dragged anywhere**
+  occluder hides which path; it folds away. A path can have its own count
+  and palette, and **Every path** edits them all at once. The **point
+  editor** opens next to the selected point. The settings panel can be
+  **dragged anywhere**
+- **Off on this wallpaper**, for one that is better left bare
 - Undo, redo, and a warning for unsaved changes. Settings shared by every
   wallpaper are written into `config.toml` with its comments kept
 
@@ -109,6 +114,11 @@ It runs all day, so it is built to cost nothing when it can:
   plain bars run plain shaders.
 - **Silence parks it.** After half a second of silence nothing is drawn or
   committed; with `sleep_timer` cava stops analysing too.
+- **Off is off.** On a wallpaper with cavawall turned off there is no surface,
+  no cava and no GL context, only a process waiting for the next wallpaper.
+- **The shader compiler is not kept.** A start that had to compile its
+  shaders hands over to a fresh process that loads them from the driver's
+  cache, so the compiler's memory is never held for the session.
 - **Event-driven**, one thread, no polling: cava's pipe, the control socket,
   config changes and Wayland all wake the same loop.
   
@@ -147,6 +157,7 @@ cavawall status     # what it is drawing
 cavawall reload     # re-read the config, in place
 cavawall refresh    # look again at the wallpaper, for a source it cannot watch
 cavawall move DP-1  # move to another monitor; no name picks automatically
+cavawall disable    # no bars on this wallpaper; enable brings them back
 cavawall stop       # clear and exit
 cavawall log        # what happened; log watch follows it live, log last-exit says why it last stopped
 cavawall help       # everything else
@@ -214,8 +225,9 @@ per-wallpaper settings to `wallpapers/<key>.toml` beside it. The annotated
 | `bars.opacity`, `bars.matte` | alpha, and flattening the gradient toward its own mean |
 | `bars.reveal`, `bars.reveal_pulse`, `bars.reveal_dir` | x-ray amount, follow the beat, where picked pictures are kept |
 | `circle.*` | size, hole, alpha ramp, anchor and margins, or `position` |
-| `curve.path`, `curve.occluder` | paths, and the named shapes that hide them (`cut_by`) |
-| `colors.*` | gradient stops, base to tip |
+| `curve.path`, `curve.occluder` | paths, and the named shapes that hide them (`cut_by`); a path's own `bars` is exact, the rest share `curve.bars` |
+| `colors.*` | gradient stops, base to tip; a wallpaper's own `colors`, or a curve path's, replaces them there |
+| `disabled` | in a wallpaper's file: no bars, no cava while it is on screen (`cavawall disable`) |
 | `scheme.colors`, `scheme.bars` | follow the live palette, and the shell's bar count |
 | `scheme.source`, `scheme.path` | where the palette comes from: `caelestia`, `pywal`, or any JSON `file` |
 | `wallpaper.source`, `.path`, `.command` | how it knows the wallpaper: `caelestia`, `swww`, `waypaper`, a `file` holding the path, or a `command` (then `cavawall refresh` after a change) |

@@ -138,10 +138,24 @@ dispatch.
   `#define`d into the shaders at startup only when used, so a config without
   them runs exactly the shaders it always did. The finishes are the same:
   `MATTE`, `OPACITY`, the circle and curve `RAMP` and the curve's `OCCLUDE`
-  test exist only when they would change a pixel. Every define combination
-  must compile and link - check all of them after touching a shader.
+  test exist only when they would change a pixel, and `PATH_PALETTES` only
+  when a curve path has a palette of its own. Every define combination must
+  compile and link: run `scripts/check-shaders.py` after touching a shader.
 
 ## Things that look wrong but are not
+
+- A start can exec itself once before anything is shown. A GPU driver that
+  has just compiled the shaders keeps its compiler in memory for good (46 MB
+  of heap and 14 MB mapped on NVIDIA), and a fresh image loads them from the
+  driver's cache instead. `CAVAWALL_WARM` makes it once only.
+- The never-presented draw at startup is what makes that work: NVIDIA
+  compiles again at a program's first draw, for the state it draws under,
+  and the mask program gets one too.
+- `exec_self` marks every descriptor close-on-exec first. The GPU driver
+  opens a render node without O_CLOEXEC, so each re-exec carried one more.
+- A wallpaper with `disabled = true` runs `dormant::run`: no cava, no EGL,
+  only the control socket, the wallpaper watch and a Wayland connection,
+  held so it ends with the compositor as the full instance does.
 
 - `surface.frame()` goes **before** the swap: the request is double-buffered
   state and needs a commit after it, which the swap provides.
