@@ -600,11 +600,25 @@ pub fn describe(path: &std::path::Path) -> Option<(String, Option<(u32, u32)>)> 
 /// Header only: the size is needed to work out how the image is cropped onto
 /// the output, and decoding a 3-megapixel JPEG to learn two integers would be
 /// absurd. PNG, JPEG and WebP cover what wallpaper daemons are fed; anything else
-/// returns None and the caller treats the image as already output-shaped,
-/// which is what every curve authored before this assumed
+/// returns None and the caller treats the image as already output-shaped
+///
+/// Reads the first 64 KiB, and the rest only for a JPEG whose metadata
+/// pushes its frame header further in
 #[must_use]
 pub fn image_size(path: &std::path::Path) -> Option<(u32, u32)> {
-    size_of_image(&std::fs::read(path).ok()?)
+    use std::io::Read as _;
+    const HEAD: u64 = 64 << 10;
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut bytes = Vec::with_capacity(HEAD as usize);
+    (&mut file).take(HEAD).read_to_end(&mut bytes).ok()?;
+    if let Some(size) = size_of_image(&bytes) {
+        return Some(size);
+    }
+    if bytes.len() < HEAD as usize || !bytes.starts_with(&[0xff, 0xd8]) {
+        return None;
+    }
+    file.read_to_end(&mut bytes).ok()?;
+    size_of_image(&bytes)
 }
 
 /// As `image_size`, for bytes already in hand
