@@ -481,9 +481,29 @@ fn exec_self(pin: Pin, set: &[(&str, &str)]) -> std::io::Error {
     };
     let nul_terminated = |v: &[CString]| v.iter().map(|a| a.as_ptr()).chain([ptr::null()]).collect::<Vec<_>>();
     let (argv, envp) = (nul_terminated(&args), nul_terminated(&envs));
+    close_on_exec();
     // SAFETY: every pointer is a live CString and both arrays end in NULL
     unsafe { libc::execve(prog.as_ptr(), argv.as_ptr(), envp.as_ptr()) };
     std::io::Error::last_os_error()
+}
+
+/// Every descriptor past stderr closes on exec. The GPU driver opens a render
+/// node without O_CLOEXEC, so each re-exec otherwise carried one more into the
+/// next image, holding whatever was imported through it (measured: four
+/// reloads, seven open `renderD129`). Flagged rather than closed, so the
+/// driver keeps working if the exec fails
+fn close_on_exec() {
+    // SAFETY: only flags descriptors; nothing is closed until the exec
+    if unsafe { libc::close_range(3, u32::MAX, libc::CLOSE_RANGE_CLOEXEC as libc::c_int) } == 0 {
+        return;
+    }
+    // Before Linux 5.11: one at a time
+    let Ok(fds) = fs::read_dir("/proc/self/fd") else { return };
+    for fd in fds.flatten().filter_map(|e| e.file_name().to_str()?.parse::<libc::c_int>().ok()).filter(|&fd| fd > 2) {
+        // SAFETY: F_SETFD on a descriptor that may have closed since the
+        // listing only fails with EBADF
+        unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+    }
 }
 
 struct AppState {
