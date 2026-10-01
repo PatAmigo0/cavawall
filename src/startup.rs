@@ -260,6 +260,11 @@ pub(crate) fn run() {
         .ok()
         .filter(|s| !s.is_empty())
         .or_else(|| config.general.preferred_output.clone());
+    // Off on this wallpaper: nothing below is wanted, cava, GL and the
+    // surface included
+    if per_wallpaper.as_ref().is_some_and(WallpaperConfig::is_disabled) {
+        dormant::run(config_filename, config_dir, curve_key, pinned_output);
+    }
     let configured_mode = per_wallpaper
         .as_ref()
         .and_then(|w| w.mode)

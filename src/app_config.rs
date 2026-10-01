@@ -150,6 +150,9 @@ pub enum GradientAxis {
 pub struct WallpaperConfig {
     /// Human label; the filename is a hash and says nothing on its own
     pub name: Option<String>,
+    /// True turns cavawall off while this wallpaper is on screen: no surface,
+    /// no cava, no GL. The figure below is kept for when it is turned back on
+    pub disabled: Option<bool>,
     /// Which figure this wallpaper gets, overriding `general.mode`
     pub mode: Option<Mode>,
     /// Frames per second for this wallpaper, overriding `general.framerate`.
@@ -171,6 +174,7 @@ impl WallpaperConfig {
 # survives a rename or a move. Written by `cavawall tune`; hand edits are fine.
 #
 #   name      label for you; nothing reads it
+#   disabled  true turns cavawall off on this wallpaper: no bars, no cava
 #   mode      bars | circle | curve, overriding general.mode in config.toml
 #   framerate frames per second, overriding general.framerate
 #   colors    this wallpaper's own gradient, base to tip, replacing [colors]:
@@ -206,6 +210,48 @@ impl WallpaperConfig {
             Err(e) => return Err(format!("{}: {e}", path.display())),
         };
         toml::from_str(&text).map(Some).map_err(|e| format!("{}: {e}", path.display()))
+    }
+
+    #[must_use]
+    pub fn is_disabled(&self) -> bool {
+        self.disabled == Some(true)
+    }
+
+    /// Turn cavawall off or back on for this wallpaper, editing its file in
+    /// place so hand-written comments survive. A file left with nothing in
+    /// it is removed
+    ///
+    /// # Errors
+    /// The file will not read, parse or write
+    pub fn set_disabled(dir: &std::path::Path, key: &str, off: bool) -> Result<(), String> {
+        let path = Self::path(dir, key);
+        let text = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => return Err(format!("{}: {e}", path.display())),
+        };
+        let mut doc: toml_edit::DocumentMut = text.parse().map_err(|e| format!("{}: {e}", path.display()))?;
+        if off {
+            doc.insert("disabled", toml_edit::value(true));
+        } else {
+            doc.remove("disabled");
+        }
+        let write = |body: String| {
+            path.parent()
+                .map_or(Ok(()), std::fs::create_dir_all)
+                .and_then(|()| std::fs::write(&path, body))
+                .map_err(|e| format!("{}: {e}", path.display()))
+        };
+        if doc.is_empty() {
+            return match std::fs::remove_file(&path) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(format!("{}: {e}", path.display())),
+                _ => Ok(()),
+            };
+        }
+        if text.is_empty() {
+            return write(Self::HEADER.to_owned() + &doc.to_string());
+        }
+        write(doc.to_string())
     }
 
     /// # Errors
@@ -1358,6 +1404,31 @@ mod tests {
         std::fs::write(WallpaperConfig::path(&dir, "bad"), "mode = [").unwrap();
         let err = WallpaperConfig::load(&dir, "bad").expect_err("a typo is reported");
         assert!(err.contains("bad.toml"), "{err}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Turning a wallpaper off and on again edits its file in place, keeps
+    /// what is hand-written there, and leaves no empty file behind
+    #[test]
+    fn disabling_edits_the_file_in_place() {
+        let dir = std::env::temp_dir().join(format!("cavawall-disable-{}", std::process::id()));
+        let key = "0123456789abcdef";
+        WallpaperConfig::set_disabled(&dir, key, true).expect("creates the file");
+        let w = WallpaperConfig::load(&dir, key).unwrap().expect("written");
+        assert!(w.is_disabled());
+        WallpaperConfig::set_disabled(&dir, key, false).expect("removes the key");
+        assert!(!WallpaperConfig::path(&dir, key).exists(), "nothing left in it, so it goes");
+
+        let path = WallpaperConfig::path(&dir, key);
+        std::fs::write(&path, "# mine\nmode = \"circle\" # round\n\n[circle]\nbars = 30\n").unwrap();
+        WallpaperConfig::set_disabled(&dir, key, true).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# mine") && text.contains("# round"), "{text}");
+        let w = WallpaperConfig::load(&dir, key).unwrap().unwrap();
+        assert!(w.is_disabled() && w.mode == Some(Mode::Circle));
+        WallpaperConfig::set_disabled(&dir, key, false).unwrap();
+        let w = WallpaperConfig::load(&dir, key).unwrap().expect("the figure stays");
+        assert!(!w.is_disabled() && w.circle.and_then(|c| c.bars) == Some(30));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
