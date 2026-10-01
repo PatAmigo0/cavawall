@@ -993,6 +993,27 @@ pub fn uploaded_stops(configured: usize) -> usize {
     configured.max(2)
 }
 
+/// `$XDG_CONFIG_HOME/cavawall`, else `~/.config/cavawall`: where every
+/// cavawall binary looks unless told otherwise
+#[must_use]
+pub fn config_dir() -> std::path::PathBuf {
+    std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config")))
+        .unwrap_or_default()
+        .join("cavawall")
+}
+
+/// config.toml, parsed
+///
+/// # Errors
+/// It will not read or parse, with the file and toml's line and column named
+pub fn load_config(path: &std::path::Path) -> Result<Config, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    toml::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))
+}
+
 #[cfg(test)]
 #[allow(clippy::float_cmp, clippy::suboptimal_flops, clippy::manual_midpoint, clippy::decimal_bitwise_operands, reason = "tests compare exact values and keep their maths independent of the code they check")]
 mod tests {

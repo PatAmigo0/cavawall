@@ -3,20 +3,16 @@
 use super::*;
 
 fn default_config_path() -> PathBuf {
-    let home = PathBuf::from(env::var_os("HOME").unwrap_or_else(|| fatal!("HOME is not set, so there is no config to find; pass --config")));
-    let own = home.join(".config/cavawall/config.toml");
+    let dir = app_config::config_dir();
+    let own = dir.join("config.toml");
     if own.exists() {
         return own;
     }
     // The inherited path is still honoured, so a config left where it was
     // keeps working
-    let inherited = home.join(".config/wallpaper-cava/config.toml");
+    let inherited = dir.with_file_name("wallpaper-cava").join("config.toml");
     if inherited.exists() {
-        say!(
-            "using {}\n\
-             cavawall: move it to ~/.config/cavawall/config.toml when convenient",
-            inherited.display()
-        );
+        say!("using {}; move it to {} when convenient", inherited.display(), own.display());
         return inherited;
     }
     PathBuf::from("config.toml")
