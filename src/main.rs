@@ -171,6 +171,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod dormant;
 mod hypr;
 mod render;
 mod startup;
@@ -830,6 +831,7 @@ impl AppState {
                     "framerate": self.framerate,
                     "framerate_from": self.framerate_from,
                     "parked": self.idle,
+                    "disabled": false,
                     "curve_key": self.curve_key,
                 });
                 control::write_response(stream, &Response::ok(Some(data)));
