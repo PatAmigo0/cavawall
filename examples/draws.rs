@@ -40,11 +40,12 @@ fn main() {
         println!("no curve block: circle or bars mode, one draw per frame");
         return;
     };
+    // The paths' own counts, plus what the others share
+    let (own, shares) = c.counts();
     let bars: u32 = std::env::args()
         .nth(2)
         .and_then(|s| s.parse().ok())
-        .or_else(|| c.total_bars())
-        .unwrap_or(23);
+        .unwrap_or_else(|| own + if shares { c.bars.unwrap_or(23) } else { 0 });
 
     let occlusion = c.occlusion();
     let occluders: Vec<curve::Occluder> = occlusion

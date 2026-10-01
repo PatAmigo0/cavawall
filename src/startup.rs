@@ -286,39 +286,38 @@ pub(crate) fn run() {
             let found = per_wallpaper
                 .as_ref()
                 .and_then(|w| w.curve.as_ref())
-                .or_else(|| config.curves.as_ref()?.get(&key));
+                .or_else(|| config.curves.as_ref()?.get(&key))
+                .filter(|c| c.is_drawable());
             if found.is_none() && debug_enabled() {
-                say!("no curve for wallpaper {key}, falling back to bars");
+                say!("no curve with a path to draw for wallpaper {key}, falling back to bars");
             }
             found
         })
         .flatten();
-    // Most specific first: the figure's own count, then this wallpaper's
-    // `[bars] amount`, then the shell's setting, then config.toml. A count
-    // set for one wallpaper has to beat the shell's global one, or editing it
-    // does nothing while `[scheme] bars` is on
-    let figure_bars = match configured_mode {
+    // A curve path's own count is exact; the paths that name none share one
+    // more count by length. That shared count, most specific first: the
+    // figure's own, this wallpaper's `[bars] amount`, the shell's setting,
+    // config.toml. A count set for one wallpaper has to beat the shell's
+    // global one, or editing it does nothing while `[scheme] bars` is on
+    let (own, shares) = active_curve.map_or((0, true), CurveConfig::counts);
+    let specific = match configured_mode {
         Mode::Circle => circle_config.and_then(|c| c.bars).map(|n| (n, "circle")),
-        Mode::Curve => active_curve.and_then(CurveConfig::total_bars).map(|n| (n, "curve")),
+        Mode::Curve => active_curve.and_then(|c| c.bars).map(|n| (n, "curve")),
         Mode::Bars => None,
-    };
-    let own_bars = figure_bars.or_else(|| {
-        per_wallpaper
-            .as_ref()
-            .and_then(|w| w.bars.as_ref()?.amount)
-            .map(|n| (n, "wallpaper"))
-    });
-    // Watched whenever nothing more specific set the count, even if the shell
-    // has none yet, so setting one there takes effect
-    let bars_follow_shell = follow_bars && own_bars.is_none();
-    let (bar_count, bars_from) = own_bars
-        .or_else(|| {
-            bars_follow_shell
-                .then(scheme::bar_count)
-                .flatten()
-                .map(|n| (n, "shell"))
-        })
+    }
+    .or_else(|| per_wallpaper.as_ref().and_then(|w| w.bars.as_ref()?.amount).map(|n| (n, "wallpaper")));
+    // Watched whenever nothing more specific set the shared count and some
+    // path shares it, even if the shell has none yet, so setting one there
+    // takes effect
+    let bars_follow_shell = follow_bars && shares && specific.is_none();
+    let (bars_pool, pool_from) = specific
+        .or_else(|| bars_follow_shell.then(scheme::bar_count).flatten().map(|n| (n, "shell")))
         .unwrap_or((config.bars.amount, "config"));
+    let (bar_count, bars_from) = match (own, shares) {
+        (0, _) => (bars_pool, pool_from.to_owned()),
+        (own, false) => (own, "paths".to_owned()),
+        (own, true) => (own.saturating_add(bars_pool), format!("paths and {pool_from}")),
+    };
     // Zero divides by zero in the bar-width maths. The ceiling is a sanity
     // bound: 4096 bars is already sub-pixel on any real monitor. Clamped, not
     // asserted: one bad per-wallpaper value must not take the visualiser down
@@ -1040,6 +1039,7 @@ pub(crate) fn run() {
         framerate,
         framerate_from,
         bars_follow_shell,
+        bars_pool,
         frame_pending: false,
         redraw: false,
         pinned_output,

@@ -181,8 +181,9 @@ impl WallpaperConfig {
 #   circle    bars, diameter, inner_radius, inner_alpha, outer_alpha, and
 #             anchor with margin_x/margin_y, or position = [x, y]
 #   curve     bars, height, width, fit, [[curve.occluder]] shapes, and one
-#             [[curve.path]] per stretch; a path names what hides it in
-#             cut_by and can carry its own colors
+#             [[curve.path]] per stretch. A path's own bars is exactly its
+#             count; the paths without one share curve.bars by length. A path
+#             names what hides it in cut_by and can carry its own colors
 #
 # Delete this file to go back to config.toml's defaults for this wallpaper.
 
@@ -326,9 +327,9 @@ pub struct CurveConfig {
     /// geometry - two ridges at different distances want different reaches.
     /// Present, it replaces the fields above; absent, they are the one path
     pub path: Option<Vec<PathConfig>>,
-    /// Bar count for this mode only, shared across every path and split
-    /// between them by length. A ridge wants a different density from a bottom
-    /// row, and `[bars] amount` is shared by all three modes
+    /// Bars shared by length between the paths that set no count of their
+    /// own; a path's own count is added on top, never taken from here. Unset,
+    /// this wallpaper's `[bars] amount`, the shell's or config.toml's applies
     pub bars: Option<u32>,
     /// Silhouette to hide behind: `[[x, y], ...]` in the same coordinates as
     /// `points`. Anything BELOW it is discarded, so bars rise from behind a
@@ -365,8 +366,9 @@ pub enum FitMode {
 pub struct PathConfig {
     /// As `CurveConfig::points`.
     pub points: Vec<Vec<f32>>,
-    /// Exactly this many bars on this path, instead of its share by length.
-    /// A short foreground ridge can want more bars than a long distant one
+    /// Exactly this many bars on this path, instead of a share of
+    /// `CurveConfig::bars`. A short foreground ridge can want more bars than a
+    /// long distant one
     pub bars: Option<u32>,
     /// This path's own gradient; absent uses the wallpaper's
     pub colors: Option<Palette>,
@@ -427,34 +429,36 @@ pub struct Occlusion<'a> {
 pub const MAX_OCCLUDERS: usize = 16;
 
 impl CurveConfig {
-    /// How many bars this curve draws in total
+    /// The bars drawn paths ask for by name, and whether any drawn path
+    /// names none and so shares the curve's count
     ///
-    /// The curve's own `bars` is the authority: it is what cava is told to
-    /// produce. Without one, paths that each name a count add up to it
+    /// The total cava is told to produce is the first, plus the shared count
+    /// when the second holds
     #[must_use]
-    pub fn total_bars(&self) -> Option<u32> {
-        if let Some(n) = self.bars {
-            return Some(n);
-        }
-        let paths = self.path.as_ref()?;
-        paths
-            .iter()
-            .map(|p| p.bars)
-            .try_fold(0u32, |acc, n| Some(acc + n?))
-            .filter(|n| *n > 0)
+    pub fn counts(&self) -> (u32, bool) {
+        self.paths().iter().filter(|p| p.is_drawn()).fold((0, false), |(own, shares), p| match p.bars {
+            Some(n) => (own.saturating_add(n), shares),
+            None => (own, true),
+        })
+    }
+
+    /// Some path has two points to draw between
+    #[must_use]
+    pub fn is_drawable(&self) -> bool {
+        self.paths().iter().any(PathConfig::is_drawn)
     }
 
     /// The paths to draw, however they were written
     ///
     /// Borrowed where they exist, synthesised only for the single-path
-    /// shorthand
+    /// shorthand, which shares the curve's `bars` like any path with no count
     #[must_use]
     pub fn paths(&self) -> Cow<'_, [PathConfig]> {
         match &self.path {
             Some(paths) if !paths.is_empty() => Cow::Borrowed(paths),
             _ => Cow::Owned(vec![PathConfig {
                 points: self.points.clone().unwrap_or_default(),
-                bars: self.bars,
+                bars: None,
                 colors: None,
                 height: self.height,
                 width: self.width,
@@ -1305,6 +1309,45 @@ mod tests {
         // One palette is laid out exactly as it always was: no mean
         assert_eq!(gradient_buffer(&[base]).len(), 16 + 3 * 16);
         assert_eq!(palette_slots(&[3]), [PaletteSlot { first: 0, stops: 3 }]);
+    }
+
+    /// A path's own count is its count; only the paths without one share.
+    /// Paths with nothing to draw neither ask nor share
+    #[test]
+    fn own_counts_add_and_the_rest_share() {
+        let c: HashMap<String, CurveConfig> = toml::from_str(
+            r"
+            [all]
+            bars = 99
+            [[all.path]]
+            bars = 3
+            points = [[0.0, 0.5], [0.5, 0.5]]
+            [[all.path]]
+            bars = 10
+            points = [[0.5, 0.5], [1.0, 0.5]]
+            [mixed]
+            [[mixed.path]]
+            bars = 4
+            points = [[0.0, 0.5], [0.5, 0.5]]
+            [[mixed.path]]
+            points = [[0.5, 0.5], [1.0, 0.5]]
+            [[mixed.path]]
+            bars = 50
+            points = [[0.5, 0.5]]
+            [short]
+            bars = 27
+            points = [[0.1, 0.2], [0.3, 0.4]]
+            [empty]
+            points = [[0.1, 0.2]]
+            ",
+        )
+        .expect("parses");
+        assert_eq!(c["all"].counts(), (13, false), "every path names its count: the curve's bars go unused");
+        assert_eq!(c["mixed"].counts(), (4, true), "a one-point path asks for nothing");
+        assert_eq!(c["short"].counts(), (0, true), "the shorthand shares the curve's bars");
+        assert!(c["short"].is_drawable());
+        assert!(!c["empty"].is_drawable());
+        assert_eq!(c["empty"].counts(), (0, false));
     }
 
     #[test]
