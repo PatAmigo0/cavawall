@@ -369,54 +369,44 @@ pub fn occluder_floor_into(floor: &mut Vec<f32>, own: &mut Vec<f32>, occluders: 
     }
 }
 
-/// Split `count` bars between paths: whatever `fixed` asks for, and the rest
-/// in proportion to length
+/// Split `count` bars between paths: exactly what `fixed` names, and the rest
+/// between the paths that name nothing, in proportion to length
 ///
-/// Largest remainder, so the total is exactly `count`: the instance count,
-/// the SSBO and cava's channel count have to agree. A path too short to earn a
-/// bar gets none rather than taking one from a long path
-///
-/// Fixed counts asking for more than exists are scaled back in proportion -
-/// the total is what cava produces
+/// The total is always exactly `count`: the instance count, the SSBO and
+/// cava's channel count have to agree. Named counts that cannot add up to it -
+/// more than exists, or less with no path left to take the rest - are scaled
+/// to it in proportion instead. A path too short to earn a bar gets none
+/// rather than taking one from a long path
 #[must_use]
 pub fn allocate(lengths: &[f32], fixed: &[Option<u32>], count: u32) -> Vec<u32> {
-    let n = lengths.len();
+    debug_assert_eq!(lengths.len(), fixed.len());
+    let asked = fixed.iter().flatten().fold(0u32, |a, &n| a.saturating_add(n));
+    let shared: Vec<usize> = fixed.iter().enumerate().filter(|(_, f)| f.is_none()).map(|(i, _)| i).collect();
+    if asked > count || (asked < count && shared.is_empty()) {
+        let weights: Vec<f32> = fixed.iter().map(|f| f.unwrap_or(0) as f32).collect();
+        return split(&weights, count);
+    }
+    let mut out: Vec<u32> = fixed.iter().map(|f| f.unwrap_or(0)).collect();
+    let weights: Vec<f32> = shared.iter().map(|&i| lengths[i]).collect();
+    for (&i, n) in shared.iter().zip(split(&weights, count - asked)) {
+        out[i] = n;
+    }
+    out
+}
+
+/// `count` in proportion to `weights`, largest remainder, so the parts add up
+/// to exactly `count`
+fn split(weights: &[f32], count: u32) -> Vec<u32> {
+    let n = weights.len();
     if n == 0 {
         return Vec::new();
     }
-    if fixed.iter().any(Option::is_some) {
-        let asked: u32 = fixed.iter().flatten().sum();
-        let mut out = vec![0u32; n];
-        if asked >= count {
-            // Everything goes to the paths that named a number, in their
-            // proportion; the rest get nothing, which is what asking for more
-            // than exists means
-            let weights: Vec<f32> = fixed.iter().map(|f| f.unwrap_or(0) as f32).collect();
-            return allocate(&weights, &vec![None; n], count);
-        }
-        for (slot, f) in out.iter_mut().zip(fixed) {
-            *slot = f.unwrap_or(0);
-        }
-        // The rest share what is left, by length
-        let rest: Vec<f32> =
-            lengths.iter().zip(fixed).map(|(l, f)| if f.is_some() { 0.0 } else { *l }).collect();
-        if rest.iter().any(|l| *l > 0.0) {
-            for (slot, share) in
-                out.iter_mut().zip(allocate(&rest, &vec![None; n], count - asked))
-            {
-                if *slot == 0 {
-                    *slot = share;
-                }
-            }
-        }
-        return out;
-    }
-    let total: f32 = lengths.iter().sum();
-    // NaN included: a path whose length is not a positive number cannot be
-    // weighted by it
+    let total: f32 = weights.iter().sum();
+    // NaN included: a weight that is not a positive number cannot be
+    // proportioned by
     if !total.is_finite() || total <= 0.0 {
-        // Degenerate paths: spread evenly and let the remainder fall to the
-        // front, which at least keeps the total right
+        // Spread evenly and let the remainder fall to the front, which at
+        // least keeps the total right
         let each = count / n as u32;
         let mut out = vec![each; n];
         for slot in out.iter_mut().take((count % n as u32) as usize) {
@@ -424,7 +414,7 @@ pub fn allocate(lengths: &[f32], fixed: &[Option<u32>], count: u32) -> Vec<u32> 
         }
         return out;
     }
-    let ideal: Vec<f32> = lengths.iter().map(|l| count as f32 * l / total).collect();
+    let ideal: Vec<f32> = weights.iter().map(|w| count as f32 * w / total).collect();
     let mut out: Vec<u32> = ideal.iter().map(|v| *v as u32).collect();
     let assigned: u32 = out.iter().sum();
     let mut order: Vec<usize> = (0..n).collect();
@@ -937,6 +927,10 @@ mod tests {
         assert_eq!(over.iter().sum::<u32>(), 20);
         // Every bar named, exactly: no remainder to share
         assert_eq!(allocate(&[1.0, 1.0], &[Some(7), Some(13)], 20), vec![7, 13]);
+        // Every bar named but short of the total, with no path left to take
+        // the rest: scaled up, so no instance reads past the buffer
+        let under = allocate(&[1.0, 1.0], &[Some(3), Some(10)], 26);
+        assert_eq!(under, vec![6, 20]);
     }
 
     fn seg(x0: f32, x1: f32, y: f32) -> Box<[Control]> {

@@ -560,15 +560,17 @@ struct AppState {
     /// holding it and `wallpapers/`
     config_path: PathBuf,
     config_dir: PathBuf,
-    /// Where `bar_count` came from, for `status`: curve, circle, wallpaper,
-    /// shell or config
-    bars_from: &'static str,
+    /// Where `bar_count` came from, for `status`: the figure, the wallpaper,
+    /// the shell or config, after a curve's own path counts
+    bars_from: String,
     /// cava's rate, and whether the wallpaper's file or config.toml set it
     framerate: u32,
     framerate_from: &'static str,
-    /// The count came from the shell's setting, so a change there re-execs.
-    /// False whenever something more specific set it
+    /// The shared count came from the shell's setting, so a change there
+    /// re-execs. False whenever something more specific set it
     bars_follow_shell: bool,
+    /// That shared count: what a new setting in the shell is compared with
+    bars_pool: u32,
     /// A frame callback has been requested and not yet received
     frame_pending: bool,
     /// A frame is owed: a callback arrived or a configure changed the surface.
@@ -760,7 +762,7 @@ impl AppState {
             // Every settings change rewrites the whole of shell.json, so most
             // wake-ups here are about something else. Compare before acting:
             // an unrelated toggle must not restart the visualiser
-            if scheme::bar_count().is_some_and(|n| n != self.bar_count) {
+            if scheme::bar_count().is_some_and(|n| n != self.bars_pool) {
                 self.reexec();
             }
         }
