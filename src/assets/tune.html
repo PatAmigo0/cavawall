@@ -51,6 +51,8 @@ header{display:flex;align-items:center;gap:14px;padding:8px 14px;border-bottom:1
 .dot{width:7px;height:7px;border-radius:50%;background:var(--faint)}
 .dot.on{background:var(--good);box-shadow:0 0 0 3px #86d9a422}
 .dot.off{background:var(--bad)}
+#offHere[aria-pressed=true]{border-color:var(--warn);color:var(--warn)}
+body.off #fx{opacity:.15}
 
 /* stage: the wallpaper fills the window, and every panel floats over it */
 main{position:relative;min-height:0;min-width:0}
@@ -174,6 +176,7 @@ footer #status{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   <div class=seg id=figure role=tablist aria-label=Figure>
     <button role=tab data-fig=bars>Bars</button><button role=tab data-fig=circle>Circle</button><button role=tab data-fig=curve>Curve</button>
   </div>
+  <button class="btn small" id=offHere aria-pressed=false title="No bars and no cava while this wallpaper is on screen; the figure is kept for when it is back on">Off on this wallpaper</button>
   <div class=grow></div>
   <div class=live><span class=dot id=liveDot></span><span id=liveText>checking cavawall…</span></div>
   <button class="btn primary" id=save disabled>Save &amp; apply<kbd>Ctrl S</kbd></button>
@@ -244,6 +247,9 @@ const S = {
   bars: {}, circle: {},
   curve: {bars: undefined, fit: 'cover', height: undefined, width: undefined},
   paths: [], occ: [],
+  // This wallpaper's own palette, null for config.toml's; off on it entirely;
+  // and whether a path edit goes to every path
+  pal: null, off: false, allPaths: false,
   cur: 0, curOcc: -1, sel: -1,
   tool: 'select', occEdit: false,
   reveal: {source: 'wallpaper', filter: {}, image: null, canvas: null, changed: false},
@@ -257,8 +263,11 @@ const cp = () => S.paths[S.cur];
 img.onload = () => {
   const k = Math.min(1, 2560 / img.naturalWidth);
   for (const c of [base, fx, ui]) { c.width = Math.round(img.naturalWidth * k); c.height = Math.round(img.naturalHeight * k); }
-  Promise.all([fetch('/existing').then(r => r.json()), fetch('/context').then(r => r.json())])
-    .then(([w, ctx]) => { load(w || {}, ctx || {}); })
+  Promise.all([fetch('/existing').then(r => r.json().then(j => r.ok ? j : {broken: j.error || 'it will not read'})), fetch('/context').then(r => r.json())])
+    .then(([w, ctx]) => {
+      load(w.broken ? {} : w || {}, ctx || {});
+      if (w.broken) toast(`This wallpaper's file will not read (${w.broken}); saving replaces it`, true);
+    })
     .catch(e => toast('Could not load settings: ' + e.message, true));
 };
 img.onerror = () => toast('The wallpaper did not load', true);
@@ -275,6 +284,8 @@ function load(W, ctx) {
   S.g0 = JSON.stringify(S.g);
   S.bars = {...(W.bars || {})};
   S.circle = {...(W.circle || {})};
+  S.pal = ownPal(W.colors);
+  S.off = !!W.disabled;
   S.reveal.source = S.bars.reveal_source || (ctx.reveal_source ? 'auto' : 'wallpaper');
   S.reveal.filter = parseFilter(S.bars.reveal_filter || '');
   const c = W.curve || {};
@@ -296,50 +307,64 @@ function load(W, ctx) {
     }
     return {pts: (p.points || []).map(v => ({x: v[0], y: v[1], s: v[2] ?? 1, a: v.length > 3 ? v[3] : null})),
       bars: src === c.path ? (p.bars ?? null) : null, height: p.height ?? null, width: p.width ?? null,
-      up: !!(p.upright ?? c.upright), fl: !!(p.flip ?? c.flip), cut};
+      up: !!(p.upright ?? c.upright), fl: !!(p.flip ?? c.flip), cut, pal: src === c.path ? ownPal(p.colors) : null};
   }).filter(p => p.pts.length);
   if (!S.paths.length) S.paths = [newPath()];
   S.cur = 0; S.curOcc = S.occ.length ? 0 : -1;
   $('wpname').textContent = (ctx.wallpaper || '').split('/').pop() || 'wallpaper';
-  setAccent(ctx.gradient);
+  setAccent(resolvePal(S.pal || globalStops()));
   live(st);
   if (S.reveal.source === 'auto' && ctx.reveal_source) loadRevealSource();
   else if (S.reveal.source === 'wallpaper') { S.reveal.image = img; bakeRevealCanvas(); }
   saved = JSON.stringify(payload());
   hist = []; future = [];
-  buildInspector(); setFigure(S.fig, true); fitView(); drawBase(); drawUI(); startLoop();
+  buildInspector(); setFigure(S.fig, true); refreshOff(); fitView(); drawBase(); drawUI(); startLoop();
   status();
 }
 
 function newPath() {
   const p = cp();
-  return {pts: [], bars: null, height: p ? p.height : null, width: p ? p.width : null, up: p ? p.up : true, fl: false, cut: null};
+  return {pts: [], bars: null, height: p ? p.height : null, width: p ? p.width : null, up: p ? p.up : true, fl: false, cut: null, pal: null};
 }
 
 // ---------------------------------------------------------------- colour
-let STOPS = [[255, 204, 128, 1], [230, 81, 0, 1]];
-function setAccent(g) {
-  if (Array.isArray(g) && g.length) STOPS = g.length === 1 ? [g[0], g[0]] : g;
-  const css = STOPS.map(s => `rgb(${s[0]},${s[1]},${s[2]})`);
-  const mid = STOPS[Math.floor(STOPS.length / 2)];
+// A palette as the renderer resolves it: a live role when following the
+// shell and the shell has it, else the stop's own hex. The mean is the tone a
+// matte finish flattens toward; a lone stop is doubled after it is taken
+function resolvePal(stops) {
+  const live = gVal('scheme', 'colors', false) && S.ctx.scheme;
+  const s = stops.map(c => { const role = live && c.role && S.ctx.scheme[c.role]; return [...hexRgb(role || c.hex), c.alpha ?? 1]; });
+  if (!s.length) s.push([255, 255, 255, 1]);
+  const n = s.length, mean = s.reduce((m, c) => [m[0] + c[0] / n, m[1] + c[1] / n, m[2] + c[2] / n], [0, 0, 0]);
+  if (n === 1) s.push(s[0]);
+  return {s, mean};
+}
+// The palette every bar without one of its own is drawn in
+let PAL = {s: [[255, 204, 128, 1], [230, 81, 0, 1]], mean: [242, 142, 64]};
+function setAccent(pal) {
+  PAL = pal;
+  const css = pal.s.map(s => `rgb(${s[0]},${s[1]},${s[2]})`), mid = pal.s[Math.floor(pal.s.length / 2)];
   document.documentElement.style.setProperty('--grad', `linear-gradient(90deg,${css.join(',')})`);
   document.documentElement.style.setProperty('--accent', `rgb(${mid[0]},${mid[1]},${mid[2]})`);
 }
 // Stop i of n at t, in the renderer's order: the first stop at the base
-function stopAt(t, alphaMul) {
-  const n = STOPS.length, f = clamp(t, 0, 1) * (n - 1), i = Math.min(Math.floor(f), n - 2), u = f - i;
-  const a = STOPS[i], b = STOPS[i + 1];
-  const mean = STOPS.reduce((m, s) => [m[0] + s[0] / n, m[1] + s[1] / n, m[2] + s[2] / n], [0, 0, 0]);
-  const matte = val('bars', 'matte');
-  const ch = k => (a[k] + (b[k] - a[k]) * u) * (1 - matte) + mean[k] * matte;
+function stopAt(t, alphaMul, pal = PAL) {
+  const st = pal.s, n = st.length, f = clamp(t, 0, 1) * (n - 1), i = Math.min(Math.floor(f), n - 2), u = f - i;
+  const a = st[i], b = st[i + 1], matte = val('bars', 'matte');
+  const ch = k => (a[k] + (b[k] - a[k]) * u) * (1 - matte) + pal.mean[k] * matte;
   const al = ((a[3] ?? 1) + ((b[3] ?? 1) - (a[3] ?? 1)) * u) * val('bars', 'opacity') * (alphaMul ?? 1);
   return `rgba(${ch(0) | 0},${ch(1) | 0},${ch(2) | 0},${clamp(al, 0, 1)})`;
 }
-function gradient(ctx, x0, y0, x1, y1, alphaIn, alphaOut) {
+function gradient(ctx, x0, y0, x1, y1, alphaIn, alphaOut, pal) {
   const g = ctx.createLinearGradient(x0, y0, x1, y1);
-  for (let k = 0; k <= 8; k++) { const t = k / 8; g.addColorStop(t, stopAt(t, alphaIn == null ? 1 : alphaIn + (alphaOut - alphaIn) * t)); }
+  for (let k = 0; k <= 8; k++) { const t = k / 8; g.addColorStop(t, stopAt(t, alphaIn == null ? 1 : alphaIn + (alphaOut - alphaIn) * t, pal)); }
   return g;
 }
+// Stops as the page edits them, {hex, alpha, role}, and back as the file
+// writes them: a bare hex unless there is more to say
+function normStop(c) { return typeof c === 'string' ? {hex: c} : {...c}; }
+function denormStop(c) { const a = c.alpha ?? 1; return a === 1 && !c.role ? c.hex : prune({hex: c.hex, alpha: a === 1 ? undefined : a, role: c.role || undefined}); }
+function ownPal(colors) { return Array.isArray(colors) && colors.length ? colors.map(normStop) : null; }
 
 // ---------------------------------------------------------------- values
 // A field's value as the renderer will see it: this wallpaper's, else
@@ -352,17 +377,26 @@ function val(group, k) {
   if (group === 'circle' && k === 'diameter') return RENDER.circle_diameter;
   return RENDER[k] ?? 0;
 }
-function effectiveBars() {
+// The count the bars share, most specific first, and where it comes from
+function sharedBars() {
   const d = S.ctx.defaults || {};
-  if (S.fig === 'curve') {
-    if (isNum(S.curve.bars)) return [S.curve.bars, 'curve'];
-    if (S.paths.every(p => p.pts.length < 2 || p.bars != null) && S.paths.some(p => p.bars != null))
-      return [S.paths.reduce((a, p) => a + (p.bars || 0), 0), 'curve paths'];
-  }
+  if (S.fig === 'curve' && isNum(S.curve.bars)) return [S.curve.bars, 'the curve'];
   if (S.fig === 'circle' && isNum(S.circle.bars)) return [S.circle.bars, 'circle'];
   if (isNum(S.bars.amount)) return [S.bars.amount, 'this wallpaper'];
   if (d.follow_shell_bars && isNum(S.ctx.shell_bars)) return [S.ctx.shell_bars, 'the shell'];
   return [d.bars?.amount ?? 24, 'config.toml'];
+}
+// The bar count startup resolves: a curve path's own count is exact, and the
+// paths without one share the count above on top of it
+function curveCounts() {
+  const drawn = S.paths.filter(p => p.pts.length >= 2);
+  return [drawn.reduce((a, p) => a + (p.bars ?? 0), 0), drawn.some(p => p.bars == null), drawn.length];
+}
+function effectiveBars() {
+  const [own, shares, drawn] = S.fig === 'curve' ? curveCounts() : [0, true, 0];
+  if (drawn && !shares) return [own, 'the paths'];
+  const [pool, from] = sharedBars();
+  return own ? [own + pool, `the paths and ${from}`] : [pool, from];
 }
 
 // ---------------------------------------------------------------- geometry
@@ -433,20 +467,21 @@ function dense(pts) {
   return o;
 }
 function arcLen(d) { let t = 0; for (let i = 1; i < d.length; i++) t += Math.hypot(d[i].p[0] - d[i - 1].p[0], d[i].p[1] - d[i - 1].p[1]); return t; }
-// curve::allocate: named counts come off the top, the rest by length,
-// largest remainder, so the total is exact
+// curve::allocate: named counts exactly, the rest by length among the paths
+// that name none; counts that cannot add up to the total are scaled to it
 function alloc(lens, fixed, total) {
-  const n = lens.length; if (!n) return [];
-  if (fixed.some(v => v != null)) {
-    const asked = fixed.reduce((a, v) => a + (v || 0), 0);
-    if (asked >= total) return alloc(fixed.map(v => v || 0), fixed.map(() => null), total);
-    const out = fixed.map(v => v || 0), rest = lens.map((l, i) => fixed[i] != null ? 0 : l);
-    if (rest.some(l => l > 0)) { const share = alloc(rest, rest.map(() => null), total - asked); for (let i = 0; i < n; i++) if (!out[i]) out[i] = share[i]; }
-    return out;
-  }
-  const sum = lens.reduce((a, b) => a + b, 0);
+  const asked = fixed.reduce((a, v) => a + (v ?? 0), 0), shared = fixed.flatMap((v, i) => v == null ? [i] : []);
+  if (asked > total || (asked < total && !shared.length)) return split(fixed.map(v => v ?? 0), total);
+  const out = fixed.map(v => v ?? 0), share = split(shared.map(i => lens[i]), total - asked);
+  shared.forEach((i, k) => { out[i] = share[k]; });
+  return out;
+}
+// curve::split: in proportion, largest remainder, so the parts add up exactly
+function split(w, total) {
+  const n = w.length; if (!n) return [];
+  const sum = w.reduce((a, b) => a + b, 0);
   if (!(sum > 0)) { const e = Math.floor(total / n), o = new Array(n).fill(e); for (let i = 0; i < total % n; i++) o[i]++; return o; }
-  const ideal = lens.map(l => total * l / sum), out = ideal.map(Math.floor);
+  const ideal = w.map(l => total * l / sum), out = ideal.map(Math.floor);
   let left = total - out.reduce((a, b) => a + b, 0);
   const order = ideal.map((_, i) => i).sort((a, b) => (ideal[b] - Math.floor(ideal[b])) - (ideal[a] - Math.floor(ideal[a])) || a - b);
   for (let k = 0; left > 0; k++, left--) out[order[k % n]]++;
@@ -595,6 +630,10 @@ function drawPreview(t) {
     }
   } else {
     const bars = curveBars(), ia = val('circle', 'inner_alpha'), oa = val('circle', 'outer_alpha');
+    // Each path in its own palette or the wallpaper's; along the row, a
+    // palette runs over the bars drawn in it, in order
+    const pals = S.paths.map(p => p.pal ? resolvePal(p.pal) : PAL), run = b => S.paths[b.path].pal ? b.path : -1;
+    const runs = new Map(), along = bars.map(b => { const k = run(b), at = runs.get(k) || 0; runs.set(k, at + 1); return at; });
     // One pass per distinct set of occluders: draw that set's bars, then
     // punch every occluder in the set out of them - the union, like the mask
     const groups = new Map();
@@ -606,8 +645,8 @@ function drawPreview(t) {
         layer.save(); layer.translate(b.x, b.y); layer.transform(tx, ty, b.nx, b.ny, 0, 0);
         // In the bar's own frame: base at 0, its normal along +y
         for (const back of mirror ? [false, true] : [false]) {
-          if (row) { const c = stopAt(i / Math.max(1, n - 1)); layer.fillStyle = c; }
-          else layer.fillStyle = gradient(layer, 0, 0, 0, back ? -b.reach : b.reach, ia, oa);
+          if (row) layer.fillStyle = stopAt(along[i] / Math.max(1, runs.get(run(b)) - 1), undefined, pals[b.path]);
+          else layer.fillStyle = gradient(layer, 0, 0, 0, back ? -b.reach : b.reach, ia, oa, pals[b.path]);
           layer.beginPath(); roundedBar(layer, -b.width / 2, 0, b.width, len, back, radius * b.width); layer.fill();
           if (mask) { mask.save(); mask.setTransform(layer.getTransform()); mask.fillStyle = maskAlpha(i); mask.beginPath(); roundedBar(mask, -b.width / 2, 0, b.width, len, back, radius * b.width); mask.fill(); mask.restore(); }
           if (blocks > 0) {
@@ -823,7 +862,7 @@ function hover(e) {
 }
 
 // ---------------------------------------------------------------- history
-function state() { return JSON.stringify({fig: S.fig, bars: S.bars, circle: S.circle, curve: S.curve, paths: S.paths, occ: S.occ, cur: S.cur, curOcc: S.curOcc, rf: S.reveal.filter, rs: S.reveal.source, g: S.g}); }
+function state() { return JSON.stringify({fig: S.fig, bars: S.bars, circle: S.circle, curve: S.curve, paths: S.paths, occ: S.occ, cur: S.cur, curOcc: S.curOcc, rf: S.reveal.filter, rs: S.reveal.source, g: S.g, pal: S.pal, off: S.off}); }
 let pending = null;
 function snapshot() { pending = pending ?? state(); }
 function commit() {
@@ -834,9 +873,9 @@ function commit() {
 }
 function restore(s) {
   const o = JSON.parse(s);
-  Object.assign(S, {fig: o.fig, bars: o.bars, circle: o.circle, curve: o.curve, paths: o.paths, occ: o.occ, cur: o.cur, curOcc: o.curOcc});
+  Object.assign(S, {fig: o.fig, bars: o.bars, circle: o.circle, curve: o.curve, paths: o.paths, occ: o.occ, cur: o.cur, curOcc: o.curOcc, pal: o.pal, off: o.off});
   if (JSON.stringify(o.rf) !== JSON.stringify(S.reveal.filter) || o.rs !== S.reveal.source) { S.reveal.filter = o.rf; S.reveal.source = o.rs; S.reveal.changed = true; revealSourceChanged(); }
-  if (JSON.stringify(o.g) !== JSON.stringify(S.g)) { S.g = o.g; recomputeStops(); renderStops(); }
+  S.g = o.g; renderPalettes(); recomputeStops(); refreshOff();
   S.sel = -1; setFigure(S.fig, true); syncFields(); renderLayers(); refreshPoint(); drawBase(); drawUI(); if (!S.view.play) drawPreview(0);
 }
 function undo() { if (!hist.length) return; future.push(state()); restore(hist.pop()); status(); }
@@ -902,54 +941,68 @@ function stopKeys() {
   const n = k => +(k.match(/(\d+)\D*$/) || [0, 1e9])[1];
   return Object.keys(S.g.colors || {}).sort((a, b) => n(a) - n(b) || a.localeCompare(b));
 }
-function stopOf(k) { const v = S.g.colors[k]; return typeof v === 'string' ? {hex: v} : {...v}; }
+function stopOf(k) { return normStop(S.g.colors[k]); }
+function globalStops() { return stopKeys().map(stopOf); }
 function hexRgb(h) { const m = /^#?([0-9a-f]{6})/i.exec(h || ''); if (!m) return [255, 255, 255]; const n = parseInt(m[1], 16); return [n >> 16, (n >> 8) & 255, n & 255]; }
-// The palette as the renderer resolves it: a live role when following the
-// shell and the shell has it, else the stop's own hex
+// The wallpaper's palette as the renderer resolves it, and the accent with it
 function recomputeStops() {
-  const live = gVal('scheme', 'colors', false) && S.ctx.scheme;
-  const g = stopKeys().map(k => { const c = stopOf(k), role = live && c.role && S.ctx.scheme[c.role]; return [...hexRgb(role || c.hex), c.alpha ?? 1]; });
-  if (g.length) setAccent(g);
+  setAccent(resolvePal(S.pal || globalStops()));
   if (!S.view.play) drawPreview(0);
+}
+// Where a stop list keeps its stops: config.toml's keyed [colors], or an
+// array of the wallpaper's or a path's own
+const GLOBAL_STOPS = {
+  list: globalStops,
+  put: (i, c) => gSet('colors', stopKeys()[i], c),
+  add: c => { let n = stopKeys().length + 1; while (S.g.colors?.[`c${n}`] != null) n++; gSet('colors', `c${n}`, c); },
+  // Later stops move down a key, so the file stays c1..cN
+  del: i => { const keys = stopKeys(); for (let j = i; j < keys.length - 1; j++) gSet('colors', keys[j], S.g.colors[keys[j + 1]]); gSet('colors', keys[keys.length - 1], null); },
+};
+function ownStops(get, after) {
+  return {list: get, put: (i, c) => { get()[i] = c; }, add: c => get().push(c), del: i => get().splice(i, 1), after};
 }
 function buildColours() {
   const s = section('Colours', '', 'every wallpaper', $('paneLook'));
-  gChip(s, 'Follow the live palette', 'scheme', 'colors', false, 'Stops with a role take the live colour of that role', () => { renderStops(); recomputeStops(); });
+  s.id = 'colourSec';
+  chip(s, 'Own palette for this wallpaper', () => !!S.pal, on => { S.pal = on ? globalStops() : null; renderPalettes(); recomputeStops(); }, 'Only this wallpaper; every other one keeps the palette in config.toml');
+  gChip(s, 'Follow the live palette', 'scheme', 'colors', false, 'Stops with a role take the live colour of that role, on every wallpaper', () => { renderPalettes(); recomputeStops(); });
   gSelect(s, 'Palette from', 'scheme', 'source', [['caelestia', 'Caelestia'], ['pywal', 'pywal'], ['file', 'A JSON file']], 'caelestia', () => syncFields());
   const palPath = gText(s, 'File', 'scheme', 'path', 'the source\'s usual place');
   ROWS.push(() => { palPath.style.display = gVal('scheme', 'colors', false) ? '' : 'none'; });
   const list = document.createElement('div'); list.id = 'stopList'; s.appendChild(list);
-  const add = document.createElement('div'); add.className = 'btns';
-  add.innerHTML = '<button class="btn small" id=addStop>+ Stop</button>';
-  s.appendChild(add);
-  $('addStop').onclick = () => {
-    snapshot(); const keys = stopKeys(), last = keys.length ? stopOf(keys[keys.length - 1]) : {hex: '#ffffff'};
-    gSet('colors', `c${keys.length + 1}`, {hex: last.hex, alpha: last.alpha ?? 1});
-    renderStops(); recomputeStops(); commit();
-  };
-  renderStops();
+  renderPalettes();
 }
-function renderStops() {
-  const list = $('stopList'); if (!list) return;
+// Every stop list on the page: the wallpaper's palette, and the selected
+// path's when it has one of its own
+function renderPalettes() {
+  const list = $('stopList');
+  if (list) {
+    renderStopList(list, S.pal ? ownStops(() => S.pal) : GLOBAL_STOPS);
+    $('colourSec').querySelector('.aside').textContent = S.pal ? 'this wallpaper' : 'every wallpaper';
+  }
+  const own = $('pathPal'), P = cp();
+  if (!own || !P) return;
+  own.style.display = P.pal ? '' : 'none';
+  if (P.pal) renderStopList(own, ownStops(() => cp().pal, syncPathPals));
+}
+// Under "Every path", the selected path's palette is every path's
+function syncPathPals() { if (S.allPaths) S.paths.forEach(p => { if (p !== cp()) p.pal = cp().pal && cp().pal.map(c => ({...c})); }); }
+function renderStopList(el, m) {
   const live = gVal('scheme', 'colors', false) && S.ctx.scheme, roles = live ? Object.keys(S.ctx.scheme).sort() : [];
-  const keys = stopKeys();
-  list.innerHTML = keys.map((k, i) => {
-    const c = stopOf(k), liveHex = live && c.role && S.ctx.scheme[c.role];
+  const stops = m.list();
+  el.innerHTML = stops.map((c, i) => {
+    const liveHex = live && c.role && S.ctx.scheme[c.role];
     const shown = liveHex || c.hex;
-    const role = live ? `<select data-role=${i} title="Live colour"><option value="">fixed</option>${roles.map(r => `<option${r === c.role ? ' selected' : ''}>${escapeHtml(r)}</option>`).join('')}</select>` : `<span class=meta title="${escapeHtml(k)}">${i === 0 ? 'base' : i === keys.length - 1 ? 'tip' : ''}</span>`;
-    return `<div class=stop><input type=color value="${'#' + hexRgb(shown).map(v => v.toString(16).padStart(2, '0')).join('')}" data-hex=${i} aria-label="Stop ${i + 1}"${liveHex ? ` disabled title="${escapeHtml(c.role)}, live from the shell. Set it to fixed to pick a colour"` : ''}>${role}<input type=range min=0 max=1 step=0.05 value=${c.alpha ?? 1} data-alpha=${i} title="Alpha" aria-label="Stop ${i + 1} alpha"><button data-del=${i} title="Remove" aria-label="Remove stop ${i + 1}" ${keys.length < 2 ? 'disabled' : ''}>×</button></div>`;
-  }).join('');
-  const edit = (i, f) => { const k = keys[i], c = stopOf(k); f(c); gSet('colors', k, c); recomputeStops(); status(); };
-  list.querySelectorAll('[data-hex]').forEach(e => { e.onfocus = snapshot; e.oninput = () => edit(+e.dataset.hex, c => c.hex = e.value); e.onchange = commit; });
-  list.querySelectorAll('[data-alpha]').forEach(e => { e.onpointerdown = snapshot; e.oninput = () => edit(+e.dataset.alpha, c => c.alpha = +e.value); e.onchange = commit; });
-  list.querySelectorAll('[data-role]').forEach(e => { e.onchange = () => { snapshot(); edit(+e.dataset.role, c => { if (e.value) c.role = e.value; else delete c.role; }); renderStops(); commit(); }; });
-  list.querySelectorAll('[data-del]').forEach(e => e.onclick = () => {
-    snapshot(); const i = +e.dataset.del;
-    // Later stops move down a key, so the file stays c1..cN
-    for (let j = i; j < keys.length - 1; j++) gSet('colors', keys[j], S.g.colors[keys[j + 1]]);
-    gSet('colors', keys[keys.length - 1], null);
-    renderStops(); recomputeStops(); commit();
-  });
+    const role = live ? `<select data-role=${i} title="Live colour"><option value="">fixed</option>${roles.map(r => `<option${r === c.role ? ' selected' : ''}>${escapeHtml(r)}</option>`).join('')}</select>` : `<span class=meta>${i === 0 ? 'base' : i === stops.length - 1 ? 'tip' : ''}</span>`;
+    return `<div class=stop><input type=color value="${'#' + hexRgb(shown).map(v => v.toString(16).padStart(2, '0')).join('')}" data-hex=${i} aria-label="Stop ${i + 1}"${liveHex ? ` disabled title="${escapeHtml(c.role)}, live from the shell. Set it to fixed to pick a colour"` : ''}>${role}<input type=range min=0 max=1 step=0.05 value=${c.alpha ?? 1} data-alpha=${i} title="Alpha" aria-label="Stop ${i + 1} alpha"><button data-del=${i} title="Remove" aria-label="Remove stop ${i + 1}" ${stops.length < 2 ? 'disabled' : ''}>×</button></div>`;
+  }).join('') + '<div class=btns><button class="btn small" data-add>+ Stop</button></div>';
+  const done = () => { m.after?.(); recomputeStops(); };
+  const edit = (i, f) => { const c = {...m.list()[i]}; f(c); m.put(i, c); done(); status(); };
+  el.querySelectorAll('[data-hex]').forEach(e => { e.onfocus = snapshot; e.oninput = () => edit(+e.dataset.hex, c => c.hex = e.value); e.onchange = commit; });
+  el.querySelectorAll('[data-alpha]').forEach(e => { e.onpointerdown = snapshot; e.oninput = () => edit(+e.dataset.alpha, c => c.alpha = +e.value); e.onchange = commit; });
+  el.querySelectorAll('[data-role]').forEach(e => { e.onchange = () => { snapshot(); edit(+e.dataset.role, c => { if (e.value) c.role = e.value; else delete c.role; }); renderStopList(el, m); commit(); }; });
+  el.querySelectorAll('[data-del]').forEach(e => e.onclick = () => { snapshot(); m.del(+e.dataset.del); done(); renderStopList(el, m); commit(); });
+  el.querySelector('[data-add]').onclick = () => { snapshot(); const s = m.list(); m.add({...(s[s.length - 1] || {hex: '#ffffff'})}); done(); renderStopList(el, m); commit(); };
 }
 function buildSound() {
   const host = $('paneSound');
@@ -1164,7 +1217,7 @@ function buildInspector() {
   const countBars = document.createElement('div'); countBars.className = 'fig-bars'; s.appendChild(countBars); row(FIELDS.count.bars, countBars);
   const countCircle = document.createElement('div'); countCircle.className = 'fig-circle'; s.appendChild(countCircle); row(FIELDS.count.circle, countCircle);
   const countCurve = document.createElement('div'); countCurve.className = 'fig-curve'; s.appendChild(countCurve);
-  countCurve.innerHTML = `<div class=row><label>Total</label><input type=range min=1 max=256 step=1 id=curveTotal aria-label="Curve bars"><output id=curveTotalV></output><button class=reset id=curveTotalReset title="Sum of the paths' own counts">↺</button></div>`;
+  countCurve.innerHTML = `<div class=row><label title="Bars the paths without a count of their own share by length">Shared</label><input type=range min=1 max=256 step=1 id=curveTotal aria-label="Shared bars"><output id=curveTotalV></output><button class=reset id=curveTotalReset title="Inherit">↺</button></div>`;
   const ct = countCurve.querySelector('#curveTotal');
   ct.addEventListener('pointerdown', snapshot);
   ct.oninput = () => { S.curve.bars = +ct.value; refreshCount(); drawUI(); status(); };
@@ -1220,14 +1273,15 @@ function buildInspector() {
 
   s = section('Path', 'fig-curve', 'the selected one');
   s.id = 'pathSec';
+  chip(s, 'Every path', () => S.allPaths, on => { S.allPaths = on; $('pathSec').querySelector('.aside').textContent = on ? 'every path at once' : 'the selected one'; }, 'Edits below go to every path');
   const pathRows = [
     {k: 'height', label: 'Reach', min: 0.01, max: 0.6, step: 0.005, def: () => S.curve.height ?? RENDER.path_height},
     {k: 'width', label: 'Width', min: 0.001, max: 0.04, step: 0.0005, def: () => S.curve.width ?? RENDER.path_width},
-    {k: 'bars', label: 'Own bars', min: 1, max: 256, step: 1, int: true, def: () => null},
+    {k: 'bars', label: 'Bars', min: 1, max: 256, step: 1, int: true, def: () => null},
   ];
   for (const d of pathRows) {
     const el = document.createElement('div'); el.className = 'row';
-    el.innerHTML = `<label>${d.label}</label><input type=range min=${d.min} max=${d.max} step=${d.step}><output></output><button class=reset title="${d.k === 'bars' ? 'Share the total by length' : 'Inherit'}">↺</button>`;
+    el.innerHTML = `<label${d.k === 'bars' ? ' title="Exactly this many on this path; reset to share the curve\'s count with the other paths"' : ''}>${d.label}</label><input type=range min=${d.min} max=${d.max} step=${d.step}><output></output><button class=reset title="${d.k === 'bars' ? 'Share the curve\'s count' : 'Inherit'}">↺</button>`;
     const input = el.querySelector('input'), out = el.querySelector('output');
     const sync = () => {
       const own = cp()[d.k]; let v = own ?? d.def();
@@ -1237,16 +1291,22 @@ function buildInspector() {
       out.textContent = d.int ? (own == null ? v + '*' : v) : (+v).toFixed(3);
     };
     input.addEventListener('pointerdown', snapshot);
-    input.oninput = () => { cp()[d.k] = d.int ? Math.round(+input.value) : +input.value; sync(); refreshCount(); drawUI(); status(); };
+    input.oninput = () => { const v = d.int ? Math.round(+input.value) : +input.value; targets().forEach(p => { p[d.k] = v; }); sync(); refreshCount(); drawUI(); status(); };
     input.onchange = commit;
-    el.querySelector('.reset').onclick = () => { snapshot(); cp()[d.k] = null; sync(); refreshCount(); commit(); drawUI(); };
+    el.querySelector('.reset').onclick = () => { snapshot(); targets().forEach(p => { p[d.k] = null; }); sync(); refreshCount(); commit(); drawUI(); };
     s.appendChild(el); ROWS.push(sync); sync();
   }
   const pchips = document.createElement('div'); pchips.className = 'chips'; pchips.style.marginTop = '6px';
-  pchips.innerHTML = `<button class=chip id=up>Upright</button><button class=chip id=flip>Flip side</button>`;
+  pchips.innerHTML = `<button class=chip id=up>Upright</button><button class=chip id=flip>Flip side</button><button class=chip id=pathPalChip title="This path in colours of its own; off draws it in the wallpaper's">Own palette</button>`;
   s.appendChild(pchips);
-  $('up').onclick = () => { snapshot(); cp().up = !cp().up; refreshPathChips(); drawUI(); commit(); };
-  $('flip').onclick = () => { snapshot(); cp().fl = !cp().fl; refreshPathChips(); drawUI(); commit(); };
+  $('up').onclick = () => { snapshot(); const v = !cp().up; targets().forEach(p => { p.up = v; }); refreshPathChips(); drawUI(); commit(); };
+  $('flip').onclick = () => { snapshot(); const v = !cp().fl; targets().forEach(p => { p.fl = v; }); refreshPathChips(); drawUI(); commit(); };
+  $('pathPalChip').onclick = () => {
+    snapshot(); const v = cp().pal ? null : (S.pal || globalStops());
+    targets().forEach(p => { p.pal = v && v.map(c => ({...c})); });
+    refreshPathChips(); if (!S.view.play) drawPreview(0); commit();
+  };
+  const pp = document.createElement('div'); pp.id = 'pathPal'; pp.style.marginTop = '8px'; s.appendChild(pp);
   const fitRow = document.createElement('div'); fitRow.className = 'row';
   fitRow.innerHTML = `<label>Image fit</label><select id=fitSel style="grid-column:2/4"><option value=cover>Cover, as the wallpaper</option><option value=stretch>Stretch</option></select>`;
   s.appendChild(fitRow);
@@ -1336,10 +1396,15 @@ function refreshCount() {
   countEl.innerHTML = `${n}<small>bars, from ${from}</small>`;
   const note = $('countNote'), d = S.ctx.defaults || {};
   const shell = d.follow_shell_bars && isNum(S.ctx.shell_bars) ? `the shell's ${S.ctx.shell_bars}` : null;
-  note.innerHTML = S.fig === 'curve' ? 'Paths share the total by length unless they set their own count.'
+  const [own, shares] = curveCounts(), [pool] = sharedBars();
+  note.innerHTML = S.fig === 'curve' ? (!shares ? 'Every path sets its own count.' : own ? `Paths with a count of their own keep it; the others share <b>${pool}</b> by length.` : 'The paths share these by length; one with a count of its own keeps it on top.')
     : `First one set wins: ${S.fig === 'circle' ? 'the circle\'s own count, then ' : ''}this wallpaper, then ${shell ? shell + ', then ' : ''}config.toml.`;
   const t = $('curveTotal');
-  if (t) { t.value = n; $('curveTotalV').textContent = isNum(S.curve.bars) ? n : n + '*'; t.closest('.row').classList.toggle('inherited', !isNum(S.curve.bars)); t.style.setProperty('--p', ((n - 1) / 255 * 100) + '%'); }
+  if (t) {
+    t.value = pool; $('curveTotalV').textContent = isNum(S.curve.bars) ? pool : pool + '*';
+    t.closest('.row').classList.toggle('inherited', !isNum(S.curve.bars)); t.closest('.row').style.display = shares ? '' : 'none';
+    t.style.setProperty('--p', ((pool - 1) / 255 * 100) + '%');
+  }
 }
 function refreshAnchors() {
   const pos = Array.isArray(S.circle.position), a = S.circle.anchor || S.ctx.defaults?.circle?.anchor || 'center';
@@ -1348,7 +1413,14 @@ function refreshAnchors() {
   document.querySelectorAll('.margin-row').forEach(r => r.style.display = pos ? 'none' : '');
 }
 function refreshGrow() { document.querySelectorAll('[data-grow]').forEach(b => b.setAttribute('aria-pressed', (val('bars', 'grow') === 'down') === (b.dataset.grow === 'down'))); }
-function refreshPathChips() { if (!$('up')) return; $('up').setAttribute('aria-pressed', !!cp().up); $('flip').setAttribute('aria-pressed', !!cp().fl); if ($('fitSel')) $('fitSel').value = S.curve.fit; }
+function refreshPathChips() {
+  if (!$('up')) return;
+  $('up').setAttribute('aria-pressed', !!cp().up); $('flip').setAttribute('aria-pressed', !!cp().fl); $('pathPalChip').setAttribute('aria-pressed', !!cp().pal);
+  if ($('fitSel')) $('fitSel').value = S.curve.fit;
+  renderPalettes();
+}
+// What a path edit changes: the selected path, or every one of them
+function targets() { return S.allPaths ? S.paths : [cp()]; }
 function refreshViewChips() { $('vFrame').setAttribute('aria-pressed', S.view.frame); $('vHandles').setAttribute('aria-pressed', S.view.handles); }
 function selPoint() { const L = activeList(); return !S.occEdit && L && S.sel >= 0 ? L[S.sel] : null; }
 function refreshPoint() {
@@ -1566,6 +1638,8 @@ function payload() {
   // written back untouched
   const W = JSON.parse(JSON.stringify(S.W || {}));
   W.mode = S.fig;
+  W.disabled = S.off || undefined;
+  W.colors = S.pal ? S.pal.map(denormStop) : undefined;
   const bars = {...S.bars};
   if (val('bars', 'reveal') > 0) { bars.reveal_source = S.reveal.source === 'auto' ? 'auto' : undefined; bars.reveal_filter = filterString(S.reveal.filter) || undefined; }
   else { delete bars.reveal_source; delete bars.reveal_filter; }
@@ -1586,6 +1660,7 @@ function payload() {
       bars: P.bars ?? undefined, height: P.height ?? undefined, width: P.width ?? undefined,
       upright: P.up || undefined, flip: P.fl || undefined,
       cut_by: P.cut === null ? undefined : P.cut.filter(n => names.has(n)),
+      colors: P.pal ? P.pal.map(denormStop) : undefined,
     }));
     W.curve = prune(c);
   } else delete W.curve;
@@ -1621,6 +1696,8 @@ async function save() {
   finally { btn.firstChild.textContent = 'Save & apply'; status(); }
 }
 $('save').onclick = save;
+$('offHere').onclick = () => { snapshot(); S.off = !S.off; refreshOff(); commit(); };
+function refreshOff() { $('offHere').setAttribute('aria-pressed', S.off); document.body.classList.toggle('off', S.off); status(); }
 addEventListener('beforeunload', e => { if (isDirty()) { e.preventDefault(); e.returnValue = ''; } });
 
 // ---------------------------------------------------------------- status
@@ -1635,14 +1712,16 @@ function status() {
   else if (S.fig === 'circle') hint = 'Drag the circle to place it, the rim to resize it';
   else if (S.occEdit) hint = S.curOcc >= 0 ? `Editing ${S.occ[S.curOcc]?.name}: click adds, drag moves, right-click deletes` : 'Add an occluder in Layers';
   else hint = S.tool === 'paint' ? 'Paint along the ridge; Thin points tidies it afterwards' : 'Click adds a point, drag moves one, right-click deletes, alt-drag sets its angle';
+  if (S.off) hint = 'cavawall is off on this wallpaper: no bars and no cava. The figure is kept for when it is back on';
   $('hint').textContent = hint;
   const {w, h} = S.out;
-  $('status').textContent = `${S.fig} · ${effectiveBars()[0]} bars · output ${w}×${h}${S.ctx.image ? ` · image ${S.ctx.image[0]}×${S.ctx.image[1]}` : ''}`;
+  $('status').textContent = `${S.off ? 'off · ' : ''}${S.fig} · ${effectiveBars()[0]} bars · output ${w}×${h}${S.ctx.image ? ` · image ${S.ctx.image[0]}×${S.ctx.image[1]}` : ''}`;
 }
 function live(st) {
   const on = st && st.pid;
-  $('liveDot').className = 'dot ' + (on ? 'on' : 'off');
-  $('liveText').textContent = on ? `cavawall · ${st.mode} · ${st.bars} bars from ${st.bars_from || '?'}${st.placed_on ? ' · ' + st.placed_on : ''}` : 'cavawall is not running';
+  $('liveDot').className = 'dot ' + (on ? (st.disabled ? '' : 'on') : 'off');
+  $('liveText').textContent = !on ? 'cavawall is not running' : st.disabled ? 'cavawall · off on this wallpaper'
+    : `cavawall · ${st.mode} · ${st.bars} bars from ${st.bars_from || '?'}${st.placed_on ? ' · ' + st.placed_on : ''}`;
 }
 function refreshLive() { fetch('/context').then(r => r.json()).then(c => { S.ctx.status = c.status; live(c.status); }).catch(() => {}); }
 setInterval(refreshLive, 10000);
