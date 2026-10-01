@@ -386,22 +386,16 @@ fn reply(s: &mut TcpStream, status: &str, mime: &str, body: &[u8]) {
 }
 
 fn config_dir() -> PathBuf {
-    std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
-        .unwrap_or_default()
-        .join("cavawall")
+    app_config::config_dir()
+}
+
+fn load_config() -> Option<Config> {
+    app_config::load_config(&config_dir().join("config.toml")).ok()
 }
 
 /// Everything the page shows besides the wallpaper's own file: what an unset
 /// field falls back to, the gradient the bars are drawn in, the image's size
 /// and what the running instance is doing
-fn load_config() -> Option<Config> {
-    std::fs::read_to_string(config_dir().join("config.toml"))
-        .ok()
-        .and_then(|s| toml::from_str(&s).ok())
-}
-
 fn context(site: &Site) -> serde_json::Value {
     let config = load_config();
     let gradient = config.as_ref().map(|c| {
