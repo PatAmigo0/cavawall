@@ -1,9 +1,12 @@
 //! Query and control a running cavawall over its control socket.
 
+use cavawall::app_config::{self, WallpaperConfig};
 use cavawall::control::{request, Request, Response};
+use cavawall::curve;
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use clap_complete::Shell;
 use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
 use std::process::{Command as Proc, Stdio};
 use std::process::exit;
 
@@ -37,6 +40,16 @@ enum Command {
     Kill,
     /// Open the editor for the current wallpaper
     Tune,
+    /// Turn cavawall off while this wallpaper is on screen: no bars, no cava
+    Disable {
+        /// An image file, rather than the wallpaper on screen
+        image: Option<PathBuf>,
+    },
+    /// Turn it back on for this wallpaper
+    Enable {
+        /// An image file, rather than the wallpaper on screen
+        image: Option<PathBuf>,
+    },
     /// Read the log: what happened, and why the last instance stopped
     Log {
         #[command(subcommand)]
@@ -250,6 +263,41 @@ fn service(action: &ServiceAction, name: &str) -> Result<&'static str, String> {
     }
 }
 
+/// Turn cavawall off or back on for a wallpaper: the image named, else the
+/// one on screen. The running instance says which config and wallpaper it
+/// has; with none running, config.toml says where the wallpaper comes from
+fn set_disabled(image: Option<&Path>, off: bool) -> Result<String, String> {
+    let status = request(&Request::Status).ok().and_then(|r| r.data);
+    let field = |k: &str| status.as_ref().and_then(|d| d.get(k)?.as_str().map(str::to_owned));
+    let config = field("config").map_or_else(|| app_config::config_dir().join("config.toml"), PathBuf::from);
+    let dir = config.parent().map(Path::to_path_buf).unwrap_or_default();
+    let running = field("curve_key");
+    let (key, what) = if let Some(p) = image {
+        let key = curve::content_key(p).ok_or_else(|| format!("cannot read {}", p.display()))?;
+        (key, p.file_name().map_or_else(|| p.display().to_string(), |n| n.to_string_lossy().into_owned()))
+    } else if let Some(key) = running.clone() {
+        (key, "this wallpaper".to_owned())
+    } else {
+        let cfg = app_config::load_config(&config).ok();
+        cavawall::wallpaper::configure(cfg.as_ref().and_then(|c| c.wallpaper.as_ref()));
+        let wp = curve::current_wallpaper().ok_or("cannot tell which wallpaper is on screen; name an image")?;
+        (curve::content_key(&wp).ok_or_else(|| format!("cannot read {}", wp.display()))?, "this wallpaper".to_owned())
+    };
+    if WallpaperConfig::load(&dir, &key)?.is_some_and(|w| w.is_disabled()) == off {
+        return Ok(format!("already {} on {what}", if off { "off" } else { "drawing" }));
+    }
+    WallpaperConfig::set_disabled(&dir, &key, off)?;
+    let done = format!("{} on {what}", if off { "off" } else { "drawing again" });
+    // Only the instance on that wallpaper has anything to change
+    if running.as_deref() != Some(key.as_str()) {
+        return Ok(done);
+    }
+    Ok(match request(&Request::Reload) {
+        Ok(r) if r.ok => done,
+        _ => format!("{done} from its next start: the running instance did not reload"),
+    })
+}
+
 /// Errors to stderr, data to stdout, non-zero when the answer is no
 fn main() {
     let name = own_name();
@@ -283,6 +331,18 @@ fn main() {
             let err = Proc::new(&tune).exec();
             eprintln!("{name}: cannot run {}: {err}", tune.display());
             exit(127);
+        }
+        Command::Disable { image } | Command::Enable { image } => {
+            let off = matches!(cli.command, Command::Disable { .. });
+            match set_disabled(image.as_deref(), off) {
+                Ok(msg) if cli.json => println!("{}", serde_json::json!({ "ok": true, "off": off, "said": msg })),
+                Ok(msg) => println!("{msg}"),
+                Err(e) => {
+                    eprintln!("{name}: {e}");
+                    exit(1);
+                }
+            }
+            return;
         }
         Command::Kill => {
             if let Some(pid) = locked_pid() {
@@ -368,6 +428,8 @@ fn main() {
         | Command::Restart
         | Command::Kill
         | Command::Tune
+        | Command::Disable { .. }
+        | Command::Enable { .. }
         | Command::Log { .. }
         | Command::Service { .. }
         | Command::Completions { .. } => {
