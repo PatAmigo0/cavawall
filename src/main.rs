@@ -722,6 +722,11 @@ impl AppState {
     /// bars. Without this a hard kill leaves that frame visible on the
     /// background until something else forces a repaint
     fn clear_and_exit(&mut self, why: &str) -> ! {
+        self.clear_and_exit_with(why, 0)
+    }
+
+    /// `code` 1 has systemd's Restart=on-failure start us again
+    fn clear_and_exit_with(&mut self, why: &str, code: i32) -> ! {
         say!("stopping: {why}");
         cavawall::log::exited(why);
         cavawall::notify::send(NotifyEvent::Stop, &format!("stopped: {why}"));
@@ -729,7 +734,7 @@ impl AppState {
         control::unbind();
         // SAFETY: a plain signal to our own child
         unsafe { libc::kill(self.cava_pid as libc::pid_t, libc::SIGKILL) };
-        std::process::exit(0);
+        std::process::exit(code);
     }
 
     /// Present one transparent frame and wait for it to reach the compositor.
@@ -1065,8 +1070,21 @@ impl AppState {
 
     /// Leave the way SIGTERM does. `panic = "abort"` skips all cleanup, so
     /// panicking instead leaves the last frame burnt onto the wallpaper
+    ///
+    /// A failure, so systemd starts us again: after a wallpaper change cava
+    /// once died within a second of starting, without a word on stderr, and a
+    /// clean exit left the wallpaper bare until someone noticed
     fn cava_gone(&mut self) -> ! {
-        self.clear_and_exit("cava exited; check the audio source, or run cava by hand to see why");
+        let mut status = 0;
+        // EOF can come a moment before cava is a zombie
+        // SAFETY: waitpid on our own child, into a local
+        let how = match unsafe { libc::waitpid(self.cava_pid as libc::pid_t, &raw mut status, 0) } {
+            p if p <= 0 => "with no status".to_owned(),
+            _ if libc::WIFSIGNALED(status) => format!("killed by signal {}", libc::WTERMSIG(status)),
+            _ => format!("with status {}", libc::WEXITSTATUS(status)),
+        };
+        let why = format!("cava exited {how}; check the audio source, or run cava by hand to see why");
+        self.clear_and_exit_with(&why, 1);
     }
 
     /// Rank a connected output; lower wins, None means "not eligible at all".
