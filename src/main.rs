@@ -1051,6 +1051,12 @@ impl AppState {
             // older than what is on screen
             self.force_full_damage = true;
             self.redraw = true;
+        } else if self.silent_frames > SILENT_GRACE_FRAMES && self.prev_frame.iter().any(|&b| b != 0) {
+            // Silent is not zero: bars under the threshold are still a few
+            // pixels tall, and parking froze them on screen as a line. Present
+            // one flat frame first and park on the next silent one; zero height
+            // is a degenerate quad in every mode, so nothing is left behind
+            self.cava_buffer.fill(0);
         } else if self.silent_frames > SILENT_GRACE_FRAMES {
             // PARK: no draw and no commit. Hyprland damages a layer by its
             // geometry on any commit, buffer attached or not, so even a
