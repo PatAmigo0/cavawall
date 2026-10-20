@@ -229,6 +229,13 @@ pub(crate) fn damage_rects(frame: &[u8], prev: &[u8], map: &DamageMap, out: &mut
             (f32::from(lr) * map.px_per_unit).floor() as i32 - 1 - map.cap_px
         };
         let hi = (f32::from(hr) * map.px_per_unit).ceil() as i32 + 1;
+        // Snapped outward to a grid along the bar, so rects in different
+        // columns share their edges. A compositor keeping damage as
+        // horizontal bands, as pixman does, cuts a band at every distinct
+        // edge; with 16 rects each on its own edges that came to 72 boxes for
+        // one measured frame, past the limit at which Hyprland repaints the
+        // bounding box instead
+        let (lo, hi) = (lo.div_euclid(DAMAGE_GRID) * DAMAGE_GRID, (hi + DAMAGE_GRID - 1).div_euclid(DAMAGE_GRID) * DAMAGE_GRID);
         let mut push = |y0: i32, y1: i32| {
             let (y0, y1) = (y0.clamp(0, map.height), y1.clamp(0, map.height));
             if x1 > x0 && y1 > y0 {
@@ -254,6 +261,9 @@ pub(crate) fn damage_rects(frame: &[u8], prev: &[u8], map: &DamageMap, out: &mut
     }
     n
 }
+
+/// The grid damage rect edges snap to along a bar, in pixels
+const DAMAGE_GRID: i32 = 16;
 
 /// The smallest height change, in raw cava units, that can move a bar edge a
 /// whole pixel on a surface whose longest bar spans `extent_px` pixels
