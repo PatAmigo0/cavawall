@@ -24,9 +24,10 @@ pub fn params(c: Option<&NativeConfig>) -> Params {
         fmax: c.fmax.unwrap_or(d.fmax).clamp(fmin + 100.0, 24_000.0),
         gate_db: c.gate_db.unwrap_or(d.gate_db).clamp(-120.0, -10.0),
         range_db: c.range_db.unwrap_or(d.range_db).clamp(10.0, 100.0),
-        stiffness: c.stiffness.unwrap_or(d.stiffness).clamp(10.0, 1_000.0),
-        damping: c.damping.unwrap_or(d.damping).clamp(0.1, 3.0),
+        rise_ms: c.rise_ms.unwrap_or(d.rise_ms).clamp(1.0, 500.0),
+        fall: c.fall.unwrap_or(d.fall).clamp(0.5, 200.0),
         flow: c.flow.unwrap_or(d.flow).clamp(0.0, 1.0),
+        smooth_ms: c.smooth_ms.unwrap_or(d.smooth_ms).clamp(1.0, 1_000.0),
         a_weighting: c.a_weighting.unwrap_or(d.a_weighting),
         curve: c.curve.unwrap_or(d.curve).clamp(0.5, 4.0),
     }

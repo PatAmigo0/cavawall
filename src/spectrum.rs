@@ -28,12 +28,19 @@ pub struct Params {
     pub gate_db: f32,
     /// How many dB below the loudest recent band an empty bar sits
     pub range_db: f32,
-    /// Spring stiffness: higher follows the music faster
-    pub stiffness: f32,
-    /// Damping ratio: 1 settles without overshoot, below 1 bounces
-    pub damping: f32,
+    /// Time constant of a rising bar, ms: lower jumps to a louder level
+    /// faster
+    pub rise_ms: f32,
+    /// How fast a falling bar accelerates, in full heights per second
+    /// squared: a bar falls like a dropped weight, as cava's do, so a quiet
+    /// moment reads as a fall and not as noise
+    pub fall: f32,
     /// How much of a bar's level spreads into its neighbours, 0 to 1
     pub flow: f32,
+    /// Time constant over which a band's level is averaged, ms. The
+    /// spectrum of real music wobbles from one window to the next; unaveraged,
+    /// that wobble is what the bars show
+    pub smooth_ms: f32,
     /// Weight bands by A-weighting
     pub a_weighting: bool,
     /// Exponent on a bar's place in the range: above 1 keeps the quieter
@@ -48,9 +55,10 @@ impl Default for Params {
             fmax: 16_000.0,
             gate_db: -70.0,
             range_db: 45.0,
-            stiffness: 500.0,
-            damping: 0.6,
+            rise_ms: 40.0,
+            fall: 18.0,
             flow: 0.05,
+            smooth_ms: 120.0,
             a_weighting: true,
             curve: 3.0,
         }
@@ -101,6 +109,9 @@ pub struct Analyzer {
     /// Loudest band level lately, dB, the top of the range
     reference_db: f32,
     targets: Vec<f32>,
+    /// Each bar's level, 0 to 1 within the range, averaged over smooth_ms;
+    /// before the curve, which would magnify its wobble
+    smoothed: Vec<f32>,
     position: Vec<f32>,
     velocity: Vec<f32>,
     scratch_in: Vec<f32>,
@@ -180,6 +191,7 @@ impl Analyzer {
             weight_db,
             reference_db: params.gate_db + params.range_db,
             targets: vec![0.0; bars],
+            smoothed: vec![0.0; bars],
             position: vec![0.0; bars],
             velocity: vec![0.0; bars],
             levels: [vec![0.0; per_channel], vec![0.0; per_channel]],
@@ -243,6 +255,12 @@ impl Analyzer {
                 }
             }
             self.retarget(dt);
+            // Digital silence is exactly nothing: no average left to decay,
+            // since no FFT follows to decay it
+            if self.settled {
+                self.smoothed.fill(0.0);
+                self.targets.fill(0.0);
+            }
         }
         self.step(dt);
         for (o, &x) in out.as_chunks_mut::<2>().0.iter_mut().zip(&self.position) {
@@ -257,11 +275,13 @@ impl Analyzer {
         let channels = if self.layout == Layout::Stereo { 2 } else { 1 };
         let loudest = self.levels[..channels].iter().flatten().fold(f32::MIN, |m, &l| m.max(l));
         // Rises at once, falls slowly: a loud passage sets the scale and a
-        // quiet one regains it over a few seconds, not a few frames
+        // quiet one regains it over a few seconds, not a few frames. A
+        // reference rising over 300 ms or 1 s was measured too: no fewer
+        // reversals, and the bars sat higher
         self.reference_db = loudest.max(fma(-6.0, dt, self.reference_db)).max(fma(p.range_db, 0.5, p.gate_db));
         let floor = self.reference_db - p.range_db;
         let gated = loudest < p.gate_db;
-        let level = |db: f32| if gated { 0.0 } else { ((db - floor) / p.range_db).clamp(0.0, 1.0).powf(p.curve) };
+        let level = |db: f32| if gated { 0.0 } else { ((db - floor) / p.range_db).clamp(0.0, 1.0) };
         let n = self.per_channel;
         match self.layout {
             Layout::Stereo => {
@@ -281,6 +301,12 @@ impl Analyzer {
                 }
             }
         }
+        // Averaged over time, then curved
+        let a = 1.0 - (-dt * 1000.0 / p.smooth_ms.max(1.0)).exp();
+        for (t, m) in self.targets.iter_mut().zip(&mut self.smoothed) {
+            *m = fma(*t - *m, a, *m);
+            *t = m.powf(p.curve);
+        }
         if p.flow > 0.0 && self.bars > 2 {
             let src = self.targets.clone();
             for i in 0..self.bars {
@@ -291,21 +317,24 @@ impl Analyzer {
         }
     }
 
-    /// One spring step toward the targets
+    /// One step toward the targets: up as an exponential approach, down as
+    /// a fall that gathers speed, so the noise between frames never shows on
+    /// the way down. Stepped by elapsed time, so the motion does not depend
+    /// on the framerate
     fn step(&mut self, dt: f32) {
-        let k = self.params.stiffness.max(1.0);
-        let c = 2.0 * self.params.damping.max(0.0) * k.sqrt();
-        // Substeps keep a stiff spring stable at a low framerate
-        let sub = ((dt * k.sqrt() / 0.5).ceil() as usize).clamp(1, 16);
-        let h = dt / sub as f32;
+        let up = 1.0 - (-dt * 1000.0 / self.params.rise_ms.max(1.0)).exp();
+        let g = self.params.fall.max(0.1);
         for i in 0..self.bars {
-            let (mut x, mut v) = (self.position[i], self.velocity[i]);
-            for _ in 0..sub {
-                v = fma(fma(-c, v, k * (self.targets[i] - x)), h, v);
-                x = fma(v, h, x);
+            let (x, t) = (self.position[i], self.targets[i]);
+            if t >= x {
+                self.position[i] = fma(t - x, up, x);
+                self.velocity[i] = 0.0;
+            } else {
+                let v = fma(g, dt, self.velocity[i]);
+                let fallen = fma(-v, dt, x);
+                // Landing on the target ends the fall
+                (self.position[i], self.velocity[i]) = if fallen <= t { (t, 0.0) } else { (fallen, v) };
             }
-            self.position[i] = x.max(0.0);
-            self.velocity[i] = if x <= 0.0 && v < 0.0 { 0.0 } else { v };
         }
     }
 
@@ -445,9 +474,10 @@ mod offline {
         let d = Params::default();
         let p = Params {
             range_db: env("RANGE", d.range_db),
-            stiffness: env("STIFF", d.stiffness),
-            damping: env("DAMP", d.damping),
+            rise_ms: env("RISE", d.rise_ms),
+            fall: env("FALL", d.fall),
             flow: env("FLOW", d.flow),
+            smooth_ms: env("SMOOTH", d.smooth_ms),
             curve: env("CURVE", d.curve),
             ..d
         };
