@@ -47,12 +47,14 @@ pub struct NativeConfig {
     pub gate_db: Option<f32>,
     /// How many dB below the loudest recent band an empty bar sits
     pub range_db: Option<f32>,
-    /// How hard a bar is pulled toward its level: higher follows faster
-    pub stiffness: Option<f32>,
-    /// 1 settles without overshoot, below 1 bounces
-    pub damping: Option<f32>,
+    /// Time constant of a rising bar, ms: lower jumps up faster
+    pub rise_ms: Option<f32>,
+    /// How fast a falling bar accelerates, full heights per second squared
+    pub fall: Option<f32>,
     /// How much of a bar's level spreads into its neighbours, 0 to 1
     pub flow: Option<f32>,
+    /// Time a band's level is averaged over, ms: higher is calmer
+    pub smooth_ms: Option<f32>,
     /// Weight levels by how loud they sound rather than their raw power
     pub a_weighting: Option<bool>,
     /// Above 1 keeps the quieter bands lower while the loudest still reach

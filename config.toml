@@ -247,10 +247,14 @@ gradient_color_8 = '#f38ba8'
 # # Below this level, dB relative to full scale, the music counts as silence
 # # and the bars fall
 # gate_db = -70
-# # Each bar is a spring: stiffness is how fast it follows the music, damping
-# # 1 settles without overshoot and lower bounces
-# stiffness = 500
-# damping = 0.6
+# # How long a band's level is averaged over, ms: the spectrum of real music
+# # wobbles from one moment to the next, and higher hides more of it
+# smooth_ms = 120
+# # A bar rises toward a louder level with this time constant, ms, and falls
+# # like a dropped weight, speeding up at this many full heights per second
+# # squared: lower rise_ms is snappier, higher fall drops faster
+# rise_ms = 40
+# fall = 18
 # # How much of a bar's level spreads into its neighbours, 0 to 1
 # flow = 0.05
 # # Exponent on a bar's place in the range: higher keeps the quieter bands
