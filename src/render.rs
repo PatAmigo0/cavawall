@@ -217,3 +217,29 @@ pub(crate) fn damage_rects(frame: &[u8], prev: &[u8], map: &DamageMap, out: &mut
     n
 }
 
+/// The smallest height change, in raw cava units, that can move a bar edge a
+/// whole pixel on a surface whose longest bar spans `extent_px` pixels
+///
+/// Rounded down, so a step that does move a pixel is never treated as too
+/// small; never zero, so equal heights still count as unchanged
+pub(crate) fn pixel_step(extent_px: u32) -> u16 {
+    (1.0 / (extent_px.max(1) as f32 * BAR_UNIT)).floor().clamp(1.0, f32::from(u16::MAX)) as u16
+}
+
+/// Whether drawing `frame` over the presented `prev` would change the picture
+///
+/// cava's smoothing keeps nudging heights by a few units long after the bars
+/// look still, and every one of those frames used to cost a draw, a commit
+/// and a compositor pass. Compared against what is on screen rather than the
+/// last frame read, so slow drift adds up and is drawn once it reaches a pixel
+///
+/// The flat frame before parking always counts, or the last sliver of every
+/// bar stays on screen until the music comes back. A single bar touching
+/// zero does not: bars at the noise floor flicker between zero and a few
+/// units on nearly every frame, and counting that drew every frame
+pub(crate) fn moved_visibly(frame: &[u8], prev: &[u8], step: u16) -> bool {
+    let (new, old) = (frame.as_chunks::<2>().0, prev.as_chunks::<2>().0);
+    new.iter().zip(old).any(|(n, o)| u16::from_le_bytes(*n).abs_diff(u16::from_le_bytes(*o)) >= step)
+        || (new.iter().all(|n| *n == [0, 0]) && old.iter().any(|o| *o != [0, 0]))
+}
+

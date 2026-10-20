@@ -171,6 +171,14 @@ impl LayerShellHandler for AppState {
             self.bars_at.down,
             self.bars_at.mirror,
         );
+        // A row's full-height bar spans the surface height, which is sized to
+        // it. A circle's or a curve's longest bar is not derived here, so the
+        // largest dimension bounds it: a finer step than needed, never coarser
+        let extent = match self.mode {
+            Mode::Bars => self.height,
+            _ => self.width.max(self.height).max(self.curve_output.0).max(self.curve_output.1),
+        };
+        self.pixel_step = pixel_step(extent);
         // SAFETY: a context is current; every name here was created at startup
         unsafe {
             // Size-dependent uniforms, set only here: the bar program is bound

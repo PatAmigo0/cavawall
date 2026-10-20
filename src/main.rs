@@ -178,7 +178,7 @@ mod startup;
 mod toplevel;
 mod wayland;
 
-use render::{bar_band, damage_rects, reveal_map, surface_map, BarPlacement, DamageMap};
+use render::{bar_band, damage_rects, moved_visibly, pixel_step, reveal_map, surface_map, BarPlacement, DamageMap};
 
 use cavawall::{app_config, control, curve, fatal, say};
 use app_config::WallpaperConfig;
@@ -562,6 +562,9 @@ struct AppState {
     bar_stride: f32,
     /// Bar-to-pixel mapping, rebuilt only when the surface size changes
     damage_map: DamageMap,
+    /// Raw height change that moves a bar a whole pixel; smaller changes are
+    /// not drawn. Rebuilt with `damage_map`
+    pixel_step: u16,
     /// Byte size of `heights`, for the per-frame upload. Constant, so it is not
     /// re-derived from the slice every frame
     frame_bytes: GLsizeiptr,
@@ -1753,10 +1756,10 @@ impl AppState {
     pub fn draw(&mut self) {
         self.redraw = false;
         self.fresh = false;
-        // The same heights draw the same pixels, so there is nothing to
-        // present. No commit is the saving; with no callback coming, the next
-        // tick reads the next frame
-        if !self.force_full_damage && self.cava_buffer == self.prev_frame {
+        // Heights that move no edge a pixel draw the same picture, so there
+        // is nothing to present. No commit is the saving; with no callback
+        // coming, the next tick reads the next frame
+        if !self.force_full_damage && !moved_visibly(&self.cava_buffer, &self.prev_frame, self.pixel_step) {
             self.redraw = true;
             return;
         }
