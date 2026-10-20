@@ -1047,6 +1047,8 @@ pub(crate) fn run() {
         bar_width,
         bar_stride,
         damage_map: DamageMap::new(bar_count, bar_width, bar_stride, (256, 256), bars_at.down, bars_at.mirror),
+        // Every change counts until a configure says how big a pixel is
+        pixel_step: 1,
         frame_bytes,
         swap_damage,
         force_full_damage: true,

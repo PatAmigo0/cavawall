@@ -476,3 +476,53 @@
         let left = uv(m, 0.0, 600.0);
         assert!(left[0] > 0.0 && (left[1] - 0.5).abs() < 1e-5, "{left:?}");
     }
+
+    fn units(hs: &[u16]) -> Vec<u8> {
+        hs.iter().flat_map(|h| h.to_le_bytes()).collect()
+    }
+
+    /// The step is the raw change that moves an edge one pixel, rounded so a
+    /// change that does move a pixel is never under it
+    #[test]
+    fn pixel_step_is_one_pixel_rounded_down() {
+        let step = pixel_step(703);
+        assert!(f32::from(step) * 703.0 * BAR_UNIT <= 1.0, "a whole step must not exceed a pixel");
+        assert!(f32::from(step + 1) * 703.0 * BAR_UNIT > 1.0, "and the next unit up must");
+        // Taller than cava has units: every unit is already a pixel
+        assert_eq!(pixel_step(100_000), 1);
+        // No surface yet must not divide by zero or skip every change
+        assert_eq!(pixel_step(0), u16::MAX);
+    }
+
+    /// Sub-pixel jitter is skipped; a whole pixel, or a bar reaching or
+    /// leaving zero, is drawn
+    #[test]
+    fn only_a_visible_move_is_drawn() {
+        let step = pixel_step(703);
+        let prev = units(&[1000, 2000, 0]);
+        assert!(!moved_visibly(&prev, &prev, step), "identical");
+        assert!(!moved_visibly(&units(&[1000 + step - 1, 2000, 0]), &prev, step), "under a pixel");
+        assert!(moved_visibly(&units(&[1000 + step, 2000, 0]), &prev, step), "a whole pixel up");
+        assert!(moved_visibly(&units(&[1000, 2000 - step, 0]), &prev, step), "a whole pixel down");
+        assert!(!moved_visibly(&units(&[1000, 2000, 1]), &prev, step), "noise floor flicker off zero");
+        assert!(moved_visibly(&units(&[0, 0, 0]), &units(&[1, 0, 3]), step), "the flat frame before parking");
+        assert!(!moved_visibly(&units(&[0, 0, 0]), &units(&[0, 0, 0]), step), "parked and flat");
+    }
+
+    /// Drift is measured from what is on screen, so many small moves still
+    /// add up to a draw once they reach a pixel
+    #[test]
+    fn slow_drift_is_drawn_once_it_adds_up() {
+        let step = pixel_step(703);
+        let shown = units(&[1000]);
+        let mut h = 1000u16;
+        let mut drawn_at = None;
+        for i in 1..=step {
+            h += 1;
+            if moved_visibly(&units(&[h]), &shown, step) {
+                drawn_at = Some(i);
+                break;
+            }
+        }
+        assert_eq!(drawn_at, Some(step));
+    }
