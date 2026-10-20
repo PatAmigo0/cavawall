@@ -569,3 +569,15 @@
         }
         assert_eq!(drawn_at, Some(step));
     }
+
+    /// cava refuses an odd count in stereo and anything past its raw
+    /// output's limit; the count drawn stays what was asked for when it can
+    #[test]
+    fn cava_gets_a_count_it_accepts() {
+        assert_eq!(cava_bar_counts(31, true), (31, 32), "odd stereo asks for one more");
+        assert_eq!(cava_bar_counts(32, true), (32, 32));
+        assert_eq!(cava_bar_counts(31, false), (31, 31), "mono takes any count");
+        assert_eq!(cava_bar_counts(0, true), (1, 2), "never zero");
+        assert_eq!(cava_bar_counts(4096, true), (1024, 1024), "stereo limit");
+        assert_eq!(cava_bar_counts(4096, false), (512, 512), "mono limit");
+    }

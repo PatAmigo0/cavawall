@@ -128,6 +128,23 @@ fn is_silent(frame: &[u8]) -> bool {
         .all(|s| u16::from_le_bytes(*s) <= SILENCE_RAW)
 }
 
+/// The bars to draw and the bars to ask cava for, from the configured count
+///
+/// Zero divides by zero in the bar-width maths. The ceiling is cava's: its
+/// raw output stops at 1024 bars in stereo and 512 in mono (cava 1.0.0,
+/// measured), and exits on more. Stereo splits the bars between the two
+/// channels and cava refuses an odd count, so it is asked for one more and
+/// the last - the right channel's highest band - is read and dropped
+fn cava_bar_counts(bars: u32, stereo: bool) -> (u32, u32) {
+    let drawn = bars.clamp(1, if stereo { 1024 } else { 512 });
+    (drawn, drawn + u32::from(stereo && drawn % 2 == 1))
+}
+
+/// Where the running cava's stderr goes, beside the log
+fn cava_err_path() -> std::path::PathBuf {
+    cavawall::log::dir().join("cava.err")
+}
+
 /// Connector-name prefixes that mean "the machine's own panel". Everything
 /// else - HDMI, DP, DVI, a dock - counts as external and is preferred
 ///
@@ -523,6 +540,9 @@ struct AppState {
     cava_scratch: Box<[u8]>,
     /// Bytes of a frame already read, when a read ended mid-frame
     cava_partial: usize,
+    /// Bytes per frame from cava, which can be one bar more than is drawn:
+    /// see `cava_bars` at startup
+    cava_frame: usize,
     /// A frame has arrived since the last draw
     fresh: bool,
     wl_egl_surface: WlEglSurface,
@@ -1003,7 +1023,7 @@ impl AppState {
     /// Parking and unparking are both decided here, per frame, against the
     /// one threshold in `is_silent`
     pub fn on_cava(&mut self) {
-        let frame = self.cava_buffer.len();
+        let frame = self.cava_frame;
         let mut got = false;
         let mut loud = false;
         loop {
@@ -1034,7 +1054,8 @@ impl AppState {
                 }
             }
             if whole > 0 {
-                self.cava_buffer.copy_from_slice(&self.cava_scratch[whole - frame..whole]);
+                let last = whole - frame;
+                self.cava_buffer.copy_from_slice(&self.cava_scratch[last..last + self.cava_buffer.len()]);
                 got = true;
             }
             self.cava_scratch.copy_within(whole..end, 0);
@@ -1095,7 +1116,13 @@ impl AppState {
             _ if libc::WIFSIGNALED(status) => format!("killed by signal {}", libc::WTERMSIG(status)),
             _ => format!("with status {}", libc::WEXITSTATUS(status)),
         };
-        let why = format!("cava exited {how}; check the audio source, or run cava by hand to see why");
+        let said = std::fs::read_to_string(cava_err_path()).unwrap_or_default();
+        let said = said.lines().map(str::trim).rfind(|l| !l.is_empty()).unwrap_or_default();
+        let why = if said.is_empty() {
+            format!("cava exited {how}; check the audio source, or run cava by hand to see why")
+        } else {
+            format!("cava exited {how}: {said}")
+        };
         self.clear_and_exit_with(&why, 1);
     }
 
