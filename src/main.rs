@@ -48,13 +48,14 @@ const SILENCE_RAW: u16 = (SILENCE_THRESHOLD * 65530.0) as u16;
 /// normalises a u16 by 65535, so damage has to use the same divisor
 const BAR_UNIT: f32 = 1.0 / 65535.0;
 
-/// Damage rectangles emitted per frame
+/// Most damage rectangles sent per frame
 ///
-/// Bars are bucketed into this many columns, one rect per bucket rather than
-/// one per bar. Rect COUNT costs a compositor as well as area: measured with
-/// an SHM probe, 76 rects covering a quarter of a band cost more than one rect
-/// of the same area
-const DAMAGE_BUCKETS: usize = 8;
+/// Bars are bucketed into columns, one rect per moved bucket rather than one
+/// per bar: this many buckets in a row, half as many mirrored, where each
+/// bucket sends a band on both sides of the line. Rect COUNT costs a
+/// compositor as well as area: measured with an SHM probe, 76 rects covering
+/// a quarter of a band cost more than one rect of the same area
+const DAMAGE_BUCKETS: usize = 16;
 /// Masks a bucket index into range. Cheaper than the bounds check it replaces,
 /// and unlike the check it cannot branch or panic inside the per-frame loop
 const DAMAGE_MASK: usize = DAMAGE_BUCKETS - 1;
@@ -178,7 +179,7 @@ mod startup;
 mod toplevel;
 mod wayland;
 
-use render::{bar_band, damage_rects, moved_visibly, pixel_step, reveal_map, surface_map, BarPlacement, DamageMap};
+use render::{bar_band, damage_rects, moved_visibly, pixel_step, reveal_map, surface_map, BarPlacement, DamageMap, DamageShape};
 
 use cavawall::{app_config, control, curve, fatal, say};
 use app_config::WallpaperConfig;
@@ -562,6 +563,8 @@ struct AppState {
     bar_stride: f32,
     /// Bar-to-pixel mapping, rebuilt only when the surface size changes
     damage_map: DamageMap,
+    /// What a moved tip changes besides itself, fixed by the compiled styles
+    damage_shape: DamageShape,
     /// Raw height change that moves a bar a whole pixel; smaller changes are
     /// not drawn. Rebuilt with `damage_map`
     pixel_step: u16,

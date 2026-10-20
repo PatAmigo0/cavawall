@@ -749,6 +749,12 @@ pub(crate) fn run() {
     let frame_bytes = std::mem::size_of_val(&*cava_buffer) as GLsizeiptr;
     let (bar_width, bar_stride) = bar_geometry(bar_count, bars_config.gap);
     let bars_at = BarPlacement::from_config(&bars_config);
+    let damage_shape = DamageShape {
+        down: bars_at.down,
+        mirror,
+        radius: if round { radius } else { 0.0 },
+        whole_bar: pulse,
+    };
     let background_color = array_from_config_color(&config.general.background_color);
 
     unsafe {
@@ -1046,7 +1052,8 @@ pub(crate) fn run() {
         cava_buffer,
         bar_width,
         bar_stride,
-        damage_map: DamageMap::new(bar_count, bar_width, bar_stride, (256, 256), bars_at.down, bars_at.mirror),
+        damage_map: DamageMap::new(bar_count, bar_width, bar_stride, (256, 256), damage_shape),
+        damage_shape,
         // Every change counts until a configure says how big a pixel is
         pixel_step: 1,
         frame_bytes,
