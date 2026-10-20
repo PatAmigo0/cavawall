@@ -443,6 +443,13 @@ fn main() {
         Err(e) => {
             if cli.json {
                 println!(r#"{{"ok":false,"error":"not running"}}"#);
+            } else if matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused) {
+                // No socket, or one nobody listens on: the instance is gone,
+                // and the socket error alone reads like a missing install
+                eprintln!("{name}: not running; start it with `{name} start`");
+                if let Ok(last) = std::fs::read_to_string(cavawall::log::last_exit_path()) {
+                    eprintln!("{name}: it last stopped at {}", last.trim());
+                }
             } else {
                 eprintln!("{name}: not running ({e})");
             }

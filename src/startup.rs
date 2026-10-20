@@ -334,14 +334,15 @@ pub(crate) fn run() {
         (own, false) => (own, "paths".to_owned()),
         (own, true) => (own.saturating_add(bars_pool), format!("paths and {pool_from}")),
     };
-    // Zero divides by zero in the bar-width maths. The ceiling is a sanity
-    // bound: 4096 bars is already sub-pixel on any real monitor. Clamped, not
-    // asserted: one bad per-wallpaper value must not take the visualiser down
-    const MAX_BARS: u32 = 4096;
-    if !(1..=MAX_BARS).contains(&bar_count) {
-        say!("bar count {bar_count} from {bars_from} is outside 1..={MAX_BARS}, clamping");
+    // Clamped, not asserted: one bad per-wallpaper value must not take the
+    // visualiser down
+    let stereo = config.general.channels.as_deref() != Some("mono");
+    let (drawn, cava_bars) = cava_bar_counts(bar_count, stereo);
+    if drawn != bar_count {
+        let out = if stereo { "stereo" } else { "mono" };
+        say!("bar count {bar_count} from {bars_from} is outside what cava's {out} output allows, using {drawn}");
     }
-    let bar_count = bar_count.clamp(1, MAX_BARS);
+    let bar_count = drawn;
     let mut cava_output_config: HashMap<String, String> = HashMap::from([
         ("method".into(), "raw".into()),
         ("raw_target".into(), "/dev/stdout".into()),
@@ -364,7 +365,7 @@ pub(crate) fn run() {
     let cava_config = CavaConfig {
         general: CavaGeneralConfig {
             framerate,
-            bars: bar_count,
+            bars: cava_bars,
             autosens: config.general.autosens,
             sensitivity: config.general.sensitivity,
             sleep_timer: config.general.sleep_timer,
@@ -396,6 +397,12 @@ pub(crate) fn run() {
             Ok(())
         });
     }
+    // A file, not a pipe: cava's messages are rare and a pipe nobody reads
+    // could fill and block it. Its reason for exiting ends up in our own
+    // message, which otherwise could only guess at one
+    let cava_err = std::fs::create_dir_all(cavawall::log::dir())
+        .and_then(|()| std::fs::File::create(cava_err_path()))
+        .map_or_else(|_| Stdio::inherit(), Stdio::from);
     // The `Child` is taken apart rather than kept: exec keeps our PID and so
     // keeps this child, so what must survive is the raw pid. reexec() kills and
     // waits before replacing our image, and a cava that dies on its own takes
@@ -404,6 +411,7 @@ pub(crate) fn run() {
     let cava_process = cmd
         .stdout(Stdio::piped())
         .stdin(Stdio::piped())
+        .stderr(cava_err)
         .spawn()
         .unwrap_or_else(|e| fatal!("cannot start cava ({e}); is it installed and on PATH?"));
     // Captured before the field moves below leave `cava_process` partially moved
@@ -1030,7 +1038,8 @@ pub(crate) fn run() {
         surface,
         cava_fd,
         // Eight frames: a backlog after a stall drains in few reads
-        cava_scratch: vec![0u8; bar_count as usize * 2 * 8].into_boxed_slice(),
+        cava_scratch: vec![0u8; cava_bars as usize * 2 * 8].into_boxed_slice(),
+        cava_frame: cava_bars as usize * 2,
         cava_partial: 0,
         fresh: false,
         wl_egl_surface,
