@@ -190,17 +190,58 @@ cavawall` is enough.
 
 Anywhere else, start it from the compositor:
 
+```lua
+-- Hyprland
+hl.on("hyprland.start", function()
+    hl.exec_cmd("cavawall")
+end)
 ```
-exec-once = cavawall                 # Hyprland
+
+```
 exec cavawall                        # Sway
 spawn-at-startup "cavawall"          # niri
 ```
 
+Started that way it runs the same, but nothing restarts it after a crash;
+`cavawall start` brings it back.
+
+Hyprland launched from a tty or a plain greeter entry (Caelestia's setup, for
+one) never activates `graphical-session.target`, which is why `service
+install` refuses there. You can keep the service without uwsm by giving
+Hyprland a target of its own. `graphical-session.target` won't start on
+request, but it comes up as a dependency of this one and stops once nothing
+needs it:
+
+```ini
+# ~/.config/systemd/user/hyprland-session.target
+[Unit]
+Description=Hyprland session
+BindsTo=graphical-session.target
+Wants=graphical-session-pre.target
+After=graphical-session-pre.target
+```
+
+```lua
+hl.on("hyprland.start", function()
+    hl.exec_cmd("systemctl --user import-environment WAYLAND_DISPLAY HYPRLAND_INSTANCE_SIGNATURE XDG_CURRENT_DESKTOP"
+        .. " && systemctl --user start hyprland-session.target")
+end)
+
+hl.on("hyprland.shutdown", function()
+    os.execute("systemctl --user stop hyprland-session.target")
+end)
+```
+
+The `import-environment` part matters: a unit started by systemd only sees
+systemd's environment, and without `WAYLAND_DISPLAY` there cavawall has no
+compositor to connect to. Log in again after adding both, then run `cavawall
+service install`.
+
 On Hyprland, skip the layer's map animation, or a restarted shell can strand
 it mid-fade:
 
-```
-layerrule = noanim, cavawall
+```lua
+hl.layer_rule({ match = { namespace = "cavawall" }, no_anim = true })
 ```
 
 ## Configuration
