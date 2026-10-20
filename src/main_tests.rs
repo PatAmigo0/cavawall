@@ -196,7 +196,7 @@
 
     fn rects_of(heights: &[f32], prev: &[f32], w: u32, h: u32) -> Vec<[i32; 4]> {
         let (bw, stride) = bar_geometry(heights.len() as u32, 0.0);
-        let map = DamageMap::new(heights.len() as u32, bw, stride, (w, h), false, false);
+        let map = DamageMap::new(heights.len() as u32, bw, stride, (w, h), DamageShape::default());
         let mut out = [0i32; DAMAGE_BUCKETS * 4];
         let n = damage_rects(&raw(heights), &raw(prev), &map, &mut out);
         out[..n].as_chunks::<4>().0.to_vec()
@@ -282,7 +282,7 @@
 
         for (w, full_h, frac) in [(1920u32, 1080u32, 0.65f32), (2560, 1440, 0.5), (1366, 768, 1.0)] {
             let h = (full_h as f32 * frac).ceil() as u32;
-            let map = DamageMap::new(bars as u32, bw, stride, (w, h), false, false);
+            let map = DamageMap::new(bars as u32, bw, stride, (w, h), DamageShape::default());
             let mut out = [0i32; DAMAGE_BUCKETS * 4];
             let n = damage_rects(&raw(&new), &raw(&prev), &map, &mut out);
             let rects: Vec<&[i32]> = out[..n].as_chunks::<4>().0.iter().map(|r| &r[..]).collect();
@@ -429,17 +429,60 @@
         assert!(!b.bottom_row);
     }
 
-    /// Mirrored, a moved bucket reports its whole column: the bar reaches
-    /// both ways from the middle
+    /// Mirrored, a moved tip changes the same band on both sides of the
+    /// middle line, and nothing between the bands
     #[test]
-    fn a_mirrored_row_damages_whole_columns() {
+    fn a_mirrored_row_damages_both_tip_bands() {
         let (w, h) = (1000u32, 100u32);
         let (bw, stride) = bar_geometry(4, 0.0);
-        let map = DamageMap::new(4, bw, stride, (w, h), false, true);
+        let map = DamageMap::new(4, bw, stride, (w, h), DamageShape { mirror: true, ..Default::default() });
         let mut out = [0; DAMAGE_BUCKETS * 4];
-        let n = damage_rects(&raw(&[0.0, -1.0, -1.0, -1.0]), &raw(&[-1.0; 4]), &map, &mut out);
+        // Half to full height, in raw units: tips at 25 and 50 px from the line
+        let n = damage_rects(&units(&[32768, 0, 0, 0]), &units(&[65535, 0, 0, 0]), &map, &mut out);
+        assert_eq!(n, 8, "two bands, one each side");
+        let (above, below) = ((out[1], out[1] + out[3]), (out[5], out[5] + out[7]));
+        assert!(above.0 > 50 && above.1 >= 100, "upper band from past the line to the top: {above:?}");
+        assert!(below.0 <= 0 && below.1 < 50, "lower band from the bottom to short of the line: {below:?}");
+        // A bar rising from nothing is one rect across the line
+        let n = damage_rects(&units(&[32768, 0, 0, 0]), &units(&[0, 0, 0, 0]), &map, &mut out);
         assert_eq!(n, 4);
-        assert_eq!((out[1], out[3]), (0, h as i32));
+        assert!(out[1] < 50 && out[1] + out[3] > 50, "{:?}", &out[..4]);
+    }
+
+    /// A rounded cap reshapes pixels below the tip, so the band reaches down
+    /// by the cap; with reveal_pulse the whole bar changes colour
+    #[test]
+    fn caps_and_pulse_widen_the_band_down() {
+        let (w, h) = (1000u32, 1000u32);
+        let (bw, stride) = bar_geometry(4, 0.0);
+        let (new, old) = (units(&[40000, 0, 0, 0]), units(&[30000, 0, 0, 0]));
+        let low = |shape| {
+            let map = DamageMap::new(4, bw, stride, (w, h), shape);
+            let mut out = [0; DAMAGE_BUCKETS * 4];
+            assert_eq!(damage_rects(&new, &old, &map, &mut out), 4);
+            out[1]
+        };
+        let square = low(DamageShape::default());
+        // 0.5 of a 250 px bar is a 125 px cap
+        let round = low(DamageShape { radius: 0.5, ..Default::default() });
+        assert!(square - round >= 125, "cap {square} -> {round}");
+        assert_eq!(low(DamageShape { whole_bar: true, ..Default::default() }), 0, "from the base");
+    }
+
+    /// The budget holds in both layouts: every bar moving sends no more than
+    /// DAMAGE_BUCKETS rects, mirrored or not
+    #[test]
+    fn every_bar_moving_stays_within_the_budget() {
+        let bars = 200u32;
+        let (bw, stride) = bar_geometry(bars, 0.1);
+        let new = units(&vec![50000; bars as usize]);
+        let old = units(&(0..bars).map(|i| 1000 + (i as u16 % 7) * 3000).collect::<Vec<_>>());
+        for mirror in [false, true] {
+            let map = DamageMap::new(bars, bw, stride, (1920, 703), DamageShape { mirror, ..Default::default() });
+            let mut out = [0; DAMAGE_BUCKETS * 4];
+            let n = damage_rects(&new, &old, &map, &mut out);
+            assert_eq!(n / 4, DAMAGE_BUCKETS, "mirror={mirror}");
+        }
     }
 
     /// A hanging row counts its damage down from the top edge
@@ -447,7 +490,7 @@
     fn a_hanging_row_damages_from_the_top() {
         let (w, h) = (1000u32, 100u32);
         let (bw, stride) = bar_geometry(4, 0.0);
-        let map = DamageMap::new(4, bw, stride, (w, h), true, false);
+        let map = DamageMap::new(4, bw, stride, (w, h), DamageShape { down: true, ..Default::default() });
         let mut out = [0; DAMAGE_BUCKETS * 4];
         // NDC heights: -1 is silence, 0 is half the band
         let n = damage_rects(&raw(&[0.0, -1.0, -1.0, -1.0]), &raw(&[-1.0; 4]), &map, &mut out);

@@ -118,13 +118,29 @@ pub(crate) struct DamageMap {
     bucket_of: Box<[u8]>,
     /// Each bucket's pixel x-range, already widened and clamped
     bucket_x: [(i32, i32); DAMAGE_BUCKETS],
-    /// Surface pixels per raw cava unit: a sample straight to a pixel row
+    /// Surface pixels per raw cava unit, along one bar: a sample straight to
+    /// a pixel row. Mirrored, a bar reaches half the surface each way
     px_per_unit: f32,
     height: i32,
+    /// How far below its tip a rounded cap reaches, in pixels
+    cap_px: i32,
+    shape: DamageShape,
+}
+
+/// What a moving tip changes besides itself, from the styles compiled in
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct DamageShape {
     /// Bars hang from the top edge, so a height counts down from there
-    down: bool,
-    /// Bars reach both ways from the middle: a moved bucket is its whole column
-    mirror: bool,
+    pub down: bool,
+    /// Bars reach both ways from the middle line, which a moved tip changes
+    /// on both sides of
+    pub mirror: bool,
+    /// The rounding radius as a fraction of the bar width, 0 for square
+    /// tips. A rounded cap reshapes the pixels just below the tip as well
+    pub radius: f32,
+    /// The whole bar's colour follows its height (`reveal_pulse`), so a
+    /// moved bar changes from its base up
+    pub whole_bar: bool,
 }
 
 impl DamageMap {
@@ -133,16 +149,18 @@ impl DamageMap {
         bar_width: f32,
         bar_stride: f32,
         (width, height): (u32, u32),
-        down: bool,
-        mirror: bool,
+        shape: DamageShape,
     ) -> Self {
         const _: () = assert!(DAMAGE_BUCKETS <= u8::MAX as usize, "bucket must fit a u8");
         let bars = bar_count as usize;
+        // Mirrored, each bucket sends two rects, so half the buckets keep
+        // the same budget
+        let buckets = if shape.mirror { DAMAGE_BUCKETS / 2 } else { DAMAGE_BUCKETS };
         let (hw, iw) = (width as f32 * 0.5, width as i32);
         let mut bucket_of = vec![0u8; bars].into_boxed_slice();
         let mut bucket_x = [(i32::MAX, i32::MIN); DAMAGE_BUCKETS];
         for (i, slot) in bucket_of.iter_mut().enumerate() {
-            let b = (i * DAMAGE_BUCKETS / bars.max(1)) & DAMAGE_MASK;
+            let b = (i * buckets / bars.max(1)) & DAMAGE_MASK;
             *slot = b as u8;
             // Widened a pixel each way here, once, rather than per frame: the
             // NDC-to-pixel conversion rounds, and a rect one pixel short leaves
@@ -154,7 +172,10 @@ impl DamageMap {
             bucket_x[b].0 = bucket_x[b].0.min(x0.clamp(0, iw));
             bucket_x[b].1 = bucket_x[b].1.max(x1.clamp(0, iw));
         }
-        Self { bucket_of, bucket_x, px_per_unit: height as f32 * BAR_UNIT, height: height as i32, down, mirror }
+        let reach = if shape.mirror { height as f32 * 0.5 } else { height as f32 };
+        // The shader's own bound: r = min(Radius * bar width, bar height)
+        let cap_px = (shape.radius * bar_width * hw).ceil() as i32;
+        Self { bucket_of, bucket_x, px_per_unit: reach * BAR_UNIT, height: height as i32, cap_px, shape }
     }
 }
 
@@ -165,8 +186,8 @@ impl DamageMap {
 /// old bar on screen that no test touching GL would catch either
 ///
 /// The per-bar loop is a table lookup and four min/max with no arithmetic at
-/// all; heights stay raw until the eight buckets are converted at the end,
-/// one multiply each, so eight times instead of once per bar
+/// all; heights stay raw until the buckets are converted at the end, one
+/// multiply each, so once per bucket instead of once per bar
 ///
 /// EGL wants surface coordinates with the origin bottom-left, which is the
 /// direction bar heights already run, so nothing has to be flipped
@@ -177,7 +198,7 @@ impl DamageMap {
 /// aged back buffer would need EGL_BUFFER_AGE_EXT here; this one does not
 pub(crate) fn damage_rects(frame: &[u8], prev: &[u8], map: &DamageMap, out: &mut [egl::Int]) -> usize {
     // Raw samples, not NDC: the comparison and the running extremes are all
-    // integer, and only the eight survivors are ever converted
+    // integer, and only the buckets' extremes are ever converted
     let mut lo = [u16::MAX; DAMAGE_BUCKETS];
     let mut hi = [u16::MIN; DAMAGE_BUCKETS];
     let (new_s, old_s) = (frame.as_chunks::<2>().0, prev.as_chunks::<2>().0);
@@ -200,18 +221,35 @@ pub(crate) fn damage_rects(frame: &[u8], prev: &[u8], map: &DamageMap, out: &mut
             continue; // nothing in this bucket moved
         }
         let (x0, x1) = map.bucket_x[b];
-        let y0 = ((f32::from(lr) * map.px_per_unit).floor() as i32 - 1).clamp(0, map.height);
-        let y1 = ((f32::from(hr) * map.px_per_unit).ceil() as i32 + 1).clamp(0, map.height);
-        let (y0, y1) = if map.mirror {
-            (0, map.height)
-        } else if map.down {
-            (map.height - y1, map.height - y0)
+        // Along the bar from its base: the band the tips moved through,
+        // widened a pixel for rounding and down by a rounded cap
+        let lo = if map.shape.whole_bar {
+            0
         } else {
-            (y0, y1)
+            (f32::from(lr) * map.px_per_unit).floor() as i32 - 1 - map.cap_px
         };
-        if x1 > x0 && y1 > y0 {
-            out[n..n + 4].copy_from_slice(&[x0, y0, x1 - x0, y1 - y0]);
-            n += 4;
+        let hi = (f32::from(hr) * map.px_per_unit).ceil() as i32 + 1;
+        let mut push = |y0: i32, y1: i32| {
+            let (y0, y1) = (y0.clamp(0, map.height), y1.clamp(0, map.height));
+            if x1 > x0 && y1 > y0 {
+                out[n..n + 4].copy_from_slice(&[x0, y0, x1 - x0, y1 - y0]);
+                n += 4;
+            }
+        };
+        if map.shape.mirror {
+            // The same band on both sides of the middle line, or one rect
+            // across it when the bands meet there
+            let mid = map.height / 2;
+            if lo <= 0 {
+                push(mid - hi, mid + hi);
+            } else {
+                push(mid + lo, mid + hi);
+                push(mid - hi, mid - lo);
+            }
+        } else if map.shape.down {
+            push(map.height - hi, map.height - lo);
+        } else {
+            push(lo, hi);
         }
     }
     n

@@ -168,8 +168,7 @@ impl LayerShellHandler for AppState {
             self.bar_width,
             self.bar_stride,
             (self.width, self.height),
-            self.bars_at.down,
-            self.bars_at.mirror,
+            self.damage_shape,
         );
         // A row's full-height bar spans the surface height, which is sized to
         // it. A circle's or a curve's longest bar is not derived here, so the
