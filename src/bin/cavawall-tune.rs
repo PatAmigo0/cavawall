@@ -435,7 +435,7 @@ fn context(site: &Site) -> serde_json::Value {
 }
 
 /// The tables the page may edit, so a request cannot write anything else
-const GLOBAL_TABLES: [&str; 7] = ["general", "smoothing", "colors", "scheme", "bars", "notify", "wallpaper"];
+const GLOBAL_TABLES: [&str; 8] = ["general", "smoothing", "colors", "scheme", "bars", "notify", "wallpaper", "native"];
 
 fn json_to_value(v: &serde_json::Value) -> Option<toml_edit::Value> {
     use serde_json::Value as J;

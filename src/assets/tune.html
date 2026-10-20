@@ -207,7 +207,7 @@ footer #status{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
     <aside class="dock glass" id=dock>
       <div class=tabs role=tablist aria-label=Settings>
         <button class="btn ghost icon" id=dockFold title="Fold the panel" aria-label="Fold the panel">⟩</button>
-        <button role=tab data-tab=shape aria-selected=true>Shape</button><button role=tab data-tab=look aria-selected=false>Look</button><button role=tab data-tab=sound aria-selected=false>Cava</button>
+        <button role=tab data-tab=shape aria-selected=true>Shape</button><button role=tab data-tab=look aria-selected=false>Look</button><button role=tab data-tab=sound aria-selected=false>Audio</button>
         <button class="btn ghost icon grip" id=dockGrip title="Drag to move the panel; double-click to put it back" aria-label="Move the panel">⠿⠿</button>
       </div>
       <div class=pane id=paneShape></div><div class=pane id=paneLook hidden></div><div class=pane id=paneSound hidden></div>
@@ -280,7 +280,7 @@ function load(W, ctx) {
   else S.out = {w: screen.width || 1920, h: screen.height || 1080};
   S.fig = W.mode || ctx.defaults?.mode || 'bars';
   const cfg = ctx.config || {};
-  S.g = {general: {...(cfg.general || {})}, smoothing: {...(cfg.smoothing || {})}, colors: {...(cfg.colors || {})}, scheme: {...(cfg.scheme || {})}, notify: {...(cfg.notify || {})}, wallpaper: {...(cfg.wallpaper || {})}};
+  S.g = {general: {...(cfg.general || {})}, smoothing: {...(cfg.smoothing || {})}, colors: {...(cfg.colors || {})}, scheme: {...(cfg.scheme || {})}, notify: {...(cfg.notify || {})}, wallpaper: {...(cfg.wallpaper || {})}, native: {...(cfg.native || {})}};
   S.g0 = JSON.stringify(S.g);
   S.bars = {...(W.bars || {})};
   S.circle = {...(W.circle || {})};
@@ -889,7 +889,7 @@ function gVal(table, key, dflt) { const v = S.g[table]?.[key]; return v ?? dflt;
 function gSet(table, key, v) { S.g[table] = S.g[table] || {}; if (v == null) delete S.g[table][key]; else S.g[table][key] = v; }
 function globalDiff() {
   const was = JSON.parse(S.g0 || '{}'), out = [];
-  for (const t of ['general', 'smoothing', 'colors', 'scheme', 'notify', 'wallpaper']) {
+  for (const t of ['general', 'smoothing', 'colors', 'scheme', 'notify', 'wallpaper', 'native']) {
     const a = was[t] || {}, b = S.g[t] || {};
     for (const k of new Set([...Object.keys(a), ...Object.keys(b)]))
       if (JSON.stringify(a[k]) !== JSON.stringify(b[k])) out.push([t, k, b[k] ?? null]);
@@ -899,7 +899,7 @@ function globalDiff() {
 // A slider row over config.toml, the twin of row() for the wallpaper's file
 function gRow(host, def) {
   const el = document.createElement('div'); el.className = 'row';
-  el.innerHTML = `<label title="${def.hint || def.label}">${def.label}</label><input type=range min=${def.min} max=${def.max} step=${def.step} aria-label="${def.label}"><output></output>${def.required ? '<span></span>' : `<button class=reset title="Back to cava's default" aria-label="Reset ${def.label}">↺</button>`}`;
+  el.innerHTML = `<label title="${def.hint || def.label}">${def.label}</label><input type=range min=${def.min} max=${def.max} step=${def.step} aria-label="${def.label}"><output></output>${def.required ? '<span></span>' : `<button class=reset title="Back to the default" aria-label="Reset ${def.label}">↺</button>`}`;
   const input = el.querySelector('input'), out = el.querySelector('output');
   const sync = () => {
     const own = S.g[def.t]?.[def.k], v = own ?? def.dflt;
@@ -1006,15 +1006,15 @@ function renderStopList(el, m) {
 }
 function buildSound() {
   const host = $('paneSound');
+  const native = () => gVal('general', 'audio_backend', 'cava') === 'native';
   let s = section('Input', '', 'every wallpaper', host);
+  gSelect(s, 'Backend', 'general', 'audio_backend', [['cava', 'cava'], ['native', 'Native']], 'cava', () => syncFields());
   const src = gSelect(s, 'Source', 'general', 'audio_source', [['', 'System default']], '');
   fetch('/sources').then(r => r.json()).then(list => {
     const cur = gVal('general', 'audio_source', '');
     for (const n of new Set([...list, ...(cur ? [cur] : [])])) src.add(new Option(n.replace(/\.monitor$/, ' · output'), n));
     src.value = cur;
   }).catch(() => {});
-  gRow(s, {t: 'general', k: 'sensitivity', label: 'Sensitivity', min: 10, max: 1000, step: 10, int: true, dflt: 100, unit: '%'});
-  gChip(s, 'Auto sensitivity', 'general', 'autosens', true, 'cava adjusts the level to the music');
   gSelect(s, 'Channels', 'general', 'channels', [['stereo', 'Stereo'], ['mono', 'Mono']], 'stereo', () => syncFields());
   const mono = gSelect(s, 'Mono mix', 'general', 'mono_option', [['average', 'Average'], ['left', 'Left'], ['right', 'Right']], 'average');
   ROWS.push(() => { mono.closest('.row').style.display = gVal('general', 'channels', 'stereo') === 'mono' ? '' : 'none'; });
@@ -1027,13 +1027,28 @@ function buildSound() {
     on => { if (on) S.W.framerate = gVal('general', 'framerate', 60); else delete S.W.framerate; syncFields(); },
     'Only this wallpaper; every other one keeps the frame rate above');
   wallpaperRate(s);
-  gRow(s, {t: 'general', k: 'sleep_timer', label: 'Sleep after', min: 0, max: 30, step: 1, int: true, dflt: 0, unit: 's', hint: 'seconds of silence before cava sleeps; waking takes about half a second'});
 
-  s = section('Smoothing', '', '', host);
-  gRow(s, {t: 'smoothing', k: 'monstercat', label: 'Monstercat', min: 0, max: 3, step: 0.1, dflt: 0, hint: 'bars lean on their neighbours'});
-  gRow(s, {t: 'smoothing', k: 'noise_reduction', label: 'Noise cut', min: 0, max: 100, step: 1, int: true, dflt: 77, hint: 'higher is smoother and slower'});
-  chip(s, 'Waves', () => !!gVal('smoothing', 'waves', 0), on => gSet('smoothing', 'waves', on ? 1 : null), 'Monstercat as waves');
-  s.insertAdjacentHTML('beforeend', '<p class=note>Saving restarts cava with these settings.</p>');
+  // Each backend's own settings, shown only while it is the one chosen
+  const cava = section('cava', '', '', host);
+  gRow(cava, {t: 'general', k: 'sensitivity', label: 'Sensitivity', min: 10, max: 1000, step: 10, int: true, dflt: 100, unit: '%'});
+  gChip(cava, 'Auto sensitivity', 'general', 'autosens', true, 'cava adjusts the level to the music');
+  gRow(cava, {t: 'general', k: 'sleep_timer', label: 'Sleep after', min: 0, max: 30, step: 1, int: true, dflt: 0, unit: 's', hint: 'seconds of silence before cava sleeps; waking takes about half a second'});
+  gRow(cava, {t: 'smoothing', k: 'monstercat', label: 'Monstercat', min: 0, max: 3, step: 0.1, dflt: 0, hint: 'bars lean on their neighbours'});
+  gRow(cava, {t: 'smoothing', k: 'noise_reduction', label: 'Noise cut', min: 0, max: 100, step: 1, int: true, dflt: 77, hint: 'higher is smoother and slower'});
+  chip(cava, 'Waves', () => !!gVal('smoothing', 'waves', 0), on => gSet('smoothing', 'waves', on ? 1 : null), 'Monstercat as waves');
+
+  const nat = section('Native', '', '', host);
+  gRow(nat, {t: 'native', k: 'fmin', label: 'Lowest', min: 10, max: 500, step: 5, int: true, dflt: 30, unit: ' Hz', hint: 'the frequency the first bar starts at'});
+  gRow(nat, {t: 'native', k: 'fmax', label: 'Highest', min: 2000, max: 24000, step: 250, int: true, dflt: 16000, unit: ' Hz', hint: 'the frequency the last bar ends at'});
+  gRow(nat, {t: 'native', k: 'range_db', label: 'Range', min: 10, max: 100, step: 1, int: true, dflt: 45, unit: ' dB', hint: 'how far below the loudest band an empty bar sits: lower makes quiet parts lower'});
+  gRow(nat, {t: 'native', k: 'gate_db', label: 'Gate', min: -120, max: -10, step: 1, int: true, dflt: -70, unit: ' dB', hint: 'below this the music counts as silence and the bars fall'});
+  gRow(nat, {t: 'native', k: 'stiffness', label: 'Response', min: 10, max: 1000, step: 10, int: true, dflt: 170, hint: 'how fast bars follow the music'});
+  gRow(nat, {t: 'native', k: 'damping', label: 'Damping', min: 0.1, max: 3, step: 0.05, dflt: 0.9, hint: '1 settles without overshoot, lower bounces'});
+  gRow(nat, {t: 'native', k: 'flow', label: 'Flow', min: 0, max: 1, step: 0.01, dflt: 0.12, hint: 'how much a bar spreads into its neighbours'});
+  gChip(nat, 'Loudness weighting', 'native', 'a_weighting', true, 'Heights follow how loud a band sounds rather than its raw power, which the bass dominates');
+
+  ROWS.push(() => { cava.style.display = native() ? 'none' : ''; nat.style.display = native() ? '' : 'none'; });
+  host.insertAdjacentHTML('beforeend', '<p class=note>Saving restarts the audio with these settings.</p>');
 
   // Display: which monitor, and what a fullscreen window does to it
   s = section('Display', '', 'every wallpaper', host);
