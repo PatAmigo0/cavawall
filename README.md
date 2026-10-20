@@ -128,12 +128,20 @@ Needs a Wayland compositor with `wlr-layer-shell` (Hyprland, Sway, river,
 niri), OpenGL 4.3, and [cava](https://github.com/karlstav/cava) on `PATH`.
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/PatAmigo0/cavawall/main/install.sh | bash
+```
+
+Piped like that, the script clones the source to `~/.cache/cavawall/src` and
+builds from there. Run the same line again to update: it pulls and rebuilds.
+Or from a clone:
+
+```bash
 git clone https://github.com/PatAmigo0/cavawall
 cd cavawall
 ./install.sh
 ```
 
-`install.sh` builds, installs `cavawall` to `~/.local/bin` with its helpers in
+Either way you need `git` and a Rust toolchain (`cargo`). `install.sh` builds, installs `cavawall` to `~/.local/bin` with its helpers in
 `~/.local/lib/cavawall`, and copies the annotated
 [`config.toml`](config.toml) to `~/.config/cavawall/` unless you already have
 one. By hand:
