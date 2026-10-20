@@ -28,6 +28,7 @@ pub fn params(c: Option<&NativeConfig>) -> Params {
         damping: c.damping.unwrap_or(d.damping).clamp(0.1, 3.0),
         flow: c.flow.unwrap_or(d.flow).clamp(0.0, 1.0),
         a_weighting: c.a_weighting.unwrap_or(d.a_weighting),
+        curve: c.curve.unwrap_or(d.curve).clamp(0.5, 4.0),
     }
 }
 

@@ -36,6 +36,9 @@ pub struct Params {
     pub flow: f32,
     /// Weight bands by A-weighting
     pub a_weighting: bool,
+    /// Exponent on a bar's place in the range: above 1 keeps the quieter
+    /// bands lower while the loudest still reach the top
+    pub curve: f32,
 }
 
 impl Default for Params {
@@ -45,10 +48,11 @@ impl Default for Params {
             fmax: 16_000.0,
             gate_db: -70.0,
             range_db: 45.0,
-            stiffness: 170.0,
-            damping: 0.9,
-            flow: 0.12,
+            stiffness: 500.0,
+            damping: 0.6,
+            flow: 0.05,
             a_weighting: true,
+            curve: 3.0,
         }
     }
 }
@@ -257,7 +261,7 @@ impl Analyzer {
         self.reference_db = loudest.max(fma(-6.0, dt, self.reference_db)).max(fma(p.range_db, 0.5, p.gate_db));
         let floor = self.reference_db - p.range_db;
         let gated = loudest < p.gate_db;
-        let level = |db: f32| if gated { 0.0 } else { ((db - floor) / p.range_db).clamp(0.0, 1.0) };
+        let level = |db: f32| if gated { 0.0 } else { ((db - floor) / p.range_db).clamp(0.0, 1.0).powf(p.curve) };
         let n = self.per_channel;
         match self.layout {
             Layout::Stereo => {
@@ -420,5 +424,41 @@ mod tests {
         }
         let (x, y) = (u16::from_le_bytes([out_a[14], out_a[15]]), u16::from_le_bytes([out_b[14], out_b[15]]));
         assert!(x.abs_diff(y) < 4000, "30 fps {x} vs 120 fps {y}");
+    }
+}
+
+#[cfg(test)]
+mod offline {
+    use super::*;
+
+    /// Run a raw s16le 48 kHz stereo track through the analysis at 60 fps and
+    /// write the frames as cava's raw output, for comparing the look:
+    /// `TRACK=x.raw OUT=x.u16 BARS=32 cargo test --release offline -- --ignored`
+    #[test]
+    #[ignore = "needs TRACK and OUT"]
+    fn track_to_frames() {
+        let (Ok(track), Ok(out)) = (std::env::var("TRACK"), std::env::var("OUT")) else { return };
+        let bars: usize = std::env::var("BARS").ok().and_then(|b| b.parse().ok()).unwrap_or(32);
+        let bytes = std::fs::read(track).expect("track");
+        let samples: Vec<i16> = bytes.as_chunks::<2>().0.iter().map(|b| i16::from_le_bytes(*b)).collect();
+        let env = |k: &str, d: f32| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+        let d = Params::default();
+        let p = Params {
+            range_db: env("RANGE", d.range_db),
+            stiffness: env("STIFF", d.stiffness),
+            damping: env("DAMP", d.damping),
+            flow: env("FLOW", d.flow),
+            curve: env("CURVE", d.curve),
+            ..d
+        };
+        let mut a = Analyzer::new(bars, Layout::Stereo, 48_000, p);
+        let mut frame = vec![0u8; bars * 2];
+        let mut all = Vec::new();
+        for chunk in samples.chunks(800 * 2) {
+            a.push(chunk);
+            a.frame(1.0 / 60.0, &mut frame);
+            all.extend_from_slice(&frame);
+        }
+        std::fs::write(out, all).expect("out");
     }
 }

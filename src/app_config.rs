@@ -55,6 +55,9 @@ pub struct NativeConfig {
     pub flow: Option<f32>,
     /// Weight levels by how loud they sound rather than their raw power
     pub a_weighting: Option<bool>,
+    /// Above 1 keeps the quieter bands lower while the loudest still reach
+    /// the top
+    pub curve: Option<f32>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Default, Clone, Copy, PartialEq, Eq)]

@@ -1042,9 +1042,10 @@ function buildSound() {
   gRow(nat, {t: 'native', k: 'fmax', label: 'Highest', min: 2000, max: 24000, step: 250, int: true, dflt: 16000, unit: ' Hz', hint: 'the frequency the last bar ends at'});
   gRow(nat, {t: 'native', k: 'range_db', label: 'Range', min: 10, max: 100, step: 1, int: true, dflt: 45, unit: ' dB', hint: 'how far below the loudest band an empty bar sits: lower makes quiet parts lower'});
   gRow(nat, {t: 'native', k: 'gate_db', label: 'Gate', min: -120, max: -10, step: 1, int: true, dflt: -70, unit: ' dB', hint: 'below this the music counts as silence and the bars fall'});
-  gRow(nat, {t: 'native', k: 'stiffness', label: 'Response', min: 10, max: 1000, step: 10, int: true, dflt: 170, hint: 'how fast bars follow the music'});
-  gRow(nat, {t: 'native', k: 'damping', label: 'Damping', min: 0.1, max: 3, step: 0.05, dflt: 0.9, hint: '1 settles without overshoot, lower bounces'});
-  gRow(nat, {t: 'native', k: 'flow', label: 'Flow', min: 0, max: 1, step: 0.01, dflt: 0.12, hint: 'how much a bar spreads into its neighbours'});
+  gRow(nat, {t: 'native', k: 'stiffness', label: 'Response', min: 10, max: 1000, step: 10, int: true, dflt: 500, hint: 'how fast bars follow the music'});
+  gRow(nat, {t: 'native', k: 'damping', label: 'Damping', min: 0.1, max: 3, step: 0.05, dflt: 0.6, hint: '1 settles without overshoot, lower bounces'});
+  gRow(nat, {t: 'native', k: 'flow', label: 'Flow', min: 0, max: 1, step: 0.01, dflt: 0.05, hint: 'how much a bar spreads into its neighbours'});
+  gRow(nat, {t: 'native', k: 'curve', label: 'Curve', min: 0.5, max: 4, step: 0.1, dflt: 3, hint: 'higher keeps quiet bands lower while the loudest still reach the top'});
   gChip(nat, 'Loudness weighting', 'native', 'a_weighting', true, 'Heights follow how loud a band sounds rather than its raw power, which the bass dominates');
 
   ROWS.push(() => { cava.style.display = native() ? 'none' : ''; nat.style.display = native() ? '' : 'none'; });

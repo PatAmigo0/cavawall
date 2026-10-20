@@ -249,10 +249,13 @@ gradient_color_8 = '#f38ba8'
 # gate_db = -70
 # # Each bar is a spring: stiffness is how fast it follows the music, damping
 # # 1 settles without overshoot and lower bounces
-# stiffness = 170
-# damping = 0.9
+# stiffness = 500
+# damping = 0.6
 # # How much of a bar's level spreads into its neighbours, 0 to 1
-# flow = 0.12
+# flow = 0.05
+# # Exponent on a bar's place in the range: higher keeps the quieter bands
+# # lower while the loudest still reach the top. 1 is linear in dB
+# curve = 3
 # # Heights follow how loud a band sounds rather than its raw power, which
 # # the bass dominates
 # a_weighting = true
