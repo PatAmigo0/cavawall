@@ -191,7 +191,10 @@ use std::{
 
 mod dormant;
 mod hypr;
+mod capture;
 mod render;
+mod native;
+mod spectrum;
 mod startup;
 mod toplevel;
 mod wayland;
@@ -453,8 +456,12 @@ enum Pin<'a> {
 /// SIGKILL rather than SIGTERM: cava owns no surface, no files and no cleanup
 /// worth waiting on, and it has to be gone before the exec
 fn reap_cava(pid: u32) {
-    // SAFETY: a plain signal to our own child
-    unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+    // 0 is the native backend's: no child, and kill(0) would signal our
+    // whole process group
+    if pid != 0 {
+        // SAFETY: a plain signal to our own child
+        unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+    }
     // Reaps that child and any zombie an earlier re-exec left behind, since
     // those are still ours for the same reason. Terminates on ECHILD
     // SAFETY: waitpid with a null status pointer only reaps
@@ -572,6 +579,8 @@ struct AppState {
     watch: Option<scheme::Watch>,
     /// The cava child, kept so a re-exec can kill and reap it
     cava_pid: u32,
+    /// The native backend, when it replaces cava; `cava_pid` is then 0
+    native: Option<native::NativeAudio>,
     /// One raw cava frame, reused. It is also the whole per-frame vertex
     /// payload: everything else about a bar is a uniform or gl_InstanceID
     cava_buffer: Box<[u8]>,
@@ -758,8 +767,10 @@ impl AppState {
         cavawall::notify::send(NotifyEvent::Stop, &format!("stopped: {why}"));
         self.clear_surface();
         control::unbind();
-        // SAFETY: a plain signal to our own child
-        unsafe { libc::kill(self.cava_pid as libc::pid_t, libc::SIGKILL) };
+        if self.cava_pid != 0 {
+            // SAFETY: a plain signal to our own child
+            unsafe { libc::kill(self.cava_pid as libc::pid_t, libc::SIGKILL) };
+        }
         std::process::exit(code);
     }
 
@@ -1068,6 +1079,38 @@ impl AppState {
         if !got {
             return;
         }
+        self.frames_arrived(loud);
+    }
+
+    /// The native backend's frame clock: one frame from the audio captured
+    /// since the last tick
+    pub fn on_audio_tick(&mut self) {
+        let Some(native) = self.native.as_mut() else { return };
+        if self.cava_stopped {
+            return;
+        }
+        if let Err(e) = native.tick(&mut self.cava_buffer) {
+            self.clear_and_exit_with(&e, 1);
+        }
+        let loud = !is_silent(&self.cava_buffer);
+        if loud {
+            self.silent_frames = 0;
+        } else {
+            self.silent_frames = self.silent_frames.saturating_add(1);
+        }
+        self.frames_arrived(loud);
+    }
+
+    /// PipeWire's loop has work: stream events, and audio for the queue
+    pub fn on_pipewire(&self) {
+        if let Some(native) = &self.native {
+            native.capture.dispatch();
+        }
+    }
+
+    /// A new frame is in `cava_buffer`, from either backend; `loud` says
+    /// whether any frame since the last call was over the silence threshold
+    fn frames_arrived(&mut self, loud: bool) {
         self.fresh = true;
         if self.idle {
             if !loud {
@@ -1273,8 +1316,12 @@ impl AppState {
         }
         self.placed_size = None;
         if !self.cava_stopped {
-            // SAFETY: a plain signal to our own child
-            unsafe { libc::kill(self.cava_pid as libc::pid_t, libc::SIGSTOP) };
+            if let Some(native) = self.native.as_mut() {
+                native.set_active(false);
+            } else {
+                // SAFETY: a plain signal to our own child
+                unsafe { libc::kill(self.cava_pid as libc::pid_t, libc::SIGSTOP) };
+            }
             self.cava_stopped = true;
         }
     }
@@ -1360,8 +1407,12 @@ impl AppState {
             say!("placing on {name} ({}x{})", logical_size.0, logical_size.1);
         }
         if self.cava_stopped {
-            // SAFETY: a plain signal to our own child
-            unsafe { libc::kill(self.cava_pid as libc::pid_t, libc::SIGCONT) };
+            if let Some(native) = self.native.as_mut() {
+                native.set_active(true);
+            } else {
+                // SAFETY: a plain signal to our own child
+                unsafe { libc::kill(self.cava_pid as libc::pid_t, libc::SIGCONT) };
+            }
             self.cava_stopped = false;
         }
         self.surface = self.compositor.create_surface(qh);

@@ -343,94 +343,36 @@ pub(crate) fn run() {
         say!("bar count {bar_count} from {bars_from} is outside what cava's {out} output allows, using {drawn}");
     }
     let bar_count = drawn;
-    let mut cava_output_config: HashMap<String, String> = HashMap::from([
-        ("method".into(), "raw".into()),
-        ("raw_target".into(), "/dev/stdout".into()),
-        ("bit_format".into(), "16bit".into()),
-    ]);
-    // Only forwarded when set, so leaving it out keeps cava's own default
-    // rather than this program quietly picking one
-    if let Some(ch) = &config.general.channels {
-        cava_output_config.insert("channels".into(), ch.clone());
-    }
-    if let Some(mo) = &config.general.mono_option {
-        cava_output_config.insert("mono_option".into(), mo.clone());
-    }
-    let cava_input_config = config.general.audio_source.as_ref().map(|src| {
-        HashMap::from([
-            ("method".into(), "pulse".into()),
-            ("source".into(), src.clone()),
-        ])
-    });
-    let cava_config = CavaConfig {
-        general: CavaGeneralConfig {
-            framerate,
-            bars: cava_bars,
-            autosens: config.general.autosens,
-            sensitivity: config.general.sensitivity,
-            sleep_timer: config.general.sleep_timer,
-        },
-        smoothing: CavaSmoothingConfig {
-            monstercat: config.smoothing.monstercat,
-            waves: config.smoothing.waves,
-            noise_reduction: config.smoothing.noise_reduction,
-        },
-        output: cava_output_config,
-        input: cava_input_config,
+    let backend = config.general.audio_backend.unwrap_or_default();
+    // The native backend draws an odd stereo count as it is: only cava needs
+    // the extra bar
+    let cava_bars = if backend == AudioBackend::Native { bar_count } else { cava_bars };
+    let (cava_pid, cava_stdout, native) = match backend {
+        AudioBackend::Cava => {
+            let (pid, stdout) = spawn_cava(&config, framerate, cava_bars);
+            (pid, Some(stdout), None)
+        }
+        AudioBackend::Native => {
+            let layout = crate::native::layout(config.general.channels.as_deref(), config.general.mono_option.as_deref());
+            let native = crate::native::NativeAudio::new(
+                config.native.as_ref(),
+                config.general.audio_source.as_deref(),
+                bar_count as usize,
+                layout,
+            )
+            .unwrap_or_else(|e| fatal!("{e}"));
+            (0, None, Some(native))
+        }
     };
-    let string_cava_config: String = toml::to_string(&cava_config).unwrap();
-    // CAVAWALL_DEBUG=1 shows what cava is being told. cava is spawned
-    // with its config on stdin, so there is no file to inspect afterwards and
-    // no other way to check a setting actually got through
-    if debug_enabled() {
-        say!("cava config >>>\n{string_cava_config}<<<");
-    }
-    let mut cmd = Command::new("cava");
-    cmd.arg("-p").arg("/dev/stdin");
-    // Dies with us, however we die. Blocked writing into a full pipe, cava
-    // does not act on SIGTERM, and asleep it writes too rarely to learn the
-    // pipe is gone
-    // SAFETY: prctl is async-signal-safe and touches only the child
-    unsafe {
-        std::os::unix::process::CommandExt::pre_exec(&mut cmd, || {
-            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
-            Ok(())
-        });
-    }
-    // A file, not a pipe: cava's messages are rare and a pipe nobody reads
-    // could fill and block it. Its reason for exiting ends up in our own
-    // message, which otherwise could only guess at one
-    let cava_err = std::fs::create_dir_all(cavawall::log::dir())
-        .and_then(|()| std::fs::File::create(cava_err_path()))
-        .map_or_else(|_| Stdio::inherit(), Stdio::from);
-    // The `Child` is taken apart rather than kept: exec keeps our PID and so
-    // keeps this child, so what must survive is the raw pid. reexec() kills and
-    // waits before replacing our image, and a cava that dies on its own takes
-    // draw() out through clear_and_exit(), after which init collects it
-    #[allow(clippy::zombie_processes)]
-    let cava_process = cmd
-        .stdout(Stdio::piped())
-        .stdin(Stdio::piped())
-        .stderr(cava_err)
-        .spawn()
-        .unwrap_or_else(|e| fatal!("cannot start cava ({e}); is it installed and on PATH?"));
-    // Captured before the field moves below leave `cava_process` partially moved
-    // and unusable as a whole. Needed so a re-exec can reap this child: see
-    // reexec(), where not having it leaked a zombie per bar-count change
-    let cava_pid = cava_process.id();
-    let mut cava_stdin = cava_process.stdin.expect("stdin was piped");
-    if let Err(e) = cava_stdin.write_all(string_cava_config.as_bytes()) {
-        fatal!("cava exited before reading its config ({e}); run cava by hand to see why");
-    }
-    drop(cava_stdin);
-    let cava_stdout = cava_process.stdout.expect("stdout was piped");
     // Non-blocking, and read only when the event loop says it is readable:
     // nothing ever waits on cava, so no frame, signal or order waits either
-    let cava_fd = cava_stdout.as_raw_fd();
-    // SAFETY: plain fcntl on a descriptor this process owns
-    unsafe {
-        let flags = libc::fcntl(cava_fd, libc::F_GETFL);
-        libc::fcntl(cava_fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+    let cava_fd = cava_stdout.as_ref().map_or(-1, AsRawFd::as_raw_fd);
+    if cava_fd >= 0 {
+        // SAFETY: plain fcntl on a descriptor this process owns
+        unsafe {
+            let flags = libc::fcntl(cava_fd, libc::F_GETFL);
+            libc::fcntl(cava_fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+        }
     }
     // The one failure a person meets by running this outside a Wayland
     // session: a message, not a panic. cava dies with us on exit
@@ -1028,6 +970,9 @@ pub(crate) fn run() {
     let hypr_events = (on_fullscreen != FullscreenPolicy::Ignore).then(hypr::events).flatten();
     let covered = hypr_events.as_ref().and_then(|_| hypr::covered()).unwrap_or_default();
 
+    let pipewire_fd = native
+        .as_ref()
+        .map(|n: &crate::native::NativeAudio| n.capture.fd().unwrap_or_else(|e| fatal!("PipeWire: cannot watch its loop ({e})")));
     let mut simple_window = AppState {
         registry_state: RegistryState::new(&globals),
         output_state: OutputState::new(&globals, &qh),
@@ -1050,6 +995,7 @@ pub(crate) fn run() {
         height_vbo,
         bar_count,
         cava_pid,
+        native,
         gradient_colors_ssbo,
         palettes: palettes.into_boxed_slice(),
         palette_slots: palette_slots.into_boxed_slice(),
@@ -1159,15 +1105,37 @@ pub(crate) fn run() {
 
     // Every input is an event source, so the loop sleeps with no timeout and
     // an idle instance wakes only when something happens
-    loop_handle
-        .insert_source(
-            Generic::new(cava_stdout, Interest::READ, CalloopMode::Level),
-            |_, _, state: &mut AppState| {
-                state.on_cava();
+    if let Some(cava_stdout) = cava_stdout {
+        loop_handle
+            .insert_source(
+                Generic::new(cava_stdout, Interest::READ, CalloopMode::Level),
+                |_, _, state: &mut AppState| {
+                    state.on_cava();
+                    Ok(PostAction::Continue)
+                },
+            )
+            .unwrap();
+    }
+    if let Some(fd) = pipewire_fd {
+        loop_handle
+            .insert_source(Generic::new(fd, Interest::READ, CalloopMode::Level), |_, _, state: &mut AppState| {
+                state.on_pipewire();
                 Ok(PostAction::Continue)
-            },
-        )
-        .unwrap();
+            })
+            .unwrap();
+        // The native backend's frame clock, at the configured rate; cava
+        // keeps its own
+        let period = std::time::Duration::from_secs_f64(1.0 / f64::from(framerate.max(1)));
+        loop_handle
+            .insert_source(
+                smithay_client_toolkit::reexports::calloop::timer::Timer::from_duration(period),
+                move |_, (), state: &mut AppState| {
+                    state.on_audio_tick();
+                    smithay_client_toolkit::reexports::calloop::timer::TimeoutAction::ToDuration(period)
+                },
+            )
+            .unwrap();
+    }
     if let Some(fd) = simple_window.watch.as_ref().and_then(scheme::Watch::event_fd) {
         loop_handle
             .insert_source(Generic::new(fd, Interest::READ, CalloopMode::Level), |_, _, state| {
@@ -1218,4 +1186,91 @@ pub(crate) fn run() {
         // A compositor that restarts or crashes ends up here
         fatal!("the event loop stopped: {e}; the compositor connection most likely closed");
     }
+}
+
+/// Start cava with its config on stdin; its pid and the pipe it writes frames
+/// to
+fn spawn_cava(config: &Config, framerate: u32, cava_bars: u32) -> (u32, std::process::ChildStdout) {
+    let mut cava_output_config: HashMap<String, String> = HashMap::from([
+        ("method".into(), "raw".into()),
+        ("raw_target".into(), "/dev/stdout".into()),
+        ("bit_format".into(), "16bit".into()),
+    ]);
+    // Only forwarded when set, so leaving it out keeps cava's own default
+    // rather than this program quietly picking one
+    if let Some(ch) = &config.general.channels {
+        cava_output_config.insert("channels".into(), ch.clone());
+    }
+    if let Some(mo) = &config.general.mono_option {
+        cava_output_config.insert("mono_option".into(), mo.clone());
+    }
+    let cava_input_config = config.general.audio_source.as_ref().map(|src| {
+        HashMap::from([
+            ("method".into(), "pulse".into()),
+            ("source".into(), src.clone()),
+        ])
+    });
+    let cava_config = CavaConfig {
+        general: CavaGeneralConfig {
+            framerate,
+            bars: cava_bars,
+            autosens: config.general.autosens,
+            sensitivity: config.general.sensitivity,
+            sleep_timer: config.general.sleep_timer,
+        },
+        smoothing: CavaSmoothingConfig {
+            monstercat: config.smoothing.monstercat,
+            waves: config.smoothing.waves,
+            noise_reduction: config.smoothing.noise_reduction,
+        },
+        output: cava_output_config,
+        input: cava_input_config,
+    };
+    let string_cava_config: String = toml::to_string(&cava_config).unwrap();
+    // CAVAWALL_DEBUG=1 shows what cava is being told. cava is spawned
+    // with its config on stdin, so there is no file to inspect afterwards and
+    // no other way to check a setting actually got through
+    if debug_enabled() {
+        say!("cava config >>>\n{string_cava_config}<<<");
+    }
+    let mut cmd = Command::new("cava");
+    cmd.arg("-p").arg("/dev/stdin");
+    // Dies with us, however we die. Blocked writing into a full pipe, cava
+    // does not act on SIGTERM, and asleep it writes too rarely to learn the
+    // pipe is gone
+    // SAFETY: prctl is async-signal-safe and touches only the child
+    unsafe {
+        std::os::unix::process::CommandExt::pre_exec(&mut cmd, || {
+            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+            Ok(())
+        });
+    }
+    // A file, not a pipe: cava's messages are rare and a pipe nobody reads
+    // could fill and block it. Its reason for exiting ends up in our own
+    // message, which otherwise could only guess at one
+    let cava_err = std::fs::create_dir_all(cavawall::log::dir())
+        .and_then(|()| std::fs::File::create(cava_err_path()))
+        .map_or_else(|_| Stdio::inherit(), Stdio::from);
+    // The `Child` is taken apart rather than kept: exec keeps our PID and so
+    // keeps this child, so what must survive is the raw pid. reexec() kills and
+    // waits before replacing our image, and a cava that dies on its own takes
+    // draw() out through clear_and_exit(), after which init collects it
+    #[allow(clippy::zombie_processes)]
+    let cava_process = cmd
+        .stdout(Stdio::piped())
+        .stdin(Stdio::piped())
+        .stderr(cava_err)
+        .spawn()
+        .unwrap_or_else(|e| fatal!("cannot start cava ({e}); is it installed and on PATH?"));
+    // Captured before the field moves below leave `cava_process` partially moved
+    // and unusable as a whole. Needed so a re-exec can reap this child: see
+    // reexec(), where not having it leaked a zombie per bar-count change
+    let cava_pid = cava_process.id();
+    let mut cava_stdin = cava_process.stdin.expect("stdin was piped");
+    if let Err(e) = cava_stdin.write_all(string_cava_config.as_bytes()) {
+        fatal!("cava exited before reading its config ({e}); run cava by hand to see why");
+    }
+    drop(cava_stdin);
+    let cava_stdout = cava_process.stdout.expect("stdout was piped");
+    (cava_pid, cava_stdout)
 }

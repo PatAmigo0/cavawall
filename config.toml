@@ -50,6 +50,12 @@ background_color = { hex = "#000000", alpha = 0.0 }
 # stops writing, so a parked cavawall barely wakes; waking costs ~0.45s
 # (measured) before the first bar moves, so only long silences pay it.
 # sleep_timer = 5
+# Where the bars come from: "cava" (default) runs cava as a child process,
+# configured by [smoothing] and sensitivity/autosens/sleep_timer above.
+# "native" captures from PipeWire itself and analyses the audio on its own,
+# configured by [native] below; it needs no cava installed. audio_source,
+# channels and mono_option apply to both. Startup-only, like the bar count
+# audio_backend = "native"
 
 [bars]
 amount = 76
@@ -228,3 +234,25 @@ gradient_color_8 = '#f38ba8'
 # path = "~/.cache/current-wallpaper"   # for file (a file holding the path) or waypaper
 # command = ["my-wallpaper", "--current"]   # for command; run `cavawall refresh` after a change
 
+# Only read when audio_backend = "native". Every key is optional; the values
+# shown are the defaults.
+# [native]
+# # The frequencies the bars cover, Hz, spaced as pitch is heard (the Mel scale)
+# fmin = 30
+# fmax = 16000
+# # How far below the loudest recent band an empty bar sits, dB. The top
+# # follows the music, so a quiet track still fills the bars; a lower range
+# # makes the quiet parts of a track lower
+# range_db = 45
+# # Below this level, dB relative to full scale, the music counts as silence
+# # and the bars fall
+# gate_db = -70
+# # Each bar is a spring: stiffness is how fast it follows the music, damping
+# # 1 settles without overshoot and lower bounces
+# stiffness = 170
+# damping = 0.9
+# # How much of a bar's level spreads into its neighbours, 0 to 1
+# flow = 0.12
+# # Heights follow how loud a band sounds rather than its raw power, which
+# # the bass dominates
+# a_weighting = true

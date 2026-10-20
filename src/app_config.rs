@@ -19,6 +19,42 @@ pub struct Config {
     /// stops. Absent means errors and crashes, sent the automatic way
     pub notify: Option<NotifyConfig>,
     pub wallpaper: Option<WallpaperSource>,
+    /// Only read when `general.audio_backend` is `native`; absent means every
+    /// default
+    pub native: Option<NativeConfig>,
+}
+
+/// Where the bars come from. Startup-only: each backend sets up its own
+/// capture, so changing it re-execs
+#[derive(Serialize, Deserialize, Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AudioBackend {
+    /// cava as a child process, configured by `[smoothing]` and the cava keys
+    /// in `[general]`
+    #[default]
+    Cava,
+    /// cavawall's own PipeWire capture and analysis, configured by `[native]`
+    Native,
+}
+
+/// The native backend's analysis. Every key is optional
+#[derive(Serialize, Deserialize, Debug, Default, Clone, Copy, PartialEq)]
+pub struct NativeConfig {
+    /// Lowest and highest frequency the bars cover, Hz
+    pub fmin: Option<f32>,
+    pub fmax: Option<f32>,
+    /// Level in dB below full scale under which the music counts as silent
+    pub gate_db: Option<f32>,
+    /// How many dB below the loudest recent band an empty bar sits
+    pub range_db: Option<f32>,
+    /// How hard a bar is pulled toward its level: higher follows faster
+    pub stiffness: Option<f32>,
+    /// 1 settles without overshoot, below 1 bounces
+    pub damping: Option<f32>,
+    /// How much of a bar's level spreads into its neighbours, 0 to 1
+    pub flow: Option<f32>,
+    /// Weight levels by how loud they sound rather than their raw power
+    pub a_weighting: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -708,6 +744,8 @@ pub struct GeneralConfig {
     /// output switches (Bluetooth, speakers, headphones) without silently
     /// going dead
     pub audio_source: Option<String>,
+    /// `cava` (default) or `native`
+    pub audio_backend: Option<AudioBackend>,
     /// Seconds of silence before cava sleeps: it stops analysing and nearly
     /// stops writing, so this process parks with next to nothing to read.
     /// The cost is waking - measured 480ms from a tone to the first loud frame

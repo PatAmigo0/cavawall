@@ -37,6 +37,8 @@ wayland-client = "0.31.2"
 wayland-egl = "0.32.0"
 wayland-protocols = "0.32"
 wayland-protocols-wlr = "0.3.1"
+pipewire = { version = "0.10", features = ["v0_3_44"] }
+realfft = "3.5"
 
 # Upstream ships no release profile, so cargo defaults apply: no LTO, 16
 # codegen units, symbols left in. This is a long-lived background process on a
