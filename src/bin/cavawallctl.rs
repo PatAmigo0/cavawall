@@ -222,8 +222,9 @@ fn service(action: &ServiceAction, name: &str) -> Result<&'static str, String> {
         ServiceAction::Install => {
             if !session_is_systemd() {
                 return Err("this session does not activate graphical-session.target, so a user \
-                            service would never start; use the compositor's autostart instead \
-                            (Hyprland: exec-once = cavawall)"
+                            service would never start; start cavawall from the compositor's \
+                            autostart, or see \"Starting with the session\" in the README for a \
+                            session target without uwsm"
                     .to_owned());
             }
             let bin = cavawall::daemon().ok_or("no cavawall binary found")?;
