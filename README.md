@@ -33,8 +33,8 @@ any path of a curve, or no bars at all: a wallpaper can turn cavawall off.
   <img src="media/styles.gif" width="100%" alt="Rounded, segmented bars with the palette running along the row">
 </p>
 
-Rounded tips, LED-style blocks, colours up each bar or along the row, and
-mirrored bars that reach both ways from their line.
+Rounded tips, LED-style blocks, colours up each bar or along the row and
+mirrored bars that reach both ways from their line
 
 <p align="center">
   <img src="media/bars.gif" width="100%" alt="A thin mirrored row on the horizon of a sunset over water">
@@ -82,14 +82,14 @@ applies everything to the running visualiser in place.
 - Undo, redo, and a warning for unsaved changes. Settings shared by every
   wallpaper are written into `config.toml` with its comments kept
 
-### Live colours, any setup
+### Live Colours
 
 The gradient can follow a live palette and changes in place, with no restart:
 Caelestia's, pywal's, or any JSON file a theme tool writes. The wallpaper is
 followed the same way - from Caelestia, swww, waypaper, a file, or a command
 of your own - so each wallpaper gets its own figure whatever sets it.
 
-### Behaves on any setup
+### Copabilities
 
 - **Steps aside for fullscreen windows** (`on_fullscreen`): moves to a free
   monitor, or unmaps and suspends cava until one is free. Hyprland through its
@@ -101,7 +101,7 @@ of your own - so each wallpaper gets its own figure whatever sets it.
   and `cavawall log last-exit` why it last stopped, a crash included. Every
   failure a user can meet says what to do about it
 
-### Cheap to leave running
+### Perfomance
 
 cavawall is a **super performant** audio visualiser. It runs all day, so it
 is built to cost nothing when it can:
@@ -122,44 +122,6 @@ is built to cost nothing when it can:
   cache, so the compiler's memory is never held for the session.
 - **Event-driven**, one thread, no polling: cava's pipe, the control socket,
   config changes and Wayland all wake the same loop.
-
-#### Next to the alternatives
-
-Each visualiser drew plain bars on a 1920x1080 monitor at 60 fps (where it
-lets you set that) while pink noise with a moving volume played into a null
-sink, and every one of them was checked to be capturing that sink. Numbers
-are percent of one core and percent of GPU busy time (i915 counters from
-`/proc/<pid>/fdinfo`), averaged over three interleaved 20-second runs on an
-Intel Core Ultra (Meteor Lake) laptop under Hyprland. The visualiser's
-columns include any cava it runs.
-
-| | bars | CPU | GPU | Hyprland CPU | Hyprland GPU |
-|---|---|---|---|---|---|
-| **cavawall** | 20 | **5.7** | 1.5 | 10.9 | 9.6 |
-| | 200 | **6.2** | 1.5 | 10.4 | 9.5 |
-| [cava-bg](https://github.com/leriart/cava-bg) | 20 | 7.6 | 1.6 | 10.8 | 8.6 |
-| | 200 | 8.1 | 1.7 | 11.0 | 8.6 |
-| [vibe](https://github.com/TornaxO7/vibe) ¹ | 20 | 6.3 | 1.2 | 12.2 | 13.1 |
-| | 200 | 7.1 | 1.3 | 13.6 | 13.6 |
-| [WayVes](https://github.com/Roonil/WayVes) ² | 20 | 8.9 | 7.4 | 13.8 | 10.7 |
-| | 192 | 9.0 | 7.4 | 15.0 | 11.5 |
-| cava in a [kitty](https://sw.kovidgoyal.net/kitty/) background panel | 20 | 17.3 | 17.8 | 11.6 | 14.5 |
-| | 200 | 25.1 | 14.8 | 10.7 | 11.5 |
-| [Kwybars](https://github.com/naurissteins/Kwybars) ³ | 20 | 1.5 | 0 | 17.9 | 13.9 |
-| | 200 | 1.7 | 0 | 92.1 | 45.1 |
-| nothing running | | | | 3.9 | 2.6 |
-
-Counting Hyprland in, cavawall is the cheapest on CPU by a couple of points,
-and ten times bar count costs it half a point. On the GPU it sits level with
-cava-bg. About 2 points of cavawall's CPU are cava's analysis, and the rest
-is cavawall itself. Compositing is the biggest cost for everyone and it
-wanders by two points or so from run to run (the idle row ran anywhere from
-0.2 to 5.9), so a gap smaller than that in the Hyprland columns means nothing.
-
-¹ No framerate setting: it draws on every frame callback, 100 Hz on this
-monitor. ² The bar count follows the shader's cell width, so 10 px cells give
-192 bars. ³ Its own process shows no GPU time, and Hyprland's load climbs
-with the bar count instead.
   
 ## Installation
 
@@ -215,7 +177,7 @@ the reason the last instance stopped - a stop, a signal, an error, a crash -
 to `last-exit`, so a failure is still readable when it happened with no
 terminal attached.
 
-Stop it with `cavawall stop` or SIGTERM, never SIGKILL: the exit path clears
+Stop it with `cavawall stop` or SIGTERM. Don't use SIGKILL because the exit path clears
 the surface, and a hard kill can leave the last frame on the wallpaper.
 
 ### Starting with the session
